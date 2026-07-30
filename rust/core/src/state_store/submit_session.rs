@@ -74,8 +74,10 @@ use synor_utils::fingerprint::Fingerprint;
 
 use crate::prelude::*;
 use crate::state::db_schema::{
-    ChildExistenceInfo, StablePathEntryTrackingInfo, StablePathNodeType, StateKind,
+    ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo, StablePathEntryTrackingInfo,
+    StablePathNodeType, StateKind,
 };
+use crate::state::native_effect::{NativeEffectIntent, NativeVerificationPolicy};
 use crate::state::stable_path::{StableKey, StablePath, StablePathRef};
 use crate::state::stable_path_set::{ChildStablePathSet, StablePathSet};
 use crate::state::target_state_path::TargetStatePath;
@@ -184,6 +186,17 @@ pub struct PrecommitWritePlan {
     /// write-once (existing entries left untouched) so inspection can
     /// resolve provider-only segments without the app module loaded.
     pub segment_names: HashMap<Fingerprint, StableKey>,
+    /// Verified-sink effects that must exist durably before any external
+    /// action is applied. Written in the same transaction as the pending
+    /// tracking state.
+    pub native_effect_intents: Vec<NativeEffectIntent>,
+    /// Cleanup obligations that could not be applied because their provider
+    /// was unavailable. These retain ordinary tracking until a later verified
+    /// recovery completes them.
+    pub blocked_native_effect_intents: Vec<NativeEffectIntent>,
+    /// ID-sequence next values derived read-only during planning and written
+    /// only after reconciliation has fully succeeded.
+    pub id_sequence_updates: Vec<(StableKey, u64)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +367,11 @@ pub struct CommitPlan {
     /// happen atomically with the other commit writes. `None` skips
     /// existence reconciliation (e.g. `demote_component_only`).
     pub child_path_set: Option<Arc<ChildStablePathSet>>,
+    /// Effects whose postconditions were query-verified after sink apply.
+    /// Completion is atomic with the final tracking prune.
+    pub native_effect_ids_to_finalize: Vec<String>,
+    /// Prior provider-missing obligations discharged by this verified retry.
+    pub blocked_native_effect_ids_to_resolve: Vec<String>,
 }
 
 /// Callback the AppStore invokes inside its commit txn to run the
@@ -392,11 +410,10 @@ impl AppStore {
     /// AGENTS.md "LMDB write paths"). LMDB has no savepoints — to
     /// "abort" on PendingRetry, the body contributes no writes.
     ///
-    /// The callback is `Fn` (not `FnOnce`) for shape parity with
-    /// retry-capable backends; LMDB's batcher never retries the body,
-    /// so it's invoked at most once per call here. Captures consumed by
-    /// the body must be cloned inside the closure (typically a few
-    /// `Arc::clone`s).
+    /// The callback is `Fn` (not `FnOnce`) because LMDB's batcher retries
+    /// the entire body after `MDB_MAP_FULL`. Captures consumed by the body
+    /// must be cloned inside the closure, and externally visible side
+    /// effects must be published only after this method returns successfully.
     pub async fn precommit<T, F>(
         &self,
         component_path: &StablePath,
@@ -416,16 +433,36 @@ impl AppStore {
         let component_path_outer = component_path.clone();
         let callback = Arc::new(callback);
 
-        self.storage
+        let outcome = self
+            .storage
             .run_txn(move |wtxn: &mut WriteTxn<'_>| {
                 let app_store = app_store.clone();
                 let component_path = component_path_outer.clone();
                 let callback = Arc::clone(&callback);
                 Box::pin(async move {
                     let mut session = PrecommitSession::new(app_store.clone());
-                    let cb_result = callback(wtxn, &mut session).await?;
+                    let cb_result = match callback(wtxn, &mut session).await {
+                        Ok(result) => result,
+                        Err(error) => return Ok(Err(error)),
+                    };
                     match cb_result {
                         Some((plan, output)) => {
+                            // Native proof/lineage validation is the only
+                            // expected rejection point in the terminal apply.
+                            // Run it before this body's ordinary tracking
+                            // writes. Reconciliation errors above are returned
+                            // as a value so they cannot abort unrelated bodies
+                            // coalesced into the same LMDB transaction.
+                            app_store
+                                .apply_precommit_native_effects_in_txn(
+                                    wtxn,
+                                    &plan.native_effect_intents,
+                                    &plan.blocked_native_effect_intents,
+                                )
+                                .await?;
+                            for (key, next_id) in &plan.id_sequence_updates {
+                                app_store.write_id_sequence(wtxn, key, *next_id).await?;
+                            }
                             // Apply __target claims (the work deferred from
                             // `precommit_claim_targets`).
                             if let Some(paths) = session.paths_to_claim.take() {
@@ -450,13 +487,14 @@ impl AppStore {
                                     .write_target_segment_name_if_missing(wtxn, *fp, segment_key)
                                     .await?;
                             }
-                            Ok(Some(output))
+                            Ok(Ok(Some(output)))
                         }
-                        None => Ok(None),
+                        None => Ok(Ok(None)),
                     }
                 })
             })
-            .await
+            .await?;
+        outcome
     }
 
     /// Phase 4 success: open commit txn, apply finalized writes, invoke
@@ -534,6 +572,16 @@ impl AppStore {
                             .await?;
                     }
                     existence_reconciler(wtxn).await?;
+                    app_store
+                        .finalize_native_effects_in_txn(wtxn, &plan.native_effect_ids_to_finalize)
+                        .await?;
+                    app_store
+                        .resolve_blocked_native_effects_in_txn(
+                            wtxn,
+                            &plan.blocked_native_effect_ids_to_resolve,
+                            true,
+                        )
+                        .await?;
                     Ok(())
                 })
             })
@@ -580,6 +628,7 @@ pub async fn reconcile_child_existence<'a>(
     app_store: &AppStore,
     component_path: &StablePath,
     child_path_set: Option<&'a ChildStablePathSet>,
+    verification_policy: NativeVerificationPolicy,
 ) -> Result<()> {
     let mut queue: VecDeque<Level<'a>> = VecDeque::new();
     queue.push_back(Level {
@@ -587,7 +636,7 @@ pub async fn reconcile_child_existence<'a>(
         child_path_set,
     });
 
-    let mut buffered_tombstones: Vec<StablePath> = Vec::new();
+    let mut buffered_tombstones: Vec<(StablePath, Option<u64>)> = Vec::new();
     while let Some(level) = queue.pop_front() {
         let mut curr_iter = level
             .child_path_set
@@ -685,6 +734,7 @@ pub async fn reconcile_child_existence<'a>(
                                     curr_key,
                                     &ChildExistenceInfo {
                                         node_type: new_node_type,
+                                        generation: None,
                                     },
                                 )
                                 .await?;
@@ -692,10 +742,11 @@ pub async fn reconcile_child_existence<'a>(
 
                         if let StablePathSet::Directory(curr_dir_set) = curr_path_set {
                             if existing_info.node_type == StablePathNodeType::Component {
-                                buffered_tombstones.push(
+                                buffered_tombstones.push((
                                     relative_to(&level.path, component_path)?
                                         .concat_part(curr_key.clone()),
-                                );
+                                    existing_info.generation,
+                                ));
                             }
                             queue.push_back(Level {
                                 path: level.path.concat_part(curr_key.clone()),
@@ -723,7 +774,10 @@ pub async fn reconcile_child_existence<'a>(
                     wtxn,
                     &level.path,
                     stable_key,
-                    &ChildExistenceInfo { node_type },
+                    &ChildExistenceInfo {
+                        node_type,
+                        generation: None,
+                    },
                 )
                 .await?;
             if let StablePathSet::Directory(child_path_set) = path_set {
@@ -734,9 +788,15 @@ pub async fn reconcile_child_existence<'a>(
             }
         }
 
-        for relative_path in std::mem::take(&mut buffered_tombstones) {
+        for (relative_path, generation) in std::mem::take(&mut buffered_tombstones) {
+            let tombstone = ChildTombstoneInfo::new(
+                ChildTombstoneCause::ComponentOrphan,
+                None,
+                generation,
+                verification_policy,
+            )?;
             app_store
-                .write_tombstone(wtxn, component_path, &relative_path)
+                .write_tombstone(wtxn, component_path, &relative_path, &tombstone)
                 .await?;
         }
     }
@@ -754,7 +814,7 @@ fn del_child<'a>(
     parent_path: &StablePath,
     component_path: &StablePath,
     queue: &mut VecDeque<Level<'a>>,
-    buffered_tombstones: &mut Vec<StablePath>,
+    buffered_tombstones: &mut Vec<(StablePath, Option<u64>)>,
 ) -> Result<()> {
     match info.node_type {
         StablePathNodeType::Directory => {
@@ -764,8 +824,10 @@ fn del_child<'a>(
             });
         }
         StablePathNodeType::Component => {
-            buffered_tombstones
-                .push(relative_to(parent_path, component_path)?.concat_part(stable_key.clone()));
+            buffered_tombstones.push((
+                relative_to(parent_path, component_path)?.concat_part(stable_key.clone()),
+                info.generation,
+            ));
         }
     }
     Ok(())
@@ -780,4 +842,113 @@ fn node_type_for(path_set: &StablePathSet) -> StablePathNodeType {
 
 fn relative_to<'p>(path: &'p StablePath, base: &StablePath) -> Result<StablePathRef<'p>> {
     path.as_ref().strip_parent(base.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_store::test_support::make_test_store;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::{Notify, oneshot};
+
+    fn component_path(name: &str) -> StablePath {
+        StablePath(Arc::from(vec![StableKey::Str(Arc::from(name))]))
+    }
+
+    fn tracking_plan(path: &StablePath, bytes: &[u8]) -> PrecommitWritePlan {
+        PrecommitWritePlan {
+            self_path: path.clone(),
+            new_tracking_info: Some(bytes.to_vec()),
+            preempted_owner_updates: BTreeMap::new(),
+            segment_names: HashMap::new(),
+            native_effect_intents: vec![],
+            blocked_native_effect_intents: vec![],
+            id_sequence_updates: vec![],
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_precommit_does_not_rollback_coalesced_writer() {
+        let (store, _dir) = make_test_store().await;
+        let storage = store.storage.clone();
+
+        // Occupy the batcher's inline slot so both precommits below queue
+        // together in the next physical LMDB transaction.
+        let (started_tx, started_rx) = oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release = Arc::new(Notify::new());
+        let blocker = tokio::spawn({
+            let started_tx = Arc::clone(&started_tx);
+            let release = Arc::clone(&release);
+            async move {
+                storage
+                    .run_txn(move |_wtxn| {
+                        let started_tx = Arc::clone(&started_tx);
+                        let release = Arc::clone(&release);
+                        Box::pin(async move {
+                            if let Some(tx) = started_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            release.notified().await;
+                            Ok(())
+                        })
+                    })
+                    .await
+            }
+        });
+        started_rx.await.unwrap();
+
+        let committed_path = component_path("committed");
+        let rejected_path = component_path("rejected");
+        let committed_bytes = b"unrelated writer".to_vec();
+
+        let successful = tokio::spawn({
+            let store = store.clone();
+            let path = committed_path.clone();
+            let bytes = committed_bytes.clone();
+            async move {
+                store
+                    .precommit(&path.clone(), move |_wtxn, _session| {
+                        let plan = tracking_plan(&path, &bytes);
+                        Box::pin(async move { Ok(Some((plan, ()))) })
+                    })
+                    .await
+            }
+        });
+        // On a current-thread runtime, the task runs through Batcher::run and
+        // yields only after its body has entered the pending batch.
+        tokio::task::yield_now().await;
+
+        let rejected = tokio::spawn({
+            let store = store.clone();
+            let path = rejected_path.clone();
+            async move {
+                store
+                    .precommit(&path, |_wtxn, _session| {
+                        Box::pin(async move {
+                            Err::<Option<(PrecommitWritePlan, ())>, _>(client_error!(
+                                "planned reconcile rejection"
+                            ))
+                        })
+                    })
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+
+        release.notify_one();
+        blocker.await.unwrap().unwrap();
+
+        assert_eq!(successful.await.unwrap().unwrap(), Some(()));
+        let error = rejected.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("planned reconcile rejection"));
+        assert_eq!(
+            store.read_tracking_info(&committed_path).await.unwrap(),
+            Some(committed_bytes)
+        );
+        assert_eq!(
+            store.read_tracking_info(&rejected_path).await.unwrap(),
+            None
+        );
+    }
 }

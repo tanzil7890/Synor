@@ -11,9 +11,8 @@ import pathlib
 import tempfile
 import typing
 
-from dotenv import load_dotenv
-
 import synor as syn
+from dotenv import load_dotenv
 from synor import governance, retrieval, revocation
 
 if typing.TYPE_CHECKING:

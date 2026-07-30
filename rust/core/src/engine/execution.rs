@@ -14,10 +14,14 @@ use crate::engine::context::{
 use crate::engine::logic_registry;
 use crate::engine::profile::{EngineProfile, Persist};
 use crate::engine::target_state::{
-    ChildInvalidation, TargetActionSinkKeeper, TargetHandler, TargetStateProvider,
-    TargetStateProviderRegistry,
+    ChildInvalidation, EffectMode, SinkAssurance, TargetActionSinkKeeper, TargetHandler,
+    TargetStateProvider, TargetStateProviderRegistry,
 };
-use crate::state::stable_path::{StableKey, StablePath, StablePathRef};
+use crate::state::native_effect::{
+    NativeEffectCause, NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent,
+    NativeEffectOperation, NativeVerificationPolicy,
+};
+use crate::state::stable_path::{StableKey, StablePath};
 use crate::state::stable_path_set::ChildStablePathSet;
 use crate::state::target_state_path::{
     TargetStatePath, TargetStatePathWithProviderId, TargetStateProviderGeneration,
@@ -394,6 +398,8 @@ impl<Prof: EngineProfile> Committer<Prof> {
         fn_memos: FnMemoCache<Prof>,
         user_states: UserStateCache<Prof::FunctionData>,
         curr_version: Option<u64>,
+        native_effect_ids_to_finalize: Vec<String>,
+        blocked_native_effect_ids_to_resolve: Vec<String>,
     ) -> Result<()> {
         // Consume FnMemoCache once (drains each entry's RwLock to Pending).
         let fn_memo_plan = fn_memos.into_flush_plan()?;
@@ -436,6 +442,8 @@ impl<Prof: EngineProfile> Committer<Prof> {
             user_state_deletes: user_state_plan.deletes,
             user_state_clear_live,
             child_path_set: child_path_set.clone(),
+            native_effect_ids_to_finalize,
+            blocked_native_effect_ids_to_resolve,
         };
 
         // Reconciler closure: walks `child_path_set` against on-disk
@@ -445,6 +453,10 @@ impl<Prof: EngineProfile> Committer<Prof> {
         let app_store = self.app_store.clone();
         let component_path = self.component_path.clone();
         let cps = child_path_set;
+        let verification_policy = match self.component_ctx.effect_mode() {
+            EffectMode::Compatibility => NativeVerificationPolicy::LegacyUnverified,
+            EffectMode::Strict => NativeVerificationPolicy::QueryVerified,
+        };
         // `Fn` (not `FnOnce`) so a backend that re-runs its commit txn can
         // re-invoke it — clone the (cheap, `Arc`/owned) captures per call
         // rather than moving them into the future.
@@ -453,7 +465,14 @@ impl<Prof: EngineProfile> Committer<Prof> {
             let component_path = component_path.clone();
             let cps = cps.clone();
             Box::pin(async move {
-                reconcile_child_existence(wtxn, &app_store, &component_path, cps.as_deref()).await
+                reconcile_child_existence(
+                    wtxn,
+                    &app_store,
+                    &component_path,
+                    cps.as_deref(),
+                    verification_policy,
+                )
+                .await
             })
         });
 
@@ -476,7 +495,23 @@ impl<Prof: EngineProfile> Committer<Prof> {
         curr_version: Option<u64>,
     ) -> Result<(Option<Vec<u8>>, Vec<TargetStatePath>)> {
         if self.component_ctx.mode() == ComponentProcessingMode::Delete {
-            return Ok((None, Vec::new()));
+            let Some(tracking_info_bytes) = self
+                .app_store
+                .read_tracking_info(&self.component_path)
+                .await?
+            else {
+                return Ok((None, Vec::new()));
+            };
+            let tracking_info: db_schema::StablePathEntryTrackingInfo<'_> =
+                from_msgpack_slice(&tracking_info_bytes)?;
+            let owners_to_delete = tracking_info
+                .target_state_items
+                .keys()
+                .map(|path| path.target_state_path.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            return Ok((None, owners_to_delete));
         }
         let curr_version = curr_version
             .ok_or_else(|| internal_error!("curr_version is required for Build mode"))?;
@@ -570,17 +605,51 @@ impl<Prof: EngineProfile> Committer<Prof> {
         // fresh `RoTxn` internally.
         let tombstones = self.app_store.list_tombstones(&self.component_path).await?;
         let mut handles = Vec::with_capacity(tombstones.len());
-        for relative_path in tombstones {
+        for (relative_path, tombstone) in tombstones {
+            if tombstone.last_error_code.is_some()
+                && !self
+                    .app_store
+                    .retry_tombstone(&self.component_path, &relative_path, &tombstone)
+                    .await?
+            {
+                continue;
+            }
             let stable_path = self.component_path.concat(relative_path.as_ref());
             let component = self.component_ctx.component().get_child(stable_path);
+            let effect_mode =
+                if tombstone.verification_policy == NativeVerificationPolicy::QueryVerified {
+                    EffectMode::Strict
+                } else {
+                    self.component_ctx.effect_mode()
+                };
+            // Strict cleanup must fail the enclosing operation even when a
+            // foreground context has no handler or a user handler swallows
+            // the error. A legacy sink can reject before a native intent
+            // exists, so the final unresolved-count scan cannot recover this
+            // propagation signal on its own.
+            let cleanup_on_error = if effect_mode == EffectMode::Strict {
+                Some(Arc::new(|err| {
+                    Box::pin(async move { Err(err) })
+                        as futures::future::BoxFuture<'static, Result<()>>
+                }) as crate::engine::component::OnError)
+            } else {
+                cascaded_on_error.clone()
+            };
             let delete_ctx = component.new_processor_context_for_delete(
                 self.target_states_providers.clone(),
                 Some(&self.component_ctx),
                 self.component_ctx.processing_stats().clone(),
                 self.component_ctx.host_ctx().clone(),
-                cascaded_on_error.clone(),
+                cleanup_on_error,
+                effect_mode,
+                false,
+                tombstone.generation,
             );
-            handles.push(component.delete(delete_ctx, None)?);
+            handles.push((
+                component.delete(delete_ctx, None)?,
+                relative_path,
+                tombstone.generation,
+            ));
         }
         // Await each handle so descendant failures (when on_error
         // propagates) reach our own task_result, which the parent
@@ -589,17 +658,114 @@ impl<Prof: EngineProfile> Committer<Prof> {
         // remaining children continue running (orphan tasks), but their
         // tombstones survive for the next reconcile to retry. With
         // `on_error = None`, every handle resolves Ok regardless of
-        // child failures, so this is a no-op cost in that case.
-        for handle in handles {
-            handle.ready().await?;
+        // child failures, so this is a no-op cost in that case. Await every
+        // launched cleanup so one early error cannot hide later tombstone
+        // failure metadata.
+        let mut first_error = None;
+        for (handle, relative_path, generation) in handles {
+            if let Err(error) = handle.ready().await {
+                let mark_result = self
+                    .app_store
+                    .mark_tombstone_failed(
+                        &self.component_path,
+                        &relative_path,
+                        generation,
+                        NativeEffectErrorCode::CleanupFailed,
+                    )
+                    .await;
+                if let Err(mark_error) = mark_result {
+                    error!(
+                        "failed to persist child cleanup failure classification: {}",
+                        mark_error
+                    );
+                }
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
         }
         Ok(())
     }
 }
 
+fn native_effect_for_action<Prof: EngineProfile>(
+    sink: &TargetActionSinkKeeper<Prof>,
+    action: &Prof::TargetAction,
+    tracking_path: &TargetStatePathWithProviderId,
+    cause: NativeEffectCause,
+    require_verified: bool,
+) -> Result<Option<NativeEffectIntent>> {
+    let descriptor = sink.describe_effect(action)?;
+    let assurance = sink.assurance();
+    match (descriptor, assurance) {
+        (Some(descriptor), SinkAssurance::Verified(NativeVerificationPolicy::QueryVerified)) => {
+            let locator = Fingerprint::from(tracking_path)?;
+            Ok(Some(
+                NativeEffectIntent::new(
+                    descriptor,
+                    locator,
+                    NativeVerificationPolicy::QueryVerified,
+                )?
+                .with_cause(cause),
+            ))
+        }
+        (Some(_), SinkAssurance::Legacy)
+        | (Some(_), SinkAssurance::Verified(NativeVerificationPolicy::LegacyUnverified)) => {
+            client_bail!(
+                "target sink supplied a native effect descriptor without verified assurance"
+            )
+        }
+        (None, _) if require_verified => {
+            client_bail!("strict target cleanup requires a verified target action sink")
+        }
+        (None, _) => Ok(None),
+    }
+}
+
+fn blocked_native_effect(
+    tracking_path: &TargetStatePathWithProviderId,
+    generation: u64,
+    action_id: String,
+) -> Result<NativeEffectIntent> {
+    let tracking_locator = Fingerprint::from(tracking_path)?;
+    let descriptor = NativeEffectDescriptor {
+        action_id,
+        operation: NativeEffectOperation::Cleanup,
+        source_digest: "0".repeat(64),
+        source_generation: generation,
+        // No connector is available to supply a target digest. The all-zero
+        // sentinel means unknown; correlation uses the separate opaque
+        // tracking locator and generation.
+        target_locator_digest: "0".repeat(64),
+    };
+    Ok(NativeEffectIntent::new(
+        descriptor,
+        tracking_locator,
+        NativeVerificationPolicy::QueryVerified,
+    )?
+    .with_cause(NativeEffectCause::ProviderMissing))
+}
+
+fn cleanup_generation(
+    tracking_path: &TargetStatePathWithProviderId,
+    item: &db_schema::TargetStateInfoItem<'_>,
+) -> u64 {
+    item.provider_generation
+        .as_ref()
+        .map(|generation| generation.provider_id)
+        .or(tracking_path.provider_id)
+        .unwrap_or(1)
+        .max(1)
+}
+
 struct SinkInput<Prof: EngineProfile> {
     actions: Vec<Prof::TargetAction>,
     child_providers: Option<Vec<Option<TargetStateProvider<Prof>>>>,
+    native_effect_ids: Vec<String>,
+    blocked_effect_ids_to_resolve: Vec<String>,
 }
 
 impl<Prof: EngineProfile> Default for SinkInput<Prof> {
@@ -607,6 +773,8 @@ impl<Prof: EngineProfile> Default for SinkInput<Prof> {
         Self {
             actions: Vec::new(),
             child_providers: None,
+            native_effect_ids: Vec::new(),
+            blocked_effect_ids_to_resolve: Vec::new(),
         }
     }
 }
@@ -616,8 +784,16 @@ impl<Prof: EngineProfile> SinkInput<Prof> {
         &mut self,
         action: Prof::TargetAction,
         child_provider: Option<TargetStateProvider<Prof>>,
+        native_effect_id: Option<String>,
+        blocked_effect_id_to_resolve: Option<String>,
     ) {
         self.actions.push(action);
+        if let Some(action_id) = native_effect_id {
+            self.native_effect_ids.push(action_id);
+        }
+        if let Some(action_id) = blocked_effect_id_to_resolve {
+            self.blocked_effect_ids_to_resolve.push(action_id);
+        }
         if let Some(child_providers) = self.child_providers.as_mut() {
             child_providers.push(child_provider);
         } else if let Some(child_provider) = child_provider {
@@ -640,6 +816,8 @@ struct PreCommitOutput<Prof: EngineProfile> {
     /// precommit txn has committed. Buffered so a retry of the
     /// precommit doesn't trip the `OnceLock` "already set" guard.
     deferred_provider_generations: Vec<(TargetStateProvider<Prof>, TargetStateProviderGeneration)>,
+    /// Provider-missing obligations written by this precommit.
+    blocked_native_effect_ids: Vec<String>,
 }
 
 /// Either a completed pre_commit (with optional output for skip-cases) or a
@@ -674,6 +852,9 @@ struct PreCommitCaptures<Prof: EngineProfile> {
     target_states_providers: rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
     declared_target_states:
         Arc<tokio::sync::Mutex<BTreeMap<TargetStatePath, DeclaredTargetState<Prof>>>>,
+    effect_mode: EffectMode,
+    provider_missing_is_error: bool,
+    preview_planning: bool,
 }
 
 /// Engine-side reconcile body. Takes precomputed reads from
@@ -694,6 +875,9 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
     process_token: u128,
     stable_path: &StablePath,
     full_reprocess: bool,
+    effect_mode: EffectMode,
+    provider_missing_is_error: bool,
+    preview_planning: bool,
     processor_name: Option<&str>,
     contained_target_state_paths: &HashSet<TargetStatePath>,
     target_states_providers: &rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
@@ -707,6 +891,10 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
 ) -> Result<PreCommitOutcome<Prof>> {
     let mut actions_by_sinks = HashMap::<TargetActionSinkKeeper<Prof>, SinkInput<Prof>>::new();
     let mut processor_name_for_del: Option<String> = None;
+    let mut native_effect_intents = Vec::new();
+    let mut blocked_native_effect_intents = Vec::new();
+    let mut blocked_native_effect_ids = Vec::new();
+    let mut target_id_sequence_next = None;
 
     // Flatten `prior_owners` to drop `None` entries (paths with no
     // existing owner row). The detection sub-pass + Phase 1 preempt
@@ -886,9 +1074,45 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                 match bulk_target_owners.get(&target_state_path) {
                     Some(owner_path) if owner_path != stable_path => {
                         let old_owner_path = owner_path.clone();
-                        if let Some(cached_bytes) = old_tracking_cache.get(&old_owner_path) {
+                        if let Some(cached_bytes) = old_tracking_cache.get(&old_owner_path).cloned()
+                        {
+                            let stale_obligations = {
+                                let old_tracking: db_schema::StablePathEntryTrackingInfo<'_> =
+                                    from_msgpack_slice(&cached_bytes)?;
+                                old_tracking
+                                    .target_state_items
+                                    .iter()
+                                    .filter(|(key, _)| {
+                                        key.target_state_path == target_state_path
+                                            && **key != lookup_key
+                                    })
+                                    .map(|(key, item)| (key.clone(), cleanup_generation(key, item)))
+                                    .collect::<Vec<_>>()
+                            };
+                            for (stale_key, generation) in stale_obligations {
+                                let tracking_locator = Fingerprint::from(&stale_key)?;
+                                let active_native_effect = app_store
+                                    .active_native_effect_id_for_locator_read_only_in_txn(
+                                        wtxn,
+                                        tracking_locator,
+                                    )
+                                    .await?;
+                                let active_blocked_effect = app_store
+                                    .active_blocked_cleanup_action_id_read_only_in_txn(
+                                        wtxn,
+                                        tracking_locator,
+                                        generation,
+                                    )
+                                    .await?;
+                                if active_native_effect.is_some() || active_blocked_effect.is_some()
+                                {
+                                    client_bail!(
+                                        "ownership transfer cannot prune stale tracking with an unresolved verified target effect"
+                                    );
+                                }
+                            }
                             let mut old_tracking: db_schema::StablePathEntryTrackingInfo<'_> =
-                                from_msgpack_slice(cached_bytes)?;
+                                from_msgpack_slice(&cached_bytes)?;
                             let len_before = old_tracking.target_state_items.len();
                             // Look up the entry matching current provider_id.
                             // `into_owned()` releases the borrow on the cached
@@ -926,6 +1150,26 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                     _ => None,
                 }
             };
+
+            let tracking_locator = Fingerprint::from(&lookup_key)?;
+            let active_native_effect = app_store
+                .active_native_effect_id_for_locator_read_only_in_txn(wtxn, tracking_locator)
+                .await?;
+            if let Some(item) = prev_item.as_ref() {
+                let generation = cleanup_generation(&lookup_key, item);
+                let active_blocked_effect = app_store
+                    .active_blocked_cleanup_action_id_read_only_in_txn(
+                        wtxn,
+                        tracking_locator,
+                        generation,
+                    )
+                    .await?;
+                if active_blocked_effect.is_some() {
+                    client_bail!(
+                        "target cannot be re-declared while verified cleanup remains blocked"
+                    );
+                }
+            }
 
             // Compute prev_states and prev_may_be_missing uniformly from prev_item.
             // A `Deleted` entry among the states means the sink may be absent —
@@ -999,9 +1243,22 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                             // Inside the open precommit WTxn — use the
                             // in-txn variant to avoid nesting another
                             // batched WTxn on LMDB (would deadlock).
-                            let new_id = app_store
-                                .reserve_id_range_in_txn(wtxn, &TARGET_ID_KEY, 1)
-                                .await?;
+                            let new_id = if preview_planning {
+                                existing_gen.provider_id.saturating_add(1).max(1)
+                            } else {
+                                let next = match target_id_sequence_next {
+                                    Some(next) => next,
+                                    None => app_store
+                                        .peek_id_sequence_in_txn(wtxn, &TARGET_ID_KEY)
+                                        .await?
+                                        .unwrap_or(1),
+                                };
+                                target_id_sequence_next =
+                                    Some(next.checked_add(1).ok_or_else(|| {
+                                        internal_error!("target provider ID sequence overflow")
+                                    })?);
+                                next
+                            };
                             TargetStateProviderGeneration {
                                 provider_id: new_id,
                                 provider_schema_version: 0,
@@ -1017,15 +1274,49 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                     deferred_provider_generations.push((child_provider.clone(), new_gen));
                 }
 
-                actions_by_sinks
-                    .entry(recon_output.sink)
-                    .or_default()
-                    .add_action(recon_output.action, child_provider);
-
+                let native_effect = native_effect_for_action(
+                    &recon_output.sink,
+                    &recon_output.action,
+                    &lookup_key,
+                    NativeEffectCause::Explicit,
+                    active_native_effect.is_some()
+                        || (effect_mode == EffectMode::Strict
+                            && recon_output.child_invalidation
+                                == Some(ChildInvalidation::Destructive)),
+                )?;
+                let has_native_effect = native_effect.is_some();
                 let new_state_bytes = recon_output
                     .tracking_record
                     .map(|s| s.to_bytes())
                     .transpose()?;
+                if has_native_effect && prev_item.is_none() && new_state_bytes.is_none() {
+                    client_bail!(
+                        "a new verified target action must persist a tracking record for recovery"
+                    );
+                }
+                let native_effect_id = if let Some(intent) = native_effect {
+                    if preview_planning {
+                        if let Some(evidence_id) = active_native_effect.as_deref() {
+                            app_store
+                                .validate_native_effect_retry_in_txn(wtxn, evidence_id, &intent)
+                                .await?;
+                        }
+                        None
+                    } else {
+                        let intent = app_store
+                            .plan_native_effect_lineage_in_txn(wtxn, intent)
+                            .await?;
+                        let evidence_id = intent.evidence_id().to_owned();
+                        native_effect_intents.push(intent);
+                        Some(evidence_id)
+                    }
+                } else {
+                    None
+                };
+                actions_by_sinks
+                    .entry(recon_output.sink)
+                    .or_default()
+                    .add_action(recon_output.action, child_provider, native_effect_id, None);
 
                 if let Some(item) = &mut prev_item {
                     // Update existing item.
@@ -1056,10 +1347,17 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                         provider_generation,
                     });
                 }
-            } else if let Some(item) = &mut prev_item {
-                // No change — bump version on existing item.
-                for (version, _) in item.states.iter_mut() {
-                    *version = curr_version;
+            } else {
+                if active_native_effect.is_some() {
+                    client_bail!(
+                        "reconcile produced no action for an unresolved verified target effect"
+                    );
+                }
+                if let Some(item) = &mut prev_item {
+                    // No change — bump version on existing item.
+                    for (version, _) in item.states.iter_mut() {
+                        *version = curr_version;
+                    }
                 }
             }
 
@@ -1074,19 +1372,94 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
 
         // Phase 2: Delete + Contained — iterate remaining tracked entries not matched above.
         for (target_state_path_with_pid, item) in tracking_info.target_state_items.iter_mut() {
-            // Skip stale entries — commit() will prune them via version retention.
-            let parent_provider_gen = target_states_providers
+            let generation = cleanup_generation(target_state_path_with_pid, item);
+            let tracking_locator = Fingerprint::from(target_state_path_with_pid)?;
+            let active_native_effect = app_store
+                .active_native_effect_id_for_locator_read_only_in_txn(wtxn, tracking_locator)
+                .await?;
+            let active_blocked_effect = app_store
+                .active_blocked_cleanup_action_id_read_only_in_txn(
+                    wtxn,
+                    tracking_locator,
+                    generation,
+                )
+                .await?;
+            // A missing provider is a durable cleanup obligation, not evidence
+            // that the target disappeared. Retain the tracked item at the
+            // current version and record only opaque metadata.
+            let Some(target_states_provider) = target_states_providers
                 .get(target_state_path_with_pid.target_state_path.provider_path())
-                .and_then(|p| p.provider_generation());
+            else {
+                if active_native_effect.is_some() {
+                    client_bail!(
+                        "provider is unavailable for an unresolved verified target effect"
+                    );
+                }
+                if preview_planning {
+                    if effect_mode == EffectMode::Strict
+                        || provider_missing_is_error
+                        || active_blocked_effect.is_some()
+                    {
+                        client_bail!(
+                            "preview cannot plan verified cleanup while its target provider is unavailable"
+                        );
+                    }
+                    for (version, _) in item.states.iter_mut() {
+                        *version = curr_version;
+                    }
+                    continue;
+                }
+                if effect_mode == EffectMode::Compatibility && !provider_missing_is_error {
+                    // Preserve the legacy public App.update behavior. Native
+                    // fail-closed obligations are activated only by the
+                    // runtime-controlled strict effect policy. Once strict
+                    // mode has created a blocker, however, compatibility mode
+                    // must retain its tracking rather than erase the only
+                    // recovery locator.
+                    if active_blocked_effect.is_some() {
+                        for (version, _) in item.states.iter_mut() {
+                            *version = curr_version;
+                        }
+                    }
+                    continue;
+                }
+                let blocked_effect_id = app_store
+                    .plan_blocked_cleanup_action_id_in_txn(wtxn, tracking_locator, generation)
+                    .await?;
+                let blocked = blocked_native_effect(
+                    target_state_path_with_pid,
+                    generation,
+                    blocked_effect_id,
+                )?;
+                blocked_native_effect_ids.push(blocked.descriptor.action_id.clone());
+                blocked_native_effect_intents.push(blocked);
+                for (version, _) in item.states.iter_mut() {
+                    *version = curr_version;
+                }
+                continue;
+            };
+
+            // Skip stale entries — commit() will prune them via version retention.
+            let parent_provider_gen = target_states_provider.provider_generation();
             if target_state_path_with_pid.provider_id.unwrap_or(0)
                 != parent_provider_gen.map(|pg| pg.provider_id).unwrap_or(0)
             {
+                if active_native_effect.is_some() || active_blocked_effect.is_some() {
+                    client_bail!(
+                        "stale provider generation still owns an unresolved verified target effect"
+                    );
+                }
                 continue;
             }
 
             // Contained entries: still referenced by a parent, just bump version.
             if contained_target_state_paths.contains(&target_state_path_with_pid.target_state_path)
             {
+                if active_native_effect.is_some() || active_blocked_effect.is_some() {
+                    client_bail!(
+                        "target remains contained while a verified target effect is unresolved"
+                    );
+                }
                 for (version, _) in item.states.iter_mut() {
                     *version = curr_version;
                 }
@@ -1094,15 +1467,6 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
             }
 
             // Delete: target state is no longer declared.
-            let Some(target_states_provider) = target_states_providers
-                .get(target_state_path_with_pid.target_state_path.provider_path())
-            else {
-                trace!(
-                    "skip deleting target states with path {target_state_path_with_pid} in {} because target states provider not found",
-                    stable_path
-                );
-                continue;
-            };
             let target_state_key: StableKey = storekey::decode(item.key.as_ref())?;
             let schema_version_mismatch = match parent_provider_gen {
                 Some(pg) => item.provider_schema_version != pg.provider_schema_version,
@@ -1129,10 +1493,45 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                 })?
                 .reconcile(target_state_key, None, &prev_states, prev_may_be_missing)?;
             if let Some(recon_output) = recon_output {
+                let blocked_effect_id = active_blocked_effect;
+                let recovering_blocked_effect = blocked_effect_id.is_some();
+                let native_effect = native_effect_for_action(
+                    &recon_output.sink,
+                    &recon_output.action,
+                    target_state_path_with_pid,
+                    NativeEffectCause::OrphanedComponent,
+                    effect_mode == EffectMode::Strict
+                        || recovering_blocked_effect
+                        || active_native_effect.is_some(),
+                )?;
+                let native_effect_id = if let Some(intent) = native_effect {
+                    if preview_planning {
+                        if let Some(evidence_id) = active_native_effect.as_deref() {
+                            app_store
+                                .validate_native_effect_retry_in_txn(wtxn, evidence_id, &intent)
+                                .await?;
+                        }
+                        None
+                    } else {
+                        let intent = app_store
+                            .plan_native_effect_lineage_in_txn(wtxn, intent)
+                            .await?;
+                        let evidence_id = intent.evidence_id().to_owned();
+                        native_effect_intents.push(intent);
+                        Some(evidence_id)
+                    }
+                } else {
+                    None
+                };
                 actions_by_sinks
                     .entry(recon_output.sink)
                     .or_default()
-                    .add_action(recon_output.action, None);
+                    .add_action(
+                        recon_output.action,
+                        None,
+                        native_effect_id,
+                        blocked_effect_id,
+                    );
                 item.states.push((
                     curr_version,
                     match recon_output
@@ -1147,6 +1546,14 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
                     },
                 ));
             } else {
+                if active_native_effect.is_some() {
+                    client_bail!(
+                        "provider recovery could not reproduce an unresolved verified target effect"
+                    );
+                }
+                if active_blocked_effect.is_some() {
+                    client_bail!("provider recovery could not produce a verified cleanup action");
+                }
                 for (version, _) in item.states.iter_mut() {
                     *version = curr_version;
                 }
@@ -1156,6 +1563,21 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
         // Insert/re-insert items collected during Phase 1.
         for (path_with_pid, item) in items_to_insert {
             tracking_info.target_state_items.insert(path_with_pid, item);
+        }
+
+        let mut ordinary_lineages = HashSet::new();
+        for intent in &native_effect_intents {
+            if !ordinary_lineages.insert(intent.tracking_locator) {
+                internal_bail!("precommit planned duplicate ordinary native effect lineages");
+            }
+        }
+        let mut blocked_lineages = HashSet::new();
+        for intent in &blocked_native_effect_intents {
+            if !blocked_lineages
+                .insert((intent.tracking_locator, intent.descriptor.source_generation))
+            {
+                internal_bail!("precommit planned duplicate native cleanup obligations");
+            }
         }
 
         // Mark the component as in-flight if we queued any sink action; else
@@ -1201,12 +1623,18 @@ async fn pre_commit<'tracking, Prof: EngineProfile>(
             actions_by_sinks,
             processor_name_for_del,
             deferred_provider_generations,
+            blocked_native_effect_ids,
         },
         write_plan: PrecommitWritePlan {
             self_path: stable_path.clone(),
             new_tracking_info: new_tracking_info_bytes,
             preempted_owner_updates,
             segment_names,
+            native_effect_intents,
+            blocked_native_effect_intents,
+            id_sequence_updates: target_id_sequence_next
+                .map(|next_id| vec![(TARGET_ID_KEY.clone(), next_id)])
+                .unwrap_or_default(),
         },
     })
 }
@@ -1222,6 +1650,7 @@ pub(crate) async fn submit<Prof: EngineProfile>(
     processor: Option<&Prof::ComponentProc>,
     collect_processor_name_name_for_del: impl FnOnce(&str) -> (),
 ) -> Result<SubmitOutput<Prof>> {
+    comp_ctx.assert_live_generation_current()?;
     let processor_name = processor.map(|p| p.processor_info().name.as_str());
 
     let mut built_target_states_providers: Option<TargetStateProviderRegistry<Prof>> = None;
@@ -1273,6 +1702,8 @@ pub(crate) async fn submit<Prof: EngineProfile>(
 
     let comp_mode = comp_ctx.mode();
     let full_reprocess = comp_ctx.full_reprocess();
+    let effect_mode = comp_ctx.effect_mode();
+    let provider_missing_is_error = comp_ctx.provider_missing_is_error();
     let process_token = comp_ctx.app_ctx().env().process_token();
 
     let mut pending_fulfillments: Vec<(TargetStateProvider<Prof>, Prof::TargetHdl)> = Vec::new();
@@ -1302,7 +1733,8 @@ pub(crate) async fn submit<Prof: EngineProfile>(
             .preview_collector()
             .cloned()
             .ok_or_else(|| internal_error!("preview mode requires a preview collector"))?;
-        let preview_result: Arc<Mutex<Option<(bool, Option<String>)>>> = Arc::new(Mutex::new(None));
+        let preview_result: Arc<Mutex<Option<(bool, Option<String>, Vec<Prof::TargetAction>)>>> =
+            Arc::new(Mutex::new(None));
 
         let contained_target_state_paths = Arc::new(contained_target_state_paths);
         let declared_target_states = Arc::new(tokio::sync::Mutex::new(declared_target_states));
@@ -1312,7 +1744,6 @@ pub(crate) async fn submit<Prof: EngineProfile>(
         let mut pending_attempt: u32 = 0;
         loop {
             let preview_result_capture = preview_result.clone();
-            let collector = collector.clone();
             let captures: Arc<PreCommitCaptures<Prof>> = Arc::new(PreCommitCaptures {
                 app_store: app_store.clone(),
                 stable_path: stable_path.clone(),
@@ -1320,14 +1751,20 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                 contained_target_state_paths: Arc::clone(&contained_target_state_paths),
                 target_states_providers: target_states_providers.clone(),
                 declared_target_states: Arc::clone(&declared_target_states),
+                effect_mode,
+                provider_missing_is_error,
+                preview_planning: true,
             });
 
             app_store
                 .precommit(&stable_path, move |wtxn, session| {
                     let c = Arc::clone(&captures);
                     let preview_result_capture = preview_result_capture.clone();
-                    let collector = collector.clone();
                     Box::pin(async move {
+                        // The LMDB batcher can replay this body after
+                        // MDB_MAP_FULL. Keep only the current attempt's
+                        // in-memory result and publish it after commit.
+                        *preview_result_capture.lock().unwrap() = None;
                         let declared_paths_all: Vec<TargetStatePath> = {
                             let guard = c.declared_target_states.lock().await;
                             guard.keys().cloned().collect()
@@ -1380,6 +1817,9 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                             process_token,
                             &c.stable_path,
                             full_reprocess,
+                            c.effect_mode,
+                            c.provider_missing_is_error,
+                            c.preview_planning,
                             c.processor_name.as_deref(),
                             &c.contained_target_state_paths,
                             &c.target_states_providers,
@@ -1403,12 +1843,16 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                                 }
                                 let previously_exists = output.previously_exists;
                                 let processor_name_for_del = output.processor_name_for_del;
-                                let mut guard = collector.lock().unwrap();
+                                let mut actions = Vec::new();
                                 for (_sink, input) in output.actions_by_sinks {
-                                    guard.extend(input.actions);
+                                    actions.extend(input.actions);
                                 }
                                 *preview_result_capture.lock().unwrap() =
-                                    Some((previously_exists, processor_name_for_del));
+                                    Some((
+                                        previously_exists,
+                                        processor_name_for_del,
+                                        actions,
+                                    ));
                                 None::<(PrecommitWritePlan, PreCommitOutput<Prof>)>
                             }
                             PreCommitOutcome::PendingRetry => None,
@@ -1433,11 +1877,12 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                 std::cmp::min(pending_backoff * 2, std::time::Duration::from_millis(200));
         }
 
-        let (previously_exists, processor_name_for_del) = preview_result
+        let (previously_exists, processor_name_for_del, actions) = preview_result
             .lock()
             .unwrap()
             .take()
             .ok_or_else(|| internal_error!("preview pre_commit produced no output"))?;
+        collector.lock().unwrap().extend(actions);
         if let Some(ref name) = processor_name_for_del {
             collect_processor_name_name_for_del(name);
         }
@@ -1508,6 +1953,9 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                 contained_target_state_paths: Arc::clone(&contained_target_state_paths),
                 target_states_providers: target_states_providers.clone(),
                 declared_target_states: Arc::clone(&declared_target_states),
+                effect_mode,
+                provider_missing_is_error,
+                preview_planning: false,
             });
 
             // The eager `__cex` upsert (Phase 1) ran earlier from
@@ -1576,6 +2024,9 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                             process_token,
                             &c.stable_path,
                             full_reprocess,
+                            c.effect_mode,
+                            c.provider_missing_is_error,
+                            c.preview_planning,
                             c.processor_name.as_deref(),
                             &c.contained_target_state_paths,
                             &c.target_states_providers,
@@ -1624,6 +2075,7 @@ pub(crate) async fn submit<Prof: EngineProfile>(
     let curr_version = pre_commit_out.curr_version;
     let touched_previous_states = pre_commit_out.previously_exists;
     let actions_by_sinks = pre_commit_out.actions_by_sinks;
+    let blocked_native_effect_ids = pre_commit_out.blocked_native_effect_ids;
 
     // Apply deferred provider-generation updates now that precommit
     // has committed — past this point no retry can roll back.
@@ -1632,21 +2084,43 @@ pub(crate) async fn submit<Prof: EngineProfile>(
     for (child_provider, new_gen) in pre_commit_out.deferred_provider_generations {
         child_provider.set_provider_generation(new_gen)?;
     }
+    if !blocked_native_effect_ids.is_empty()
+        && (effect_mode == EffectMode::Strict || comp_mode == ComponentProcessingMode::Delete)
+    {
+        cleanup_pending_token(comp_ctx, process_token).await;
+        client_bail!("target cleanup is blocked because its provider is unavailable");
+    }
+    if let Err(error) = comp_ctx.assert_live_generation_current() {
+        cleanup_pending_token(comp_ctx, process_token).await;
+        return Err(error);
+    }
 
     // Sink apply. On failure we clear the stage marker so a
     // subsequent precommit doesn't see a stale token from this
     // attempt.
-    let sink_result: Result<()> = async {
-        let host_runtime_ctx = comp_ctx.app_ctx().env().host_runtime_ctx();
-        for (sink, input) in actions_by_sinks {
+    let host_runtime_ctx = comp_ctx.app_ctx().env().host_runtime_ctx();
+    let mut native_effect_ids_to_finalize = Vec::new();
+    let mut blocked_native_effect_ids_to_resolve = Vec::new();
+    for (sink, input) in actions_by_sinks {
+        if let Err(error) = comp_ctx.assert_live_generation_current() {
+            cleanup_pending_token(comp_ctx, process_token).await;
+            return Err(error);
+        }
+        let SinkInput {
+            actions,
+            child_providers,
+            native_effect_ids,
+            blocked_effect_ids_to_resolve,
+        } = input;
+        let sink_result: Result<()> = async {
             let handlers = sink
                 .apply(
                     host_runtime_ctx,
                     Arc::clone(comp_ctx.host_ctx()),
-                    input.actions,
+                    actions,
                 )
                 .await?;
-            if let Some(child_providers) = input.child_providers {
+            if let Some(child_providers) = child_providers {
                 let Some(handlers) = handlers else {
                     client_bail!("expect child providers returned by Sink");
                 };
@@ -1685,21 +2159,53 @@ pub(crate) async fn submit<Prof: EngineProfile>(
                     );
                 }
             }
+            Ok(())
         }
-        Ok(())
-    }
-    .await;
+        .await;
 
-    if let Err(e) = sink_result {
-        cleanup_pending_token(comp_ctx, process_token).await;
-        return Err(e);
+        if let Err(error) = sink_result {
+            if let Err(mark_error) = app_store
+                .mark_native_effects_failed(
+                    &native_effect_ids,
+                    NativeEffectErrorCode::SinkApplyFailed,
+                )
+                .await
+            {
+                error!(
+                    "failed to persist native target-effect failure classification: {}",
+                    mark_error
+                );
+            }
+            cleanup_pending_token(comp_ctx, process_token).await;
+            return Err(error);
+        }
+        if let Err(error) = app_store
+            .mark_native_effects_verified(&native_effect_ids)
+            .await
+        {
+            cleanup_pending_token(comp_ctx, process_token).await;
+            return Err(error);
+        }
+        native_effect_ids_to_finalize.extend(native_effect_ids);
+        blocked_native_effect_ids_to_resolve.extend(blocked_effect_ids_to_resolve);
     }
 
     // Commit. `AppStore::commit` is a normal trait method — no
     // session handoff needed.
+    if let Err(error) = comp_ctx.assert_live_generation_current() {
+        cleanup_pending_token(comp_ctx, process_token).await;
+        return Err(error);
+    }
     let committer = Committer::new(comp_ctx, &target_states_providers, demote_component_only)?;
     if let Err(e) = committer
-        .commit(child_path_set, fn_memos, user_states, curr_version)
+        .commit(
+            child_path_set,
+            fn_memos,
+            user_states,
+            curr_version,
+            native_effect_ids_to_finalize,
+            blocked_native_effect_ids_to_resolve,
+        )
         .await
     {
         // The commit txn either committed or rolled back before
@@ -1828,26 +2334,21 @@ pub(crate) async fn cleanup_tombstone<Prof: EngineProfile>(
         .as_ref()
         .strip_parent(owner_path.as_ref())?
         .into();
+    let expected_generation = match comp_ctx.processing_state() {
+        ComponentProcessingAction::Delete(delete_context) => delete_context.tombstone_generation,
+        ComponentProcessingAction::Build(_) => {
+            internal_bail!("tombstone cleanup requires a delete context")
+        }
+    };
     // Routes through the single-writer batcher. Per-component
     // exclusivity rules out races on the same tombstone; GC's
     // eventual-consistency tolerates a missed sweep.
     comp_ctx
         .app_ctx()
         .app_store()
-        .cleanup_tombstone(&owner_path, &relative_path)
-        .await
-}
-
-pub(crate) async fn ensure_path_node_type(
-    app_store: &AppStore,
-    wtxn: &mut WriteTxn<'_>,
-    parent_path: StablePathRef<'_>,
-    key: &StableKey,
-    target_node_type: db_schema::StablePathNodeType,
-) -> Result<()> {
-    app_store
-        .ensure_path_node_type(wtxn, parent_path, key, target_node_type)
-        .await
+        .cleanup_tombstone(&owner_path, &relative_path, expected_generation)
+        .await?;
+    Ok(())
 }
 
 /// Eager existence upsert at the start of Build. Writes the component's own
@@ -1867,6 +2368,7 @@ pub(crate) async fn ensure_path_node_type(
 pub(crate) async fn eager_existence_upsert<Prof: EngineProfile>(
     comp_ctx: &ComponentProcessorContext<Prof>,
 ) -> Result<()> {
+    comp_ctx.assert_live_generation_current()?;
     let path = comp_ctx.stable_path();
     if path.is_empty() {
         return Ok(());
@@ -1884,7 +2386,7 @@ pub(crate) async fn eager_existence_upsert<Prof: EngineProfile>(
     comp_ctx
         .app_ctx()
         .app_store()
-        .ensure_existence_chain(path, &known_parent_path)
+        .ensure_existence_chain(path, &known_parent_path, comp_ctx.live_generation())
         .await
 }
 

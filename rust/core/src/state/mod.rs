@@ -1,3 +1,4 @@
+pub mod native_effect;
 pub mod stable_path;
 pub mod target_state_path;
 

@@ -6,12 +6,13 @@ use crate::prelude::*;
 use crate::engine::environment::Environment;
 use crate::engine::{app::App, profile::EngineProfile};
 use crate::state::db_schema::{self, ChildExistenceInfo, DbEntryKey, StablePathEntryKey};
+use crate::state::native_effect::NativeEffectCounts;
 use crate::state::stable_path::{StableKey, StablePath, StablePathRef};
 use crate::state::target_state_path::{TargetStatePath, TargetStatePathWithProviderId};
 use crate::state_store::{AppStore, Storage};
+use futures::stream::{Stream, StreamExt};
 use synor_utils::deser::from_msgpack_slice;
 use synor_utils::fingerprint::Fingerprint;
-use futures::stream::{Stream, StreamExt};
 use tokio_stream::wrappers::ReceiverStream;
 
 /// Represents a stable path with metadata (e.g. node type); more properties may be added.
@@ -56,6 +57,31 @@ fn receiver_to_stable_path_info_stream(
 
 pub async fn list_app_names<Prof: EngineProfile>(env: &Environment<Prof>) -> Result<Vec<String>> {
     env.storage().list_app_names().await
+}
+
+/// Privacy-safe native effect status totals for a live app.
+pub async fn native_effect_counts<Prof: EngineProfile>(
+    app: &App<Prof>,
+) -> Result<NativeEffectCounts> {
+    native_effect_counts_from_store(app.app_ctx().app_store()).await
+}
+
+async fn native_effect_counts_from_store(store: &AppStore) -> Result<NativeEffectCounts> {
+    store.native_effect_counts().await
+}
+
+/// Privacy-safe native effect status totals for an app opened by name.
+///
+/// Returns `None` when the app database does not exist. Existing pre-feature
+/// databases return zero counts.
+pub async fn native_effect_counts_by_name<Prof: EngineProfile>(
+    env: &Environment<Prof>,
+    app_name: &str,
+) -> Result<Option<NativeEffectCounts>> {
+    let Some(store) = env.storage().open_app_store_by_name(app_name).await? else {
+        return Ok(None);
+    };
+    native_effect_counts_from_store(&store).await.map(Some)
 }
 
 /// Version and state label for a single target state entry.
@@ -752,10 +778,13 @@ pub async fn iter_target_states_by_name<Prof: EngineProfile>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::native_effect::{
+        NativeEffectDescriptor, NativeEffectIntent, NativeEffectOperation, NativeVerificationPolicy,
+    };
     use crate::state_store::test_support::make_test_store;
-    use synor_utils::fingerprint::Fingerprint;
     use std::borrow::Cow;
     use std::sync::Arc;
+    use synor_utils::fingerprint::Fingerprint;
 
     fn comp_path(name: &str) -> StablePath {
         StablePath(Arc::from(vec![StableKey::Str(Arc::from(name))]))
@@ -830,6 +859,48 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_effect_inspection_exposes_counts_only() {
+        let (store, _dir) = make_test_store().await;
+        assert_eq!(
+            native_effect_counts_from_store(&store).await.unwrap(),
+            NativeEffectCounts::default()
+        );
+        let intent = NativeEffectIntent::new(
+            NativeEffectDescriptor {
+                action_id: "delete:inspect-count".to_owned(),
+                operation: NativeEffectOperation::Delete,
+                source_digest: "a".repeat(64),
+                source_generation: 1,
+                target_locator_digest: "b".repeat(64),
+            },
+            Fingerprint::from_bytes(b"inspect-count"),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let intent = intent.clone();
+                Box::pin(async move {
+                    store
+                        .upsert_native_effect_intent_in_txn(wtxn, &intent)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let counts = native_effect_counts_from_store(&store).await.unwrap();
+        assert_eq!(counts.pending, 1);
+        assert_eq!(counts.verified, 0);
+        assert_eq!(counts.failed, 0);
+        assert_eq!(counts.blocked, 0);
+        assert_eq!(counts.completed, 0);
     }
 
     #[tokio::test]

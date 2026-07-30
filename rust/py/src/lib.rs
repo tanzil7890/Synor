@@ -77,6 +77,7 @@ fn core_module(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()>
         target_state::register_root_target_states_provider,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(target_state::unwrap_target_action, m)?)?;
 
     m.add_class::<environment::PyEnvironment>()?;
 
@@ -88,6 +89,8 @@ fn core_module(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()>
         m
     )?)?;
     m.add_function(wrap_pyfunction!(inspect::list_app_names, m)?)?;
+    m.add_function(wrap_pyfunction!(inspect::native_effect_counts, m)?)?;
+    m.add_function(wrap_pyfunction!(inspect::native_effect_counts_by_name, m)?)?;
     m.add_function(wrap_pyfunction!(inspect::get_stable_path_detail, m)?)?;
     m.add_function(wrap_pyfunction!(
         inspect::get_stable_path_detail_by_name,
@@ -103,6 +106,7 @@ fn core_module(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()>
 
     m.add_class::<inspect::PyStablePathNodeType>()?;
     m.add_class::<inspect::PyStablePathInfo>()?;
+    m.add_class::<inspect::PyNativeEffectCounts>()?;
     m.add_class::<inspect::PyStablePathInfoAsyncIterator>()?;
     m.add_class::<inspect::PyTargetStateEntryAsyncIterator>()?;
     m.add_class::<inspect::PyTargetStateVersion>()?;

@@ -1,11 +1,14 @@
 use std::mem::ManuallyDrop;
 use std::sync::{LazyLock, Mutex};
 
-use synor_core::engine::target_state::{
-    ChildInvalidation, ChildTargetDef, TargetActionSink, TargetActionSinkKeeper, TargetHandler,
-    TargetReconcileOutput, TargetStateProvider, TargetStateProviderRegistry,
-};
 use pyo3::types::{PyList, PySequence, PyTuple};
+use synor_core::engine::target_state::{
+    ChildInvalidation, ChildTargetDef, SinkAssurance, TargetActionSink, TargetActionSinkKeeper,
+    TargetHandler, TargetReconcileOutput, TargetStateProvider, TargetStateProviderRegistry,
+};
+use synor_core::state::native_effect::{
+    NativeEffectDescriptor, NativeEffectOperation, NativeVerificationPolicy,
+};
 
 use crate::context::{PyComponentProcessorContext, PyFnCallContext};
 use crate::prelude::*;
@@ -21,8 +24,24 @@ pub struct PyTargetActionSink {
     keeper: TargetActionSinkKeeper<PyEngineProfile>,
 }
 
+/// Engine-only envelope binding one raw action to its native precommit proof.
+/// It is intentionally not registered in the Python module and has no constructor.
+#[pyclass(frozen)]
+struct PyBoundVerifiedTargetAction {
+    action: Py<PyAny>,
+    descriptor: Mutex<PyBoundDescriptorState>,
+}
+
+enum PyBoundDescriptorState {
+    Unbound,
+    Binding,
+    Bound(NativeEffectDescriptor),
+    Failed,
+}
+
 pub struct PyTargetActionSinkInner {
     callback: PyCallback,
+    describe_callback: Option<Arc<Py<PyAny>>>,
 }
 
 #[pymethods]
@@ -31,6 +50,7 @@ impl PyTargetActionSink {
     pub fn new_sync(callback: Py<PyAny>) -> Self {
         let inner = PyTargetActionSinkInner {
             callback: PyCallback::Sync(Arc::new(callback)),
+            describe_callback: None,
         };
         Self {
             keeper: TargetActionSinkKeeper::new(inner),
@@ -41,10 +61,41 @@ impl PyTargetActionSink {
     pub fn new_async(callback: Py<PyAny>) -> Self {
         let inner = PyTargetActionSinkInner {
             callback: PyCallback::Async(Arc::new(callback)),
+            describe_callback: None,
         };
         Self {
             keeper: TargetActionSinkKeeper::new(inner),
         }
+    }
+
+    #[staticmethod]
+    pub fn _new_verified_wrapper(py: Python<'_>, callback: Py<PyAny>) -> PyResult<Self> {
+        let objects = python_objects();
+        if !callback
+            .bind(py)
+            .get_type()
+            .is(objects.verified_sink_type.bind(py))
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "verified core sinks must be created by VerifiedTargetActionSink",
+            ));
+        }
+        let bind_method = |method: &Py<PyAny>| {
+            method.call_method1(
+                py,
+                "__get__",
+                (callback.bind(py), objects.verified_sink_type.bind(py)),
+            )
+        };
+        let describe_callback = bind_method(&objects.verified_sink_describe_fn)?;
+        let apply_bound_callback = bind_method(&objects.verified_sink_apply_bound_fn)?;
+        let inner = PyTargetActionSinkInner {
+            callback: PyCallback::Async(Arc::new(apply_bound_callback)),
+            describe_callback: Some(Arc::new(describe_callback)),
+        };
+        Ok(Self {
+            keeper: TargetActionSinkKeeper::new(inner),
+        })
     }
 }
 
@@ -56,6 +107,99 @@ fn get_core_field(py: Python<'_>, obj: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[async_trait]
 impl TargetActionSink<PyEngineProfile> for PyTargetActionSinkInner {
+    fn assurance(&self) -> SinkAssurance {
+        if self.describe_callback.is_some() {
+            SinkAssurance::Verified(NativeVerificationPolicy::QueryVerified)
+        } else {
+            SinkAssurance::Legacy
+        }
+    }
+
+    fn describe_effect(&self, action: &Py<PyAny>) -> Result<Option<NativeEffectDescriptor>> {
+        let Some(callback) = &self.describe_callback else {
+            return Ok(None);
+        };
+        let extracted = Python::attach(|py| -> PyResult<NativeEffectDescriptor> {
+            let carrier = action
+                .extract::<PyRef<'_, PyBoundVerifiedTargetAction>>(py)
+                .map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "verified target effect descriptor is invalid",
+                    )
+                })?;
+            {
+                let mut state = carrier.descriptor.lock().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "verified target effect descriptor is invalid",
+                    )
+                })?;
+                match &*state {
+                    PyBoundDescriptorState::Unbound => {
+                        *state = PyBoundDescriptorState::Binding;
+                    }
+                    PyBoundDescriptorState::Bound(descriptor) => {
+                        return Ok(descriptor.clone());
+                    }
+                    PyBoundDescriptorState::Binding | PyBoundDescriptorState::Failed => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "verified target effect descriptor is invalid",
+                        ));
+                    }
+                }
+            }
+            let result = (|| {
+                let (operation, action_id, source_digest, source_generation, target_locator_digest) =
+                    callback.call1(py, (carrier.action.bind(py),))?.extract::<(
+                        String,
+                        String,
+                        String,
+                        u64,
+                        String,
+                    )>(py)?;
+                let operation = match operation.as_str() {
+                    "delete" => NativeEffectOperation::Delete,
+                    "isolate" => NativeEffectOperation::Isolate,
+                    _ => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "verified target effect descriptor is invalid",
+                        ));
+                    }
+                };
+                let descriptor = NativeEffectDescriptor {
+                    action_id,
+                    operation,
+                    source_digest,
+                    source_generation,
+                    target_locator_digest,
+                };
+                descriptor.validate().map_err(|_| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "verified target effect descriptor is invalid",
+                    )
+                })?;
+                Ok(descriptor)
+            })();
+            let mut state = carrier.descriptor.lock().map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "verified target effect descriptor is invalid",
+                )
+            })?;
+            match result {
+                Ok(descriptor) => {
+                    *state = PyBoundDescriptorState::Bound(descriptor.clone());
+                    Ok(descriptor)
+                }
+                Err(error) => {
+                    *state = PyBoundDescriptorState::Failed;
+                    Err(error)
+                }
+            }
+        });
+        extracted
+            .map(Some)
+            .map_err(|_| Error::client("verified target effect descriptor is invalid"))
+    }
+
     async fn apply(
         &self,
         host_runtime_ctx: &PyAsyncContext,
@@ -63,10 +207,64 @@ impl TargetActionSink<PyEngineProfile> for PyTargetActionSinkInner {
         actions: Vec<Py<PyAny>>,
     ) -> Result<Option<Vec<Option<ChildTargetDef<PyEngineProfile>>>>> {
         let context_provider = Python::attach(|py| host_ctx.as_ref().clone_ref(py));
-        let ret = self
-            .callback
-            .call(host_runtime_ctx, (context_provider, actions))?
-            .await?;
+        let ret = if self.describe_callback.is_some() {
+            let (raw_actions, descriptors) =
+                Python::attach(|py| -> PyResult<(Vec<Py<PyAny>>, Vec<_>)> {
+                    let mut raw_actions = Vec::with_capacity(actions.len());
+                    let mut descriptors = Vec::with_capacity(actions.len());
+                    for action in actions {
+                        let carrier = action
+                            .extract::<PyRef<'_, PyBoundVerifiedTargetAction>>(py)
+                            .map_err(|_| {
+                                pyo3::exceptions::PyValueError::new_err(
+                                    "verified target effect descriptor is invalid",
+                                )
+                            })?;
+                        let state = carrier.descriptor.lock().map_err(|_| {
+                            pyo3::exceptions::PyValueError::new_err(
+                                "verified target effect descriptor is invalid",
+                            )
+                        })?;
+                        let descriptor = match &*state {
+                            PyBoundDescriptorState::Bound(descriptor) => descriptor,
+                            _ => {
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "verified target effect descriptor is invalid",
+                                ));
+                            }
+                        };
+                        let operation = match descriptor.operation {
+                            NativeEffectOperation::Delete => "delete",
+                            NativeEffectOperation::Isolate => "isolate",
+                            NativeEffectOperation::Cleanup => {
+                                return Err(pyo3::exceptions::PyValueError::new_err(
+                                    "verified target effect descriptor is invalid",
+                                ));
+                            }
+                        };
+                        raw_actions.push(carrier.action.clone_ref(py));
+                        descriptors.push((
+                            operation,
+                            descriptor.action_id.clone(),
+                            descriptor.source_digest.clone(),
+                            descriptor.source_generation,
+                            descriptor.target_locator_digest.clone(),
+                        ));
+                    }
+                    Ok((raw_actions, descriptors))
+                })
+                .from_py_result()?;
+            self.callback
+                .call(
+                    host_runtime_ctx,
+                    (context_provider, raw_actions, descriptors),
+                )?
+                .await?
+        } else {
+            self.callback
+                .call(host_runtime_ctx, (context_provider, actions))?
+                .await?
+        };
         Python::attach(|py| -> PyResult<_> {
             if ret.is_none(py) {
                 return Ok(None);
@@ -130,8 +328,20 @@ impl TargetHandler<PyEngineProfile> for PyTargetHandler {
             let output = if py_output.is_none(py) {
                 None
             } else {
-                let (action, sink, state, py_child_invalidation) =
+                let (raw_action, sink, state, py_child_invalidation) =
                     py_output.extract::<(Py<PyAny>, Py<PyAny>, Py<PyAny>, Py<PyAny>)>(py)?;
+                let sink = get_core_field(py, sink)?.extract::<PyTargetActionSink>(py)?;
+                let action = match sink.keeper.assurance() {
+                    SinkAssurance::Verified(NativeVerificationPolicy::QueryVerified) => Py::new(
+                        py,
+                        PyBoundVerifiedTargetAction {
+                            action: raw_action,
+                            descriptor: Mutex::new(PyBoundDescriptorState::Unbound),
+                        },
+                    )?
+                    .into_any(),
+                    _ => raw_action,
+                };
                 let child_invalidation = if py_child_invalidation.is_none(py) {
                     None
                 } else {
@@ -148,9 +358,7 @@ impl TargetHandler<PyEngineProfile> for PyTargetHandler {
                 };
                 Some(TargetReconcileOutput {
                     action,
-                    sink: get_core_field(py, sink)?
-                        .extract::<PyTargetActionSink>(py)?
-                        .keeper,
+                    sink: sink.keeper,
                     tracking_record: if non_existence.is(&state) {
                         None
                     } else {
@@ -180,6 +388,14 @@ impl TargetHandler<PyEngineProfile> for PyTargetHandler {
             Ok(entries)
         })
         .from_py_result()
+    }
+}
+
+#[pyfunction(name = "_unwrap_target_action")]
+pub fn unwrap_target_action(py: Python<'_>, action: Py<PyAny>) -> Py<PyAny> {
+    match action.extract::<PyRef<'_, PyBoundVerifiedTargetAction>>(py) {
+        Ok(carrier) => carrier.action.clone_ref(py),
+        Err(_) => action,
     }
 }
 

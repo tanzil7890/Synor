@@ -8,14 +8,43 @@ use crate::{
 
 use std::{borrow::Cow, collections::BTreeMap, io::Write};
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_with::{Bytes, serde_as};
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::state::{
+    native_effect::{
+        NativeEffectErrorCode, NativeVerificationPolicy, is_sha256_hex, unix_time_millis,
+    },
     stable_path::{StableKey, StablePath},
     target_state_path::TargetStatePath,
 };
+
+/// Durable sequencer used to fence live-component incarnations.
+///
+/// Operational app drop retains this key so a reused App can never collide
+/// with a leaked controller from an earlier incarnation.
+pub const LIVE_COMPONENT_GENERATION_KEY_SYMBOL: &str = "synor/_internal/live_component_generation";
+
+/// Version of the additive native-effect keyspace in one app database.
+///
+/// A missing marker means the app database predates native effects and remains
+/// valid in compatibility mode. The first native-effect write installs
+/// [`Self::CURRENT`]. Keeping this numeric rather than an enum lets newer
+/// versions fail closed with an explicit "unsupported schema" error instead
+/// of failing to deserialize an unknown enum variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NativeSchemaVersion(pub u32);
+
+impl NativeSchemaVersion {
+    pub const CURRENT: Self = Self(3);
+    pub const MIN_SUPPORTED: Self = Self(1);
+
+    pub fn is_supported(self) -> bool {
+        (Self::MIN_SUPPORTED.0..=Self::CURRENT.0).contains(&self.0)
+    }
+}
 
 /// Which writer owns a user-state entry. The two kinds share the `0x34`
 /// `UserState*` keyspace but are isolated by a discriminant byte so they
@@ -179,6 +208,23 @@ pub enum DbEntryKey<'a> {
 
     /// Value type: IdSequencerInfo
     IdSequencer(StableKey),
+
+    /// Singleton key for [`NativeSchemaVersion`].
+    NativeSchemaVersion,
+    /// Prefix covering all metadata-only native effect records.
+    NativeEffectPrefix,
+    /// Value type: [`crate::state::native_effect::NativeEffectIntent`].
+    NativeEffect(Fingerprint),
+    /// Prefix covering native cleanup-obligation allocation cursors.
+    NativeEffectObligationPrefix,
+    /// Value type:
+    /// [`crate::state::native_effect::NativeEffectObligationCursor`].
+    NativeEffectObligation(Fingerprint),
+    /// Prefix covering ordinary effect-lineage cursors.
+    NativeEffectLineagePrefix,
+    /// Value type:
+    /// [`crate::state::native_effect::NativeEffectLineageCursor`].
+    NativeEffectLineage(Fingerprint),
 }
 
 impl<'a> storekey::Encode for DbEntryKey<'a> {
@@ -220,6 +266,31 @@ impl<'a> storekey::Encode for DbEntryKey<'a> {
                 e.write_u8(0x30)?;
                 key.encode(e)?;
             }
+
+            DbEntryKey::NativeSchemaVersion => {
+                e.write_u8(0x38)?;
+            }
+            DbEntryKey::NativeEffectPrefix => {
+                e.write_u8(0x40)?;
+            }
+            DbEntryKey::NativeEffect(fp) => {
+                e.write_u8(0x40)?;
+                fp.encode(e)?;
+            }
+            DbEntryKey::NativeEffectObligationPrefix => {
+                e.write_u8(0x48)?;
+            }
+            DbEntryKey::NativeEffectObligation(fp) => {
+                e.write_u8(0x48)?;
+                fp.encode(e)?;
+            }
+            DbEntryKey::NativeEffectLineagePrefix => {
+                e.write_u8(0x50)?;
+            }
+            DbEntryKey::NativeEffectLineage(fp) => {
+                e.write_u8(0x50)?;
+                fp.encode(e)?;
+            }
         }
         Ok(())
     }
@@ -242,6 +313,23 @@ impl<'a> storekey::Decode for DbEntryKey<'a> {
             0x28 => {
                 let fp: Fingerprint = storekey::Decode::decode(d)?;
                 DbEntryKey::TargetSegmentName(fp)
+            }
+            0x30 => {
+                let key: StableKey = storekey::Decode::decode(d)?;
+                DbEntryKey::IdSequencer(key)
+            }
+            0x38 => DbEntryKey::NativeSchemaVersion,
+            0x40 => {
+                let fp: Fingerprint = storekey::Decode::decode(d)?;
+                DbEntryKey::NativeEffect(fp)
+            }
+            0x48 => {
+                let fp: Fingerprint = storekey::Decode::decode(d)?;
+                DbEntryKey::NativeEffectObligation(fp)
+            }
+            0x50 => {
+                let fp: Fingerprint = storekey::Decode::decode(d)?;
+                DbEntryKey::NativeEffectLineage(fp)
             }
             _ => return Err(storekey::DecodeError::InvalidFormat),
         };
@@ -460,14 +548,107 @@ pub enum StablePathNodeType {
     Component,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ChildExistenceInfo {
     #[serde(rename = "T")]
     pub node_type: StablePathNodeType,
-    // TODO: Add a generation, to avoid race conditions during deletion,
-    // e.g. when the parent is cleaning up the child asynchronously, there's
-    // incremental reinsertion (based on change stream) for the child, which
-    // makes another generation of the child appear again.
+    /// Live-incarnation generation, when known. Missing on records written
+    /// before generation fencing was introduced.
+    #[serde(rename = "G", default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+}
+
+pub const CHILD_TOMBSTONE_SCHEMA_VERSION: u16 = 1;
+
+/// Why a child component became eligible for cleanup.
+#[derive(Serialize, Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ChildTombstoneCause {
+    /// Safe compatibility value for legacy empty tombstones.
+    #[default]
+    #[serde(rename = "undeclared")]
+    Undeclared,
+    #[serde(rename = "provider_missing")]
+    ProviderMissing,
+    #[serde(rename = "component_orphan")]
+    ComponentOrphan,
+    #[serde(rename = "live_delete")]
+    LiveDelete,
+}
+
+/// Metadata-only durable cleanup obligation for one child component.
+///
+/// Schema version zero denotes a decoded legacy empty tombstone. New writes
+/// use [`CHILD_TOMBSTONE_SCHEMA_VERSION`].
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ChildTombstoneInfo {
+    #[serde(rename = "V", default)]
+    pub schema_version: u16,
+    #[serde(rename = "C", default)]
+    pub cause: ChildTombstoneCause,
+    #[serde(rename = "S", default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
+    #[serde(rename = "G", default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// Unix epoch milliseconds. Zero means unknown for legacy records.
+    #[serde(rename = "T", default)]
+    pub created_at_ms: u64,
+    #[serde(rename = "A", default)]
+    pub attempt_count: u64,
+    #[serde(rename = "E", default, skip_serializing_if = "Option::is_none")]
+    pub last_error_code: Option<NativeEffectErrorCode>,
+    #[serde(rename = "P", default)]
+    pub verification_policy: NativeVerificationPolicy,
+}
+
+impl Default for ChildTombstoneInfo {
+    fn default() -> Self {
+        Self {
+            schema_version: 0,
+            cause: ChildTombstoneCause::Undeclared,
+            source_digest: None,
+            generation: None,
+            created_at_ms: 0,
+            attempt_count: 0,
+            last_error_code: None,
+            verification_policy: NativeVerificationPolicy::LegacyUnverified,
+        }
+    }
+}
+
+impl ChildTombstoneInfo {
+    pub fn new(
+        cause: ChildTombstoneCause,
+        source_digest: Option<String>,
+        generation: Option<u64>,
+        verification_policy: NativeVerificationPolicy,
+    ) -> Result<Self> {
+        let info = Self {
+            schema_version: CHILD_TOMBSTONE_SCHEMA_VERSION,
+            cause,
+            source_digest,
+            generation,
+            created_at_ms: unix_time_millis(),
+            attempt_count: 1,
+            last_error_code: None,
+            verification_policy,
+        };
+        info.validate()?;
+        Ok(info)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema_version > CHILD_TOMBSTONE_SCHEMA_VERSION {
+            client_bail!("child tombstone schema is newer than this binary");
+        }
+        if self
+            .source_digest
+            .as_deref()
+            .is_some_and(|digest| !is_sha256_hex(digest))
+        {
+            client_bail!("child tombstone source digest must be lowercase SHA-256 hex");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -555,6 +736,58 @@ mod tests {
             storekey::encode_vec(&StateKind::Regular).unwrap(),
             storekey::encode_vec(&StateKind::Live).unwrap(),
         );
+    }
+
+    #[test]
+    fn native_effect_keyspace_is_additive_and_prefix_ordered() {
+        let schema_key = DbEntryKey::NativeSchemaVersion.encode().unwrap();
+        let effect_prefix = DbEntryKey::NativeEffectPrefix.encode().unwrap();
+        let fingerprint = Fingerprint([0xCD; 16]);
+        let effect_key = DbEntryKey::NativeEffect(fingerprint).encode().unwrap();
+        let obligation_prefix = DbEntryKey::NativeEffectObligationPrefix.encode().unwrap();
+        let obligation_key = DbEntryKey::NativeEffectObligation(fingerprint)
+            .encode()
+            .unwrap();
+        let lineage_prefix = DbEntryKey::NativeEffectLineagePrefix.encode().unwrap();
+        let lineage_key = DbEntryKey::NativeEffectLineage(fingerprint)
+            .encode()
+            .unwrap();
+
+        assert_eq!(schema_key, vec![0x38]);
+        assert_eq!(effect_prefix, vec![0x40]);
+        assert!(effect_key.starts_with(&effect_prefix));
+        assert_eq!(obligation_prefix, vec![0x48]);
+        assert!(obligation_key.starts_with(&obligation_prefix));
+        assert!(!obligation_key.starts_with(&effect_prefix));
+        assert_eq!(lineage_prefix, vec![0x50]);
+        assert!(lineage_key.starts_with(&lineage_prefix));
+        assert_ne!(effect_prefix[0], 0x10);
+        assert_ne!(effect_prefix[0], 0x20);
+        assert_ne!(effect_prefix[0], 0x28);
+        assert_ne!(effect_prefix[0], 0x30);
+
+        assert!(matches!(
+            DbEntryKey::decode(&schema_key).unwrap(),
+            DbEntryKey::NativeSchemaVersion
+        ));
+        assert!(
+            matches!(DbEntryKey::decode(&effect_key).unwrap(), DbEntryKey::NativeEffect(fp) if fp == fingerprint)
+        );
+        assert!(
+            matches!(DbEntryKey::decode(&obligation_key).unwrap(), DbEntryKey::NativeEffectObligation(fp) if fp == fingerprint)
+        );
+        assert!(
+            matches!(DbEntryKey::decode(&lineage_key).unwrap(), DbEntryKey::NativeEffectLineage(fp) if fp == fingerprint)
+        );
+    }
+
+    #[test]
+    fn native_schema_version_accepts_future_numeric_values_for_safe_refusal() {
+        let encoded = rmp_serde::to_vec_named(&NativeSchemaVersion(99)).unwrap();
+        let decoded: NativeSchemaVersion =
+            synor_utils::deser::from_msgpack_slice(&encoded).unwrap();
+        assert_eq!(decoded, NativeSchemaVersion(99));
+        assert!(!decoded.is_supported());
     }
 
     /// `UserStatePrefix(kind)` must encode as `0x34` followed by the kind
@@ -731,5 +964,33 @@ mod tests {
             !state_b.starts_with(&prefix_a),
             "path_b UserState key incorrectly starts with path_a's prefix"
         );
+    }
+
+    #[test]
+    fn legacy_child_existence_decodes_with_unknown_generation() {
+        #[derive(Serialize)]
+        struct LegacyChildExistence {
+            #[serde(rename = "T")]
+            node_type: StablePathNodeType,
+        }
+
+        let bytes = rmp_serde::to_vec_named(&LegacyChildExistence {
+            node_type: StablePathNodeType::Component,
+        })
+        .unwrap();
+        let decoded: ChildExistenceInfo = synor_utils::deser::from_msgpack_slice(&bytes).unwrap();
+        assert_eq!(decoded.node_type, StablePathNodeType::Component);
+        assert_eq!(decoded.generation, None);
+    }
+
+    #[test]
+    fn rich_tombstone_rejects_payload_like_source_metadata() {
+        let info = ChildTombstoneInfo::new(
+            ChildTombstoneCause::ComponentOrphan,
+            Some("/raw/private/path".to_owned()),
+            Some(4),
+            NativeVerificationPolicy::QueryVerified,
+        );
+        assert!(info.is_err());
     }
 }

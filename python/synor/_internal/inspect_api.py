@@ -1,10 +1,13 @@
 import asyncio
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from . import core
 from .app import App
 from .environment import Environment
 from .stable_path import StablePath
+
+NativeEffectCounts = core.NativeEffectCounts
 
 
 async def list_stable_paths(app: App[Any, Any]) -> list[StablePath]:
@@ -55,6 +58,20 @@ def list_stable_paths_info_sync(
     app: App[Any, Any],
 ) -> list[core.StablePathInfo]:
     return asyncio.run(_iter_stable_paths_collected(app))
+
+
+async def native_effect_counts(app: App[Any, Any]) -> NativeEffectCounts:
+    """Return privacy-safe native effect status totals for an app."""
+    core_app = await app._get_core()
+    return core.native_effect_counts(core_app)
+
+
+async def native_effect_counts_by_name(
+    env: Environment,
+    app_name: str,
+) -> NativeEffectCounts | None:
+    """Return native effect status totals, or ``None`` when the app is absent."""
+    return core.native_effect_counts_by_name(env._core_env, app_name)
 
 
 async def iter_stable_path_details(
@@ -156,17 +173,20 @@ async def iter_target_states_by_name(
 
 
 __all__ = [
-    "iter_stable_paths",
-    "iter_stable_paths_by_name",
-    "list_stable_paths",
-    "list_stable_paths_info_sync",
-    "list_stable_paths_sync",
+    "NativeEffectCounts",
     "get_stable_path_detail",
     "get_stable_path_detail_by_name",
     "iter_stable_path_details",
     "iter_stable_path_details_by_name",
-    "query_stable_path_details",
-    "query_stable_path_details_by_name",
+    "iter_stable_paths",
+    "iter_stable_paths_by_name",
     "iter_target_states",
     "iter_target_states_by_name",
+    "list_stable_paths",
+    "list_stable_paths_info_sync",
+    "list_stable_paths_sync",
+    "native_effect_counts",
+    "native_effect_counts_by_name",
+    "query_stable_path_details",
+    "query_stable_path_details_by_name",
 ]

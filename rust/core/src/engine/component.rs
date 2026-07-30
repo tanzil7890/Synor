@@ -342,9 +342,9 @@ pub(crate) struct StatsGroup<Prof: EngineProfile> {
 }
 
 impl<Prof: EngineProfile> StatsGroup<Prof> {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(operation_id: u64) -> Self {
         Self {
-            stats: ProcessingStats::new(),
+            stats: ProcessingStats::new_with_operation_id(operation_id),
             readiness: ComponentBgChildReadiness::default(),
             active_members: parking_lot::Mutex::new(Vec::new()),
         }
@@ -385,7 +385,7 @@ impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
         report_to_stdout: bool,
         refresh_interval_secs: Option<f64>,
     ) -> (ComponentProcessorContext<Prof>, ProcessingStats) {
-        let group = Arc::new(StatsGroup::new());
+        let group = Arc::new(StatsGroup::new(self.processing_stats().operation_id()));
         let group_stats = group.stats().clone();
 
         // The group counts as one pending child of the enclosing readiness, so
@@ -558,6 +558,7 @@ impl<Prof: EngineProfile> Component<Prof> {
             // Orphan-delete failures during this child's commit fall
             // through to the framework's default `error!` log.
             None,
+            parent_ctx.effect_mode(),
         )?;
         self.run(processor, child_ctx, deadline, deadline).await
     }
@@ -583,6 +584,7 @@ impl<Prof: EngineProfile> Component<Prof> {
             parent_ctx.preview_collector().cloned(),
             parent_ctx.host_ctx().clone(),
             on_error.clone(),
+            parent_ctx.effect_mode(),
         )?;
         self.run_in_background(processor, child_ctx, on_error, pre_execute_check)
             .await
@@ -629,6 +631,19 @@ impl<Prof: EngineProfile> Component<Prof> {
         &self,
     ) -> Option<Arc<crate::engine::live_component::LiveComponentState<Prof>>> {
         self.inner.live_state.lock().clone()
+    }
+
+    pub fn clear_live_state_if(
+        &self,
+        expected: &Arc<crate::engine::live_component::LiveComponentState<Prof>>,
+    ) {
+        let mut slot = self.inner.live_state.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, expected))
+        {
+            slot.take();
+        }
     }
 
     /// Returns true if this component has no active children (all Weak refs are dead).
@@ -980,6 +995,7 @@ impl<Prof: EngineProfile> Component<Prof> {
                 // with another execution of the same component.
                 let (ret, submit_output, mut children_outcome) = {
                     let _permit = self.inner.build_semaphore.acquire().await?;
+                    processor_context.assert_live_generation_current()?;
 
                     // Build mode only: write the component's own existence bit
                     // (and ancestor chain) into the parent in its own txn,
@@ -1190,6 +1206,7 @@ impl<Prof: EngineProfile> Component<Prof> {
         preview_collector: Option<PreviewActionCollector<Prof>>,
         host_ctx: Arc<Prof::HostCtx>,
         on_error: Option<OnError>,
+        effect_mode: crate::engine::target_state::EffectMode,
     ) -> Result<ComponentProcessorContext<Prof>> {
         let providers = if let Some(parent_ctx) = parent_ctx {
             let sub_path = self
@@ -1226,6 +1243,7 @@ impl<Prof: EngineProfile> Component<Prof> {
                 live,
                 on_error,
                 preview_collector,
+                effect_mode,
             ),
         ))
     }
@@ -1237,6 +1255,9 @@ impl<Prof: EngineProfile> Component<Prof> {
         processing_stats: ProcessingStats,
         host_ctx: Arc<Prof::HostCtx>,
         on_error: Option<OnError>,
+        effect_mode: crate::engine::target_state::EffectMode,
+        provider_missing_is_error: bool,
+        tombstone_generation: Option<u64>,
     ) -> ComponentProcessorContext<Prof> {
         ComponentProcessorContext::new(
             self.clone(),
@@ -1246,6 +1267,9 @@ impl<Prof: EngineProfile> Component<Prof> {
             ComponentProcessingAction::Delete(ComponentDeleteContext {
                 providers,
                 on_error,
+                effect_mode,
+                provider_missing_is_error,
+                tombstone_generation,
             }),
         )
     }
@@ -1269,11 +1293,11 @@ mod tests {
     use crate::state::stable_path::StableKey;
     use crate::state_store::StorageSettings;
     use async_trait::async_trait;
-    use synor_utils::fingerprint::Fingerprint;
     use std::hash::{Hash, Hasher};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
+    use synor_utils::fingerprint::Fingerprint;
 
     #[test]
     fn test_any_active_pop_prune() {

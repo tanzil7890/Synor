@@ -5,13 +5,13 @@ Library level functions and states.
 import sys as _sys
 import sysconfig as _sysconfig
 
+from .._version import __version__ as _package_version
 from . import core as _core
 from . import serde as _serde
 from . import typing as _typing
-from .._version import __version__ as _package_version
 from .memo_fingerprint import register_memo_key_function as _register_memo_key_function
 from .target_state import _TypedTargetHandlerWrapper as _TypedTargetHandlerWrapper
-
+from .verified_sink import VerifiedTargetActionSink as _VerifiedTargetActionSink
 
 _package_id = f"python-{_package_version}"
 _gil_suffix = "t" if _sysconfig.get_config_var("Py_GIL_DISABLED") else ""
@@ -24,6 +24,7 @@ _core.init_runtime(
     handler_wrapper_fn=_TypedTargetHandlerWrapper,
     non_existence=_typing.NON_EXISTENCE,
     not_set=_typing.NOT_SET,
+    verified_sink_type=_VerifiedTargetActionSink,
 )
 
 # Make core stable-path objects usable in memo key fingerprints.

@@ -19,6 +19,9 @@ pub struct PythonObjects {
     pub handler_wrapper_fn: Py<PyAny>,
     pub non_existence: Py<PyAny>,
     pub not_set: Py<PyAny>,
+    pub verified_sink_type: Py<PyAny>,
+    pub verified_sink_describe_fn: Py<PyAny>,
+    pub verified_sink_apply_bound_fn: Py<PyAny>,
 }
 
 impl PythonObjects {
@@ -41,12 +44,14 @@ static PY_OBJECTS: OnceLock<std::mem::ManuallyDrop<PythonObjects>> = OnceLock::n
 
 #[pyfunction]
 pub fn init_runtime(
+    py: Python<'_>,
     package_id: String,
     lang: String,
     serialize_fn: Py<PyAny>,
     handler_wrapper_fn: Py<PyAny>,
     non_existence: Py<PyAny>,
     not_set: Py<PyAny>,
+    verified_sink_type: Py<PyAny>,
 ) -> PyResult<()> {
     // Kept in the Python-facing signature for compatibility. They previously
     // identified telemetry events; telemetry is intentionally disabled.
@@ -57,12 +62,23 @@ pub fn init_runtime(
             "Failed to initialize Tokio runtime: already initialized",
         ));
     }
+    // Pin the authentic class and method objects before application code can
+    // replace module attributes used by verified-sink construction.
+    let verified_sink_describe_fn = verified_sink_type
+        .getattr(py, "_describe_for_core")?
+        .extract(py)?;
+    let verified_sink_apply_bound_fn = verified_sink_type
+        .getattr(py, "_call_bound_for_core")?
+        .extract(py)?;
     PY_OBJECTS
         .set(std::mem::ManuallyDrop::new(PythonObjects {
             serialize_fn,
             handler_wrapper_fn,
             non_existence,
             not_set,
+            verified_sink_type,
+            verified_sink_describe_fn,
+            verified_sink_apply_bound_fn,
         }))
         .map_err(|_| PyException::new_err("Failed to set Python objects: already initialized"))?;
     Ok(())

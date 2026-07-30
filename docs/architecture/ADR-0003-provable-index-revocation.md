@@ -1,7 +1,9 @@
 # ADR-0003: Evidence-backed index revocation
 
-- Status: Accepted for the internal Phase 0–2 implementation
+- Status: Accepted for the bounded Phase 0–6 implementation; production/GA
+  certification gates remain open
 - Date: 2026-07-29
+- Native durability amendment: 2026-07-30
 
 ## Context
 
@@ -26,13 +28,18 @@ The detailed threat model, research, and rollout plan are recorded in
 
 ### Compatibility boundary
 
-Existing `App.update()`, `App.drop()`, connector APIs, LMDB data, and the
-four-field `TargetReconcileOutput` remain unchanged. Compatibility mode keeps
-its current acknowledgement semantics.
+The public `App.update()` default, existing connector APIs, and the four-field
+`TargetReconcileOutput` remain unchanged. Existing sinks default to legacy
+acknowledgement semantics. The native schema is additive to each app's existing
+LMDB database, and a pre-feature database with no native schema marker remains
+valid.
 
-The stronger guarantee is an additive, opt-in controlled path. Phases 0–2 keep
-all new contracts under `synor._internal`; no public type or configuration
-surface is committed before the synthetic lifecycle passes.
+The stronger guarantee is an additive, opt-in controlled path.
+`SynorRuntime` selects an internal strict effect mode through the private
+`App._update_controlled()` boundary; direct `App.update()` remains in
+compatibility mode. `App.drop()` now refuses to erase an app while any native
+effect is not `completed`. It otherwise removes operational state while
+retaining native effect evidence and its schema marker.
 
 ### Vocabulary
 
@@ -101,6 +108,11 @@ on other event loops or in other processes.
 A transactional/fenced backend or an explicitly reviewed `fsync` policy is
 required before broadening that durability claim.
 
+Phase 6 adds a separate LMDB-native effect lifecycle for engine reconciliation.
+This does not replace the control-plane ledger above and does not broaden the
+`FileStateStore` claim. LMDB mutations continue to run through
+`Storage::run_txn` and its single-writer batcher.
+
 Suppression uses monotonic source generations bound to tenant, policy identity
 and revision, and group-graph revision. A synchronous in-process overlay closes
 the interval before the first await. Before the observation event is persisted,
@@ -153,6 +165,197 @@ The receipt hash chain detects missing or reordered local evidence. It is not a
 digital signature and does not protect against a fully compromised state-store
 administrator.
 
+### Phase 6 native effect durability amendment
+
+#### Additive keyspace and schema
+
+Each existing per-app LMDB database can now contain:
+
+- one `DbEntryKey::NativeSchemaVersion` singleton at top-level tag `0x38`,
+  whose current value is schema version 3;
+- a `DbEntryKey::NativeEffect` evidence keyspace under top-level tag `0x40`,
+  keyed by a domain-separated fingerprint of an engine-owned evidence ID;
+- a `DbEntryKey::NativeEffectObligation` allocation-cursor keyspace under
+  top-level tag `0x48`, keyed by opaque tracking locator and source
+  generation; and
+- a `DbEntryKey::NativeEffectLineage` cursor keyspace under top-level tag
+  `0x50`, keyed by opaque tracking locator.
+
+Native effect record version 2 stores the safe descriptor, engine evidence ID,
+opaque tracking fingerprint, verification policy, controlled cause and error
+codes, timestamps, attempt count, and
+`pending|verified|failed|blocked|completed` status. It stores no target payload,
+source text, raw locator, principal, credential, remote response, or free-form
+exception.
+
+The connector-supplied descriptor action ID remains the operation and Phase 2
+receipt-correlation ID. It is not the native evidence primary key. The engine
+allocates an evidence ID from the opaque tracking locator and a monotonically
+increasing lineage epoch. An unresolved retry must reproduce the exact proof
+contract and reuses that evidence ID. A later lifecycle after completion gets
+a successor evidence ID, so retained evidence remains immutable even if a
+connector repeats an action ID. Version-1 effect records have no separate
+evidence field and decode conservatively with their descriptor action ID as
+the legacy evidence ID.
+
+The first native effect write to an untouched database installs schema version
+3 in the same transaction. Existing schema-v1 and schema-v2 databases remain
+readable; their next native write performs one bounded evidence scan, creates
+ordinary per-locator lineage cursors, and installs the v3 marker atomically.
+A missing marker is the pre-feature compatibility state only when the effect,
+obligation, and lineage keyspaces are all empty. Native reads/writes, strict
+completion checks, inspection, and protected drop refuse a future schema or
+native metadata without a marker. Schema validation also verifies both cursor
+key bindings and their referenced evidence contract/status, so corrupted
+lineage or obligation cursors fail closed.
+
+A legacy compatibility update makes no native-schema or revocation guarantee.
+The supported-version upgrade path has synthetic v1 coverage, and the
+corrupt-cursor cases are tested. A migration drill using a copied real
+pre-feature database remains a release gate.
+
+Bounded-token validation is not a PII classifier. Certified host profiles
+remain responsible for supplying opaque, non-reversible action IDs; the native
+layer can enforce shape and digest fields but cannot prove that an otherwise
+valid alphanumeric token does not encode sensitive data.
+
+This is a lazy, one-way activation boundary. A genuinely older binary cannot
+recognize a schema invented after that binary shipped, so this release cannot
+make such a binary refuse it retroactively. Operators must not downgrade an
+activated app database in place. A schema-aware current or future binary must
+retain read, retry, inspection, and export capability even when creation of
+new strict effects is disabled.
+
+#### Verified sink capability
+
+`TargetActionSink` now has an internal assurance capability and an optional
+safe descriptor extractor. Existing sinks are `Legacy` and need no migration.
+The Phase 2 `VerifiedTargetActionSink` registers
+`query_verified` assurance and extracts one descriptor per action through the
+PyO3 bridge. Descriptor parsing accepts only controlled operations, a bounded
+safe action ID, a positive source generation, and lowercase SHA-256 source and
+target-locator digests. Conversion failures cross the bridge as a fixed,
+redacted error.
+
+The four-field `TargetReconcileOutput` remains unchanged. A strict destructive
+cleanup is rejected before apply if its sink does not provide both a valid
+descriptor and query-verified assurance. A verified sink may also produce
+native evidence during a compatibility update; strictness is never inferred
+from the mere existence of that evidence.
+
+The Rust-owned verified-action carrier binds the descriptor used by native
+planning to the same action consumed by the Python verified wrapper. Python
+subclassing, rewrapping, class-method replacement, or mutation of compatibility
+attributes cannot substitute a second descriptor after native validation.
+
+#### Preview semantics
+
+Controlled preview executes the same reconciliation and native proof-contract
+planning as a real update but returns no precommit write plan. It does not
+write target tracking, schema markers, evidence, lineage/obligation cursors, or
+provider-ID allocation; it also does not call target apply, verify, or record
+callbacks. Flat leaf actions are returned as their original Python objects.
+
+Strict preview rejects the same invalid new verified action without a recovery
+tracking record and the same changed unresolved proof contract as execution.
+If strict cleanup needs a missing provider, preview fails without creating the
+blocker that a real update would persist. Repeated previews remain write-free,
+and a following real update applies the effect once. Preview currently rejects
+child-provider actions and every live-component mount rather than presenting a
+partial plan.
+
+#### Effect ordering
+
+For every described native effect, the engine uses this order:
+
+1. In the component precommit transaction, write or reopen the `pending`
+   effect together with pending tracking and ownership state.
+2. Apply the sink batch in the original flattened action order. A verified
+   sink may return normally only after its wrapper has established every
+   required postcondition and recorded its Phase 2 receipt.
+3. In a separate batched LMDB transaction, move the associated native effects
+   to `verified`. A sink error records a controlled `failed` state and clears
+   the component stage marker, leaving tracking retryable.
+4. In the final component tracking transaction, atomically move `verified`
+   effects to `completed`, resolve any recovered provider blocker, and commit
+   the normal tracking reduction.
+
+Consequently, a final-commit failure leaves a verified effect and retryable
+tracking instead of a falsely completed effect. Completed effect records are
+not part of normal target tracking and survive tracking reduction and ordinary
+app drop.
+
+This ordering closes the application-level window that previously could lose
+both tracking and the native obligation. The implementation has transaction
+and retry tests; it has not yet been certified with `SIGKILL` or sudden
+power-loss injection at every boundary.
+
+#### Missing providers and drop safety
+
+In strict effect mode, an orphaned target whose provider is unavailable gets a
+deterministic opaque `blocked` cleanup record in the precommit transaction.
+The engine advances the retained tracking record to the current version and
+fails the strict root update. When the provider returns, only a
+query-verified cleanup can resolve that blocker in the final tracking
+transaction. `App.drop()` and the storage-level app drop both abort before
+mutation while any native effect remains `pending`, `verified`, `failed`, or
+`blocked`.
+
+Compatibility mode deliberately preserves the pre-existing missing-provider
+behavior. It therefore carries no governed-cleanup guarantee. Provider removal
+is safe only through the strict controlled path or an operator workflow that
+first closes every obligation.
+
+#### Tombstones and live generations
+
+Child existence records now optionally carry a live generation. New child
+tombstones are versioned metadata records with a controlled cause, optional
+source digest and generation, creation time, attempt count, safe last-error
+code, and verification policy. An empty legacy tombstone decodes as
+`cause=undeclared`, `verification=legacy_unverified`, unknown generation, and
+zero/empty metadata. Conditional deletion prevents cleanup for an older known
+generation from deleting a newer tombstone.
+
+These are value-compatible extensions at the existing stable-path entry tags:
+child existence remains `0xa0`, and child tombstones remain `0xb0`. Live
+generation allocation uses the existing ID sequencer with the reserved stable
+key `synor/_internal/live_component_generation`; it does not add a second
+counter store.
+
+Each live-component incarnation reserves a monotonic generation from the
+app's durable LMDB ID sequencer. The generation and cancellation fence are
+propagated through live child work. The existence row naming that generation
+is durable before `process_live` can access committed state. Live committed
+state reads validate the generation, and writes compare and write in one
+batched transaction.
+
+Incremental update, nested live mount, and delete share the same per-subpath
+coalescing queue. The latest queued operation wins, `update_full` gates the
+queue while it derives authoritative state, and live-to-plain or live-to-delete
+transitions drain the exact old incarnation before the successor operation.
+A bounded drain timeout fails the transition without installing a successor
+or writing a delete tombstone.
+
+Native submit checks the inherited cancellation fence before precommit, after
+precommit, before each sink, and before final commit. A prior incarnation that
+does not drain within the bounded handoff timeout causes successor installation
+to fail. After live descendants quiesce, strict root completion also surfaces
+latched post-readiness task failures and unresolved native/tombstone
+obligations rather than reducing them to log-only success.
+
+This fence protects competing incarnations in one running engine. It is not a
+remote target compare-and-swap token, an app-wide multi-process lease, or a
+distributed fencing protocol. A process that already crossed a remote
+mutation boundary cannot be recalled without connector-side generation/CAS
+support.
+
+#### Inspection
+
+The Rust and Python inspection boundaries expose status counts only:
+`pending`, `verified`, `failed`, `blocked`, and `completed`, for a live app or
+an app opened by name. They do not expose effect descriptors, locators, or
+target payloads. CLI integration and retention policy remain later work.
+
 ## Non-claims
 
 This feature is not:
@@ -163,29 +366,49 @@ This feature is not:
   certified with Synor;
 - protection against a malicious connector that forges read-back or a fully
   compromised destination administrator;
-- a distributed, cross-event-loop, or multi-process transaction protocol in
-  Phases 0–2.
+- a distributed remote-effect transaction, connector-side CAS protocol, or
+  multi-process live-component lease;
+- `SIGKILL`, kernel-panic, sudden-power-loss, or storage-controller durability
+  certification for the Phase 6 ordering;
+- evidence that the one-million-action correlation benchmark or compatibility
+  overhead benchmark has passed;
+- a mechanism by which a binary released before native schema version 3 can
+  discover and refuse that future schema.
 
 Direct vector-client queries that bypass the supported retrieval guard are
 outside the query-denial guarantee.
 
 ## Consequences
 
-The design adds control-plane records and target read-back latency only to the
-strict path. Normal pipelines incur no new state writes or verification calls.
-Strict integrations must declare factual capabilities and provide safe action
-descriptors; arbitrary field-name heuristics are insufficient for destructive
-security semantics.
+The design adds control-plane records and target read-back latency to the
+strict path. Existing pipelines using legacy sinks incur no native effect
+writes or verification calls. Verified sinks add native effect transitions
+even when invoked through compatibility mode, but compatibility mode makes no
+revocation claim. Strict integrations must declare factual capabilities and
+provide safe action descriptors; arbitrary field-name heuristics are
+insufficient for destructive security semantics.
 
-The internal vertical slice can prove false-success retry, eventual
+The Phase 2 internal vertical slice proved false-success retry, eventual
 consistency, immediate query denial, evidence repair, and legal-hold isolation
-without a Rust/PyO3 change. Real source and target certification remains a
-later milestone.
+without a Rust/PyO3 change. Phase 6 adds the native seam described above while
+preserving that Python contract. Governed Google Drive and the internal
+certified Qdrant adapter exist, but live end-to-end provider acceptance remains
+an operator-gated milestone.
+
+Completed native effects are retained indefinitely in this milestone. That is
+the fail-safe default for evidence, but it makes retention, export, compaction,
+and long-running keyspace growth explicit follow-up work before GA.
 
 ## Rollback
 
-Disable selection of the internal strict runtime. Existing `App.update()`
-behavior remains available. Leave `revocation/v1/` evidence in place for
-inspection, and keep suppression active until a version-aware recovery
-operation verifies a newer authorization. Rollback must never restore serving
-by deleting suppression state.
+Disable selection of the internal strict runtime and creation of new strict
+effects. Existing compatibility `App.update()` behavior remains available.
+Leave `revocation/v1/`, the native schema marker, native effects, and blocked
+tombstones in place for inspection and retry. Keep suppression active until a
+version-aware recovery operation verifies a newer authorization.
+
+Do not open an app database whose native keyspace has been activated or
+upgraded to schema version 3 with an older binary that predates that schema.
+No automatic downgrade/export tool is implemented in this milestone. Rollback
+must never delete native evidence or suppression state to make the older
+release start.

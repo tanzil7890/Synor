@@ -7,11 +7,13 @@ use crate::engine::component::{
 use crate::engine::context::{ComponentProcessingAction, ComponentProcessorContext, FnCallContext};
 use crate::engine::profile::EngineProfile;
 use crate::engine::stats::ProcessingStats;
-use crate::engine::target_state::TargetStateProvider;
+use crate::engine::target_state::{EffectMode, TargetStateProvider};
 use crate::prelude::*;
+use crate::state::db_schema::{ChildTombstoneCause, LIVE_COMPONENT_GENERATION_KEY_SYMBOL};
+use crate::state::native_effect::NativeVerificationPolicy;
 use crate::state::stable_path::{StableKey, StablePath};
 use crate::state::target_state_path::TargetStatePath;
-use synor_utils::error::{SharedError, SharedResult};
+use synor_utils::error::{SharedError, SharedResult, SharedResultExt};
 
 use tokio::sync::oneshot;
 
@@ -25,6 +27,8 @@ use tokio::sync::oneshot;
 /// "drop_app" contract behaves the same as a re-mount's drain — see
 /// specs/live_component/design.md.
 pub(crate) const LIVE_COMPONENT_DRAIN_TIMEOUT_SECS: u64 = 30;
+static LIVE_COMPONENT_GENERATION_KEY: LazyLock<StableKey> =
+    LazyLock::new(|| StableKey::Symbol(LIVE_COMPONENT_GENERATION_KEY_SYMBOL.into()));
 
 /// Result of mounting a live component.
 pub struct MountLiveResult<Prof: EngineProfile> {
@@ -38,6 +42,7 @@ pub struct MountLivePending<Prof: EngineProfile> {
     parent_ctx: ComponentProcessorContext<Prof>,
     providers: rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
     live: bool,
+    effect_mode: EffectMode,
 }
 
 /// Mount a live component. Split into two phases:
@@ -49,6 +54,9 @@ pub fn mount_live_prepare<Prof: EngineProfile>(
     child_stable_path: StablePath,
     live: bool,
 ) -> Result<MountLivePending<Prof>> {
+    if parent_ctx.preview() {
+        client_bail!("LiveComponent mounts are not supported during preview");
+    }
     // 1. Mount (or get existing) child component.
     let child = parent_ctx
         .component()
@@ -76,6 +84,7 @@ pub fn mount_live_prepare<Prof: EngineProfile>(
         parent_ctx: parent_ctx.clone(),
         providers,
         live,
+        effect_mode: parent_ctx.effect_mode(),
     })
 }
 
@@ -87,20 +96,16 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
             parent_ctx,
             providers,
             live,
+            effect_mode,
         } = self;
 
         // 2. If existing live state, cancel and drain it (with 30s timeout).
         //
         // Without a timeout, a prior incarnation wedged in non-yielding
-        // synchronous Python compute would hold the parent's
-        // `update_full_lock` forever and block this re-mount path. After
-        // the timeout we proceed anyway: the orphan `LiveComponentState`
-        // remains alive (drain tasks captured `Arc<LiveComponentState>`
-        // clones, so its registry `Weak` keeps upgrading) and the orphan
-        // drain may continue writing target state for a while; the next
-        // `update_full` reconciles. This trades quiescence for liveness —
-        // same trade `App::drop_app` makes (see "drop_app" contract in
-        // specs/live_component/design.md).
+        // synchronous Python compute would hold the handoff forever. A
+        // timeout is an error rather than permission to install a successor:
+        // proceeding would let the stale controller adopt/delete the new
+        // incarnation's durable generation.
         if let Some(existing_state) = child.live_state() {
             let drain_fut = existing_state.cancel_and_drain();
             if tokio::time::timeout(
@@ -110,11 +115,8 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
             .await
             .is_err()
             {
-                tracing::warn!(
-                    "mount_live_async: cancel_and_drain of prior incarnation \
-                     timed out after {}s; proceeding with new mount. The orphan \
-                     drain may continue briefly; next update_full will reconcile.",
-                    LIVE_COMPONENT_DRAIN_TIMEOUT_SECS
+                client_bail!(
+                    "live-component generation handoff timed out; successor was not installed"
                 );
             }
         }
@@ -125,23 +127,29 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
         // 4. Create cancellation token as child of app's root token.
         let cancellation_token = parent_ctx.app_ctx().cancellation_token().child_token();
 
-        // 5. Create LiveComponentState.
+        // 5. Reserve a durable, process-independent generation before the
+        // incarnation becomes visible. Generation 0 remains the legacy/
+        // unknown value in pre-feature child/tombstone records.
+        let generation = parent_ctx
+            .app_ctx()
+            .app_store()
+            .reserve_id_range(&LIVE_COMPONENT_GENERATION_KEY, 1)
+            .await?;
+
+        // 6. Create LiveComponentState.
         let state = Arc::new(LiveComponentState::<Prof>::new(
             readiness_guard,
             cancellation_token,
+            generation,
         ));
 
-        // 6. Install ordering (matters for drop_app race coverage):
+        // 7. Install ordering (matters for drop_app race coverage):
         //    (i)   app_store the new state in `child.live_state` (strong-ref anchor)
         //    (ii)  register Weak in `app_ctx.live_components` (compaction-on-push)
         //
-        // The DB `ChildExistence` row is written separately:
-        //   - For `syn.mount(LiveCompClass)` from inside `process()`: by
-        //     submit/commit, via `update_building_state`'s `child_path_set`.
-        //   - For `operator.update(LiveCompClass)` from `process_live`: by
-        //     `mount_inner_live` directly via `Storage::run_txn`, just below this
-        //     `complete()` call. (See `LiveComponentController::mount_inner_live`.)
-        // Both paths produce the same on-disk state.
+        // The DB `ChildExistence` chain is persisted below before process_live
+        // can access generation-fenced committed state. A later parent submit
+        // may idempotently declare the same existence row.
         //
         // (i) → (ii) order is required: a Weak registered before its strong
         // owner exists would die on `upgrade()`. With the strong owner held
@@ -149,11 +157,43 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
         // the lifetime of the live component (or until cancel-and-drain
         // releases the strong ref).
         child.set_live_state(state.clone());
-        parent_ctx
+        if !parent_ctx
             .app_ctx()
-            .register_live_component(Arc::downgrade(&state));
+            .register_live_component(Arc::downgrade(&state))
+        {
+            child.clear_live_state_if(&state);
+            state.cancel_and_drain().await;
+            return Err(make_cancelled_error());
+        }
 
-        // 7. Create the controller (providers were captured during prepare).
+        // Make the incarnation's generation durable before process_live can
+        // read or write committed state. Parent submission waits for this
+        // child's readiness, so deferring the row to the parent commit would
+        // create a readiness cycle for bootstrap reads. Existence is
+        // intentionally eager elsewhere in the engine and may safely precede
+        // target tracking.
+        let persist_result = {
+            let _state_io_guard = state.committed_state_io_lock.lock().await;
+            if state.cancellation_token.is_cancelled() {
+                Err(make_cancelled_error())
+            } else {
+                parent_ctx
+                    .app_ctx()
+                    .app_store()
+                    .ensure_existence_chain_standalone(
+                        child.stable_path(),
+                        Some(state.generation()),
+                    )
+                    .await
+            }
+        };
+        if let Err(error) = persist_result {
+            child.clear_live_state_if(&state);
+            state.cancel_and_drain().await;
+            return Err(error);
+        }
+
+        // 8. Create the controller (providers were captured during prepare).
         let controller = LiveComponentController::new(
             child,
             state.clone(),
@@ -162,6 +202,7 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
             parent_ctx.full_reprocess(),
             live,
             providers,
+            effect_mode,
         );
 
         // 9. Create readiness handle that resolves when mark_ready is called.
@@ -225,11 +266,17 @@ enum Op<Prof: EngineProfile> {
         processor: Prof::ComponentProc,
         on_error: Option<OnError>,
     },
+    /// Install a nested live component at this subpath. It shares the same
+    /// queue as plain updates and deletes so type transitions preserve
+    /// latest-operation-wins ordering.
+    MountLive {
+        result_tx: oneshot::Sender<std::result::Result<MountLiveResult<Prof>, SharedError>>,
+    },
     /// `delete(subpath)` — calls `child.delete`. Same error model as
     /// `Update`: handler controls whether failures propagate. The DB
-    /// tombstone+existence-removal is performed at dispatch time
-    /// (synchronously) regardless, so even a propagating handler
-    /// preserves the retry-via-tombstone safety net.
+    /// tombstone+existence-removal is performed by the serialized
+    /// per-subpath drain immediately before child cleanup, so an in-flight
+    /// update cannot recreate existence after a newer delete.
     Delete { on_error: Option<OnError> },
 }
 
@@ -265,6 +312,7 @@ impl<Prof: EngineProfile> PendingState<Prof> {
 /// Shared state stored in `ComponentInner::live_state`.
 /// Does NOT reference `Component` — breaks the cyclic Arc.
 pub struct LiveComponentState<Prof: EngineProfile> {
+    generation: u64,
     /// Held by `update_full()` for its entire body. Concurrent calls
     /// (e.g. from `asyncio.gather`) serialize here.
     update_full_lock: tokio::sync::Mutex<()>,
@@ -294,14 +342,21 @@ pub struct LiveComponentState<Prof: EngineProfile> {
 
     /// JoinHandle of the tokio task running `process_live`. Set by `start()`.
     live_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Serializes standalone committed-state reads/writes with incarnation
+    /// cancellation. Cancellation takes this lock after setting the token,
+    /// forming a barrier before a replacement can become visible.
+    committed_state_io_lock: tokio::sync::Mutex<()>,
 }
 
 impl<Prof: EngineProfile> LiveComponentState<Prof> {
     pub fn new(
         readiness_guard: ComponentBgChildReadinessChildGuard,
         cancellation_token: tokio_util::sync::CancellationToken,
+        generation: u64,
     ) -> Self {
         Self {
+            generation,
             update_full_lock: tokio::sync::Mutex::new(()),
             pending: parking_lot::Mutex::new(PendingState::new()),
             pending_changed: tokio::sync::Notify::new(),
@@ -312,11 +367,16 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
             ready_notify: tokio::sync::Notify::new(),
             cancellation_token,
             live_task: Mutex::new(None),
+            committed_state_io_lock: tokio::sync::Mutex::new(()),
         }
     }
 
     pub fn cancellation_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.cancellation_token
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Take the JoinHandle for the live task (if any). Used by re-mount and
@@ -362,7 +422,7 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
 
     /// Resolve readiness with error. Drops the guard without calling
     /// resolve(); the guard's Drop reports failure to the parent.
-    fn resolve_ready_with_error(&self, _err: Error) {
+    fn resolve_ready_with_error(&self) {
         let mut state = self.readiness.lock().unwrap();
         if !state.ready {
             state.ready = true;
@@ -405,6 +465,8 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
         // The follow-up `cancel_and_await_quiescence` re-cancels (idempotent
         // — no-op on the second call) and then waits for `pending` to drain.
         self.cancellation_token.cancel();
+        let state_io_guard = self.committed_state_io_lock.lock().await;
+        drop(state_io_guard);
         let handle = self.live_task.lock().unwrap().take();
         if let Some(handle) = handle {
             let _ = handle.await;
@@ -418,6 +480,8 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
     /// can rely on root-token cascade to terminate `process_live`.
     pub async fn cancel_and_await_quiescence(&self) {
         self.cancellation_token.cancel();
+        let state_io_guard = self.committed_state_io_lock.lock().await;
+        drop(state_io_guard);
         loop {
             let notified = self.pending_changed.notified();
             tokio::pin!(notified);
@@ -446,6 +510,7 @@ pub struct LiveComponentController<Prof: EngineProfile> {
     host_ctx: Arc<Prof::HostCtx>,
     full_reprocess: bool,
     live: bool,
+    effect_mode: EffectMode,
 
     /// Providers inherited from the parent component context at creation time.
     /// Immutable — process() may not call use_mount(), so no new providers are created.
@@ -461,6 +526,7 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
         full_reprocess: bool,
         live: bool,
         providers: rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
+        effect_mode: EffectMode,
     ) -> Self {
         Self {
             component,
@@ -469,6 +535,7 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
             host_ctx,
             full_reprocess,
             live,
+            effect_mode,
             providers,
         }
     }
@@ -498,14 +565,14 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     /// set-reduces, and not participating in any commit, so it is safe in the
     /// non-committing `process_live` context.
     pub async fn read_committed_state(&self, key: &StableKey) -> Result<Option<Vec<u8>>> {
+        let _state_io_guard = self.state.committed_state_io_lock.lock().await;
+        if self.state.cancellation_token.is_cancelled() {
+            return Err(make_cancelled_error());
+        }
         self.component
             .app_ctx()
             .app_store()
-            .read_user_state(
-                self.component.stable_path(),
-                db_schema::StateKind::Live,
-                key,
-            )
+            .read_live_user_state(self.component.stable_path(), key, self.state.generation())
             .await
     }
 
@@ -516,14 +583,18 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     /// persist a bootstrap flag / logic version without going through
     /// `syn.use_state` (which targets the prune-eligible `Regular` keyspace).
     pub async fn write_committed_state(&self, key: &StableKey, value: Vec<u8>) -> Result<()> {
+        let _state_io_guard = self.state.committed_state_io_lock.lock().await;
+        if self.state.cancellation_token.is_cancelled() {
+            return Err(make_cancelled_error());
+        }
         self.component
             .app_ctx()
             .app_store()
-            .write_user_state_standalone(
+            .write_live_user_state_standalone(
                 self.component.stable_path(),
-                db_schema::StateKind::Live,
                 key,
                 &value,
+                self.state.generation(),
             )
             .await
     }
@@ -560,7 +631,7 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
         // the behavior of background `mount()` calls. Without on_error wired
         // here, periodic-refresh patterns (e.g. `syn.auto_refresh`) would
         // silently swallow cycle failures.
-        let context = ComponentProcessorContext::new(
+        let context = ComponentProcessorContext::new_with_live_fence(
             self.component.clone(),
             None,
             self.processing_stats.clone(),
@@ -574,7 +645,9 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
                 self.live,
                 on_error.clone(),
                 None,
+                self.effect_mode,
             ),
+            Some(self.state.clone()),
         );
 
         let handle = self
@@ -613,10 +686,6 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     }
 
     /// Delete a child component. Same coalescing model as `update()`.
-    /// The DB existence-removal + tombstone write happens synchronously
-    /// here (before dispatch), so `update_full`'s tombstone scan sees a
-    /// consistent state once dispatch returns.
-    ///
     /// Failures route through `on_error` (parent's exception handler
     /// chain). The handler's `Result` decides propagation, symmetric
     /// with `update()` — `Ok` swallows; `Err` propagates via the
@@ -627,38 +696,6 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
         subpath: StablePath,
         on_error: Option<OnError>,
     ) -> Result<ComponentExecutionHandle> {
-        // Synchronously remove the existence entry and write a tombstone,
-        // matching the prior implementation's contract.
-        if let Some((parent_ref, child_key)) = subpath.as_ref().split_parent() {
-            let app_store = self.component.app_ctx().app_store().clone();
-            let parent_path: StablePath = parent_ref.into();
-            let child_key = child_key.clone();
-            let component_path = self.component.stable_path().clone();
-            let relative_child = subpath.as_ref().strip_parent(component_path.as_ref())?;
-            let relative_child: StablePath = relative_child.into();
-            self.component
-                .app_ctx()
-                .env()
-                .run_txn(move |wtxn| {
-                    let app_store = app_store.clone();
-                    let parent_path = parent_path.clone();
-                    let child_key = child_key.clone();
-                    let component_path = component_path.clone();
-                    let relative_child = relative_child.clone();
-                    Box::pin(async move {
-                        app_store
-                            .remove_child_with_tombstone(
-                                wtxn,
-                                &parent_path,
-                                &child_key,
-                                &component_path,
-                                &relative_child,
-                            )
-                            .await
-                    })
-                })
-                .await?;
-        }
         self.dispatch(subpath, Op::Delete { on_error }).await
     }
 
@@ -725,6 +762,7 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
         let providers = self.providers.clone();
         let full_reprocess = self.full_reprocess;
         let live = self.live;
+        let effect_mode = self.effect_mode;
 
         let handle = crate::engine::runtime::get_runtime().spawn(async move {
             drain_task_body(
@@ -736,6 +774,7 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
                 providers,
                 full_reprocess,
                 live,
+                effect_mode,
             )
             .await;
         });
@@ -788,6 +827,8 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     {
         let token = self.state.cancellation_token.clone();
         let state = self.state.clone();
+        let app_ctx = self.component.app_ctx().clone();
+        let operation_id = self.processing_stats.operation_id();
         let handle = crate::engine::runtime::get_runtime().spawn(async move {
             let result = tokio::select! {
                 biased;
@@ -801,10 +842,14 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
                     // as clean shutdown. Otherwise: real failure.
                     if token.is_cancelled() || e.is_cancelled() {
                         state.ensure_mark_ready();
-                    } else if !state.is_ready() {
-                        state.resolve_ready_with_error(e);
                     } else {
-                        error!("process_live failed after mark_ready: {e:?}");
+                        let shared_error = SharedError::from(e);
+                        app_ctx.report_live_terminal_error(operation_id, shared_error.clone());
+                        if !state.is_ready() {
+                            state.resolve_ready_with_error();
+                        } else {
+                            error!("process_live failed after mark_ready: {shared_error:?}");
+                        }
                     }
                 }
             }
@@ -822,100 +867,30 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     /// controller's `process_live`. This is the Rust side of the
     /// `operator.update(p, LiveCompClass)` branch (Slice F).
     ///
-    /// Acquires `update_full_lock` *cancellably* (biased select with
-    /// `cancellation_token.cancelled()`), re-checks cancellation post-acquire,
-    /// then constructs a fresh parent processor context anchored at this
-    /// controller's component (mirroring `update_full`'s ctx construction)
-    /// and calls `mount_live_prepare` + `MountLivePending::complete()` to
-    /// install the inner live state at the child path.
-    ///
-    /// The `update_full_lock` is held for the duration of `complete()`,
-    /// which does:
-    ///   - cancel-and-drain of any prior incarnation at this child path
-    ///   - install of the new `LiveComponentState` (writing `child.live_state`
-    ///     and registering with `app_ctx.live_components`)
+    /// The mount is dispatched through the same per-subpath queue as plain
+    /// updates and deletes. This preserves latest-operation-wins ordering
+    /// across live/plain/delete type transitions while the queue's
+    /// `update_full_active` gate serializes it with full refreshes.
     ///
     /// The returned `MountLiveResult` carries the inner controller (caller
     /// will pass to Python and eventually call `.start()`) and the readiness
     /// handle (resolves when inner `mark_ready` fires or the inner is
     /// cancelled).
     ///
-    /// Cancellation contract: returns `Err(<cancelled>)` if the controller's
-    /// token fires before or during the lock acquire / mount. The Python
-    /// wrapper maps this to `MountOutcome.cancelled` if needed.
+    /// Cancellation contract: returns `Err(<cancelled>)` if this mount is
+    /// superseded before execution or the controller is cancelled.
     pub async fn mount_inner_live(&self, child_path: StablePath) -> Result<MountLiveResult<Prof>> {
-        // Cancellable lock acquisition: shutdown breaks out within one poll.
-        let _full_guard = tokio::select! {
-            biased;
-            _ = self.state.cancellation_token.cancelled() => return Err(make_cancelled_error()),
-            guard = self.state.update_full_lock.lock() => guard,
-        };
-
-        // Post-acquire re-check: the token may have fired *while we were
-        // waiting* but after the cancelled-arm was last polled.
-        if self.state.cancellation_token.is_cancelled() {
-            return Err(make_cancelled_error());
+        let (result_tx, result_rx) = oneshot::channel();
+        let _internal_handle = self
+            .dispatch(child_path, Op::MountLive { result_tx })
+            .await?;
+        match result_rx.await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(error)) => Err(std::result::Result::<(), _>::Err(error)
+                .into_result()
+                .expect_err("nested live mount returned a shared error")),
+            Err(_) => Err(make_cancelled_error()),
         }
-
-        // Build a fresh parent processor context anchored at our component
-        // (mirroring `update_full`'s ctx construction). The building state
-        // is local to this context — child registration in `child_path_set`
-        // is benign: nothing else reads this isolated state.
-        let parent_ctx = ComponentProcessorContext::new(
-            self.component.clone(),
-            None,
-            self.processing_stats.clone(),
-            self.host_ctx.clone(),
-            // No on_error on this synthetic parent context — it only
-            // exists to register the child in `child_path_set`; no
-            // commit/GC sweep runs through it.
-            ComponentProcessingAction::new_build(
-                self.providers.clone(),
-                self.full_reprocess,
-                self.live,
-                None,
-                None,
-            ),
-        );
-        let fn_ctx = FnCallContext::default();
-
-        let pending = mount_live_prepare(&parent_ctx, &fn_ctx, child_path.clone(), self.live)?;
-        let result = pending.complete().await?;
-
-        // Polish 4: write the `ChildExistence` DB row symmetric with the
-        // through-`process()` install path (where it's written via
-        // submit/commit). Without this row, the next `update_full`'s
-        // tombstone scan can't see this child and won't reconcile its
-        // target states on parent re-runs that DON'T re-issue this
-        // operator.update call. With this row, the install/tombstone
-        // state machine is symmetric across both installer paths.
-        if let Some((parent_path_ref, child_key)) = child_path.as_ref().split_parent() {
-            let app_store = self.component.app_ctx().app_store().clone();
-            let parent_path: StablePath = parent_path_ref.into();
-            let child_key = child_key.clone();
-            self.component
-                .app_ctx()
-                .env()
-                .run_txn(move |wtxn| {
-                    let app_store = app_store.clone();
-                    let parent_path = parent_path.clone();
-                    let child_key = child_key.clone();
-                    Box::pin(async move {
-                        crate::engine::execution::ensure_path_node_type(
-                            &app_store,
-                            wtxn,
-                            parent_path.as_ref(),
-                            &child_key,
-                            crate::state::db_schema::StablePathNodeType::Component,
-                        )
-                        .await
-                    })
-                })
-                .await?;
-        }
-
-        Ok(result)
-        // _full_guard drops here, releasing update_full_lock.
     }
 }
 
@@ -1037,6 +1012,7 @@ async fn drain_task_body<Prof: EngineProfile>(
     providers: rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
     full_reprocess: bool,
     live: bool,
+    effect_mode: EffectMode,
 ) {
     loop {
         // ── Step 1: take queued op (or gate / exit) ──
@@ -1103,6 +1079,7 @@ async fn drain_task_body<Prof: EngineProfile>(
             &providers,
             full_reprocess,
             live,
+            effect_mode,
         )
         .await;
 
@@ -1148,16 +1125,52 @@ async fn drain_task_body<Prof: EngineProfile>(
 
 /// Execute a single op. Returns `Result<()>` from the underlying child
 /// `run_in_background` / `delete` flow.
-async fn run_op<Prof: EngineProfile>(
-    op: Op<Prof>,
+#[allow(clippy::too_many_arguments)]
+async fn mount_inner_live_now<Prof: EngineProfile>(
     component: &Component<Prof>,
-    subpath: &StablePath,
-    state: &LiveComponentState<Prof>,
+    child_path: &StablePath,
+    state: &Arc<LiveComponentState<Prof>>,
     processing_stats: &ProcessingStats,
     host_ctx: &Arc<Prof::HostCtx>,
     providers: &rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
     full_reprocess: bool,
     live: bool,
+    effect_mode: EffectMode,
+) -> Result<MountLiveResult<Prof>> {
+    if state.cancellation_token.is_cancelled() {
+        return Err(make_cancelled_error());
+    }
+    let parent_ctx = ComponentProcessorContext::new_with_live_fence(
+        component.clone(),
+        None,
+        processing_stats.clone(),
+        host_ctx.clone(),
+        ComponentProcessingAction::new_build(
+            providers.clone(),
+            full_reprocess,
+            live,
+            None,
+            None,
+            effect_mode,
+        ),
+        Some(state.clone()),
+    );
+    let fn_ctx = FnCallContext::default();
+    let pending = mount_live_prepare(&parent_ctx, &fn_ctx, child_path.clone(), live)?;
+    pending.complete().await
+}
+
+async fn run_op<Prof: EngineProfile>(
+    op: Op<Prof>,
+    component: &Component<Prof>,
+    subpath: &StablePath,
+    state: &Arc<LiveComponentState<Prof>>,
+    processing_stats: &ProcessingStats,
+    host_ctx: &Arc<Prof::HostCtx>,
+    providers: &rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
+    full_reprocess: bool,
+    live: bool,
+    effect_mode: EffectMode,
 ) -> Result<()> {
     let _ = state; // kept for symmetry / future use
     let child = component.get_child(subpath.clone());
@@ -1166,7 +1179,19 @@ async fn run_op<Prof: EngineProfile>(
             processor,
             on_error,
         } => {
-            let context = ComponentProcessorContext::new(
+            if let Some(existing_state) = child.live_state() {
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(LIVE_COMPONENT_DRAIN_TIMEOUT_SECS),
+                    existing_state.cancel_and_drain(),
+                )
+                .await
+                .is_err()
+                {
+                    client_bail!("live child transition timed out before plain update");
+                }
+                child.clear_live_state_if(&existing_state);
+            }
+            let context = ComponentProcessorContext::new_with_live_fence(
                 child.clone(),
                 None,
                 processing_stats.clone(),
@@ -1180,20 +1205,143 @@ async fn run_op<Prof: EngineProfile>(
                     live,
                     on_error.clone(),
                     None,
+                    effect_mode,
                 ),
+                Some(state.clone()),
             );
             let inner_handle = child
                 .run_in_background(processor, context, on_error, None)
                 .await?;
             inner_handle.ready().await
         }
+        Op::MountLive { result_tx } => {
+            match mount_inner_live_now(
+                component,
+                subpath,
+                state,
+                processing_stats,
+                host_ctx,
+                providers,
+                full_reprocess,
+                live,
+                effect_mode,
+            )
+            .await
+            {
+                Ok(result) => {
+                    if let Err(Ok(result)) = result_tx.send(Ok(result)) {
+                        let installed_state = result.controller.state().clone();
+                        result
+                            .controller
+                            .component()
+                            .clear_live_state_if(&installed_state);
+                        installed_state.cancel_and_drain().await;
+                        return Err(make_cancelled_error());
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    let shared = SharedError::from(error);
+                    if result_tx.send(Err(shared.clone())).is_ok() {
+                        Ok(())
+                    } else {
+                        Err(std::result::Result::<(), _>::Err(shared)
+                            .into_result()
+                            .expect_err("nested live mount receiver was dropped"))
+                    }
+                }
+            }
+        }
         Op::Delete { on_error } => {
-            let context = child.new_processor_context_for_delete(
-                providers.clone(),
+            if state.cancellation_token.is_cancelled() {
+                return Err(make_cancelled_error());
+            }
+            // A nested live child owns independent process_live and drain
+            // tasks. Quiesce that exact incarnation before removing its
+            // existence or writing a tombstone; otherwise it can reinsert
+            // target/state data after this delete has apparently completed.
+            if let Some(child_live_state) = child.live_state()
+                && tokio::time::timeout(
+                    std::time::Duration::from_secs(LIVE_COMPONENT_DRAIN_TIMEOUT_SECS),
+                    child_live_state.cancel_and_drain(),
+                )
+                .await
+                .is_err()
+            {
+                client_bail!(
+                    "live child cleanup timed out before durable delete; no tombstone was written"
+                );
+            }
+            if let Some(child_live_state) = child.live_state() {
+                child.clear_live_state_if(&child_live_state);
+            }
+            if state.cancellation_token.is_cancelled() {
+                return Err(make_cancelled_error());
+            }
+            let tombstone_generation =
+                if let Some((parent_ref, child_key)) = subpath.as_ref().split_parent() {
+                    let app_store = component.app_ctx().app_store().clone();
+                    let parent_path: StablePath = parent_ref.into();
+                    let child_key = child_key.clone();
+                    let component_path = component.stable_path().clone();
+                    let relative_child = subpath.as_ref().strip_parent(component_path.as_ref())?;
+                    let relative_child: StablePath = relative_child.into();
+                    let verification_policy = match effect_mode {
+                        EffectMode::Compatibility => NativeVerificationPolicy::LegacyUnverified,
+                        EffectMode::Strict => NativeVerificationPolicy::QueryVerified,
+                    };
+                    let fallback_generation = Some(state.generation());
+                    let cancellation_token = state.cancellation_token.clone();
+                    component
+                        .app_ctx()
+                        .env()
+                        .run_txn(move |wtxn| {
+                            let app_store = app_store.clone();
+                            let parent_path = parent_path.clone();
+                            let child_key = child_key.clone();
+                            let component_path = component_path.clone();
+                            let relative_child = relative_child.clone();
+                            let cancellation_token = cancellation_token.clone();
+                            Box::pin(async move {
+                                if cancellation_token.is_cancelled() {
+                                    return Err(make_cancelled_error());
+                                }
+                                let Some(tombstone) = app_store
+                                    .remove_child_with_tombstone(
+                                        wtxn,
+                                        &parent_path,
+                                        &child_key,
+                                        &component_path,
+                                        &relative_child,
+                                        ChildTombstoneCause::LiveDelete,
+                                        None,
+                                        fallback_generation,
+                                        verification_policy,
+                                    )
+                                    .await?
+                                else {
+                                    return Err(make_cancelled_error());
+                                };
+                                Ok(tombstone.generation)
+                            })
+                        })
+                        .await?
+                } else {
+                    None
+                };
+            let context = ComponentProcessorContext::new_with_live_fence(
+                child.clone(),
                 None,
                 processing_stats.clone(),
                 host_ctx.clone(),
-                on_error,
+                ComponentProcessingAction::Delete(crate::engine::context::ComponentDeleteContext {
+                    providers: providers.clone(),
+                    on_error,
+                    effect_mode,
+                    provider_missing_is_error: false,
+                    tombstone_generation,
+                }),
+                Some(state.clone()),
             );
             let inner_handle = child.delete(context, None)?;
             inner_handle.ready().await
@@ -1261,6 +1409,6 @@ fn make_handle(rx: oneshot::Receiver<HandleOutcome>) -> ComponentExecutionHandle
 /// it idiomatically. `Error::is_cancelled()` returns `true` from any layer,
 /// so the drain task's reclassification logic can detect it via the typed
 /// API rather than string-matching.
-fn make_cancelled_error() -> Error {
+pub(crate) fn make_cancelled_error() -> Error {
     Error::cancelled()
 }

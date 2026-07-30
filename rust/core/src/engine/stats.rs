@@ -1,5 +1,9 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::prelude::*;
 use tokio::sync::watch;
+
+static NEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Sentinel version sent on the watch channel when processing is fully terminated
 /// (ready + all descendants done). Consumers check this to exit their watch loop.
@@ -49,6 +53,7 @@ pub struct VersionedProcessingStats {
 /// Thread-safe container for processing stats with version tracking and change notification.
 #[derive(Clone)]
 pub struct ProcessingStats {
+    operation_id: u64,
     inner: Arc<Mutex<VersionedProcessingStats>>,
     version_tx: watch::Sender<u64>,
     version_rx: watch::Receiver<u64>,
@@ -66,15 +71,24 @@ impl Default for ProcessingStats {
 
 impl ProcessingStats {
     pub fn new() -> Self {
+        Self::new_with_operation_id(NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    pub(crate) fn new_with_operation_id(operation_id: u64) -> Self {
         let (version_tx, version_rx) = watch::channel(0u64);
         let (terminated_tx, terminated_rx) = watch::channel(false);
         Self {
+            operation_id,
             inner: Arc::new(Mutex::new(VersionedProcessingStats::default())),
             version_tx,
             version_rx,
             terminated_tx,
             terminated_rx,
         }
+    }
+
+    pub(crate) fn operation_id(&self) -> u64 {
+        self.operation_id
     }
 
     pub fn update(&self, operation_name: &str, mutator: impl FnOnce(&mut ProcessingStatsGroup)) {

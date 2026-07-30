@@ -38,8 +38,8 @@ from .target_state import (
     ChildTargetDef,
     TargetActionSink,
     TargetHandler,
+    _NativeEffectDescriptorTuple,
 )
-
 
 _SAFE_CODE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*\Z")
 _MAX_SAFE_CODE_LENGTH = 256
@@ -357,8 +357,8 @@ class VerifiedTargetActionSink(Generic[ActionT, ApplyResultT]):
         self._describe_action = describe_action or _default_describe_action
         self._policy = policy or VerificationRetryPolicy()
         self._invocation_scope = invocation_scope
-        callback = cast(AsyncTargetActionSinkFn[ActionT, Any], self)
-        self._sink = TargetActionSink.from_async_fn(callback)
+        callback = cast(AsyncTargetActionSinkFn[Any, Any], self)
+        self._sink = TargetActionSink._from_verified_wrapper(callback)
 
     @property
     def sink(self) -> TargetActionSink[ActionT, Any]:
@@ -388,8 +388,19 @@ class VerifiedTargetActionSink(Generic[ActionT, ApplyResultT]):
         /,
     ) -> ApplyResultT:
         action_batch = tuple(actions)
-        descriptors = self._describe_actions(action_batch)
+        return await self._call_described(
+            context_provider,
+            action_batch,
+            self._describe_actions(action_batch),
+        )
 
+    async def _call_described(
+        self,
+        context_provider: ContextProvider,
+        action_batch: tuple[ActionT, ...],
+        descriptors: tuple[EffectDescriptor, ...],
+        /,
+    ) -> ApplyResultT:
         apply_failed = False
         try:
             applied = await self._apply(context_provider, action_batch)
@@ -424,6 +435,28 @@ class VerifiedTargetActionSink(Generic[ActionT, ApplyResultT]):
             raise TargetVerificationError(outcomes)
         return applied
 
+    async def _call_bound_for_core(
+        self,
+        context_provider: ContextProvider,
+        actions: Sequence[ActionT],
+        descriptor_values: Sequence[_NativeEffectDescriptorTuple],
+        /,
+    ) -> ApplyResultT:
+        action_batch = tuple(actions)
+        descriptors = _descriptors_from_core(descriptor_values, len(action_batch))
+        cleanup = (
+            self._invocation_scope() if self._invocation_scope is not None else None
+        )
+        try:
+            return await self._call_described(
+                context_provider,
+                action_batch,
+                descriptors,
+            )
+        finally:
+            if cleanup is not None:
+                cleanup()
+
     def _describe_actions(
         self, actions: Sequence[ActionT]
     ) -> tuple[EffectDescriptor, ...]:
@@ -454,6 +487,14 @@ class VerifiedTargetActionSink(Generic[ActionT, ApplyResultT]):
                 VerificationProtocolCode.DUPLICATE_ACTION_ID
             )
         return tuple(descriptors)
+
+    def _describe_for_core(
+        self,
+        action: ActionT,
+        /,
+    ) -> tuple[str, str, str, int, str]:
+        descriptor = self._describe_actions((action,))[0]
+        return _descriptor_to_core_tuple(descriptor)
 
     async def _verify_bounded(
         self,
@@ -526,6 +567,59 @@ class VerifiedTargetActionSink(Generic[ActionT, ApplyResultT]):
                 last_outcomes=last_outcomes,
                 attempt_count=attempt_count,
             )
+
+
+def _descriptor_to_core_tuple(
+    descriptor: EffectDescriptor,
+) -> _NativeEffectDescriptorTuple:
+    return (
+        descriptor.operation_kind.value,
+        descriptor.action_id,
+        descriptor.source_digest,
+        descriptor.source_generation,
+        descriptor.target_locator_digest,
+    )
+
+
+def _descriptor_from_core_tuple(
+    value: _NativeEffectDescriptorTuple,
+) -> EffectDescriptor:
+    operation, action_id, source_digest, source_generation, target_locator_digest = (
+        value
+    )
+    try:
+        descriptor = EffectDescriptor(
+            operation_kind=EffectOperation(operation),
+            action_id=action_id,
+            source_digest=source_digest,
+            source_generation=source_generation,
+            target_locator_digest=target_locator_digest,
+        )
+        _validate_descriptor(descriptor)
+    except (TypeError, ValueError):
+        raise TargetActionDescriptionError(
+            VerificationProtocolCode.ACTION_DESCRIPTOR_INVALID
+        ) from None
+    return descriptor
+
+
+def _descriptors_from_core(
+    values: Sequence[_NativeEffectDescriptorTuple],
+    action_count: int,
+) -> tuple[EffectDescriptor, ...]:
+    if len(values) != action_count:
+        raise TargetActionDescriptionError(
+            VerificationProtocolCode.ACTION_DESCRIPTOR_INVALID
+        ) from None
+    try:
+        descriptors = tuple(_descriptor_from_core_tuple(value) for value in values)
+    except (TypeError, ValueError):
+        raise TargetActionDescriptionError(
+            VerificationProtocolCode.ACTION_DESCRIPTOR_INVALID
+        ) from None
+    if len({descriptor.action_id for descriptor in descriptors}) != len(descriptors):
+        raise TargetActionDescriptionError(VerificationProtocolCode.DUPLICATE_ACTION_ID)
+    return descriptors
 
 
 def _default_describe_action(action: ActionT) -> EffectDescriptor:
