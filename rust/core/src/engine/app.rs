@@ -6,10 +6,12 @@ use crate::engine::component::Component;
 use crate::engine::context::{AppContext, PreviewActionCollector};
 use crate::engine::deadline::DeadlineContext;
 use crate::engine::live_component::{LIVE_COMPONENT_DRAIN_TIMEOUT_SECS, LiveComponentState};
+use crate::engine::target_state::EffectMode;
 
 use crate::engine::environment::{AppRegistration, Environment};
 use crate::engine::runtime::get_runtime;
 use crate::state::stable_path::StablePath;
+use synor_utils::error::SharedResultExt;
 use tokio::sync::watch;
 
 /// Options for updating an app.
@@ -123,12 +125,50 @@ impl<Prof: EngineProfile> App<Prof> {
         AppOpHandle<Prof::FunctionData>,
         Option<PreviewActionCollector<Prof>>,
     )> {
+        self.update_controlled(
+            root_processor,
+            options,
+            host_ctx,
+            preview_collector,
+            EffectMode::Compatibility,
+        )
+    }
+
+    /// Internal bridge entry point for runtime-controlled target-effect policy.
+    ///
+    /// Kept separate from [`AppUpdateOptions`] so existing Rust callers can
+    /// continue constructing that public options struct without a new field,
+    /// and so strictness does not become a general public App knob.
+    #[doc(hidden)]
+    pub fn update_controlled(
+        &self,
+        root_processor: Prof::ComponentProc,
+        options: AppUpdateOptions,
+        host_ctx: Arc<Prof::HostCtx>,
+        preview_collector: Option<PreviewActionCollector<Prof>>,
+        effect_mode: EffectMode,
+    ) -> Result<(
+        AppOpHandle<Prof::FunctionData>,
+        Option<PreviewActionCollector<Prof>>,
+    )> {
+        if preview_collector.is_some() && options.live {
+            client_bail!("live app updates are not supported during preview");
+        }
         // Refresh the app token if a prior operation (e.g. drop_app) cancelled
         // it, so this update starts with a non-cancelled token.
         self.app_ctx().reset_cancellation_token_if_cancelled();
         let processing_stats = ProcessingStats::new();
+        let operation_id = processing_stats.operation_id();
+        self.app_ctx().clear_live_terminal_errors(operation_id);
         let version_rx = processing_stats.subscribe();
         let deadline = options.deadline;
+        let strict_on_error = if effect_mode == EffectMode::Strict {
+            Some(Arc::new(|err| {
+                Box::pin(async move { Err(err) }) as futures::future::BoxFuture<'static, Result<()>>
+            }) as crate::engine::component::OnError)
+        } else {
+            None
+        };
         let context = self.root_component.new_processor_context_for_build(
             None,
             processing_stats.clone(),
@@ -136,18 +176,19 @@ impl<Prof: EngineProfile> App<Prof> {
             options.live,
             preview_collector.clone(),
             host_ctx,
-            // Root has no installed on_error in Build mode — orphan-delete
-            // failures from the root's GC sweep log + swallow. (Cascading
-            // a raising on_error from root would equate "any orphan delete
-            // failed" with "the whole update failed", which is too strict;
-            // tombstones survive for retry on the next reconcile.)
-            None,
+            // Compatibility keeps the historical log-and-retry behavior.
+            // Strict controlled runs propagate orphan cleanup failures to the
+            // root result while retaining tombstones for a later retry.
+            strict_on_error,
+            effect_mode,
         )?;
 
         let root_component = self.root_component.clone();
         let stats_for_task = processing_stats.clone();
         let cancel_token = self.app_ctx().cancellation_token();
         let live = options.live;
+        let strict_effects = effect_mode == EffectMode::Strict;
+        let preview = preview_collector.is_some();
         let span = Span::current();
         let task = get_runtime().spawn(
             async move {
@@ -159,7 +200,7 @@ impl<Prof: EngineProfile> App<Prof> {
                         .result(None)
                         .await
                 };
-                let result = tokio::select! {
+                let mut result = tokio::select! {
                     result = run_fut => result,
                     _ = cancel_token.cancelled() => Err(internal_error!("Operation cancelled")),
                 };
@@ -167,6 +208,43 @@ impl<Prof: EngineProfile> App<Prof> {
                 if live && result.is_ok() {
                     // In live mode, wait for all descendants to finish before signaling termination.
                     root_component.wait_until_inactive().await;
+                }
+                let live_terminal_error = root_component
+                    .app_ctx()
+                    .take_live_terminal_error(operation_id);
+                if result.is_ok() && strict_effects
+                    && let Some(error) = live_terminal_error
+                {
+                    result = Err(
+                        std::result::Result::<(), _>::Err(error)
+                            .into_result()
+                            .expect_err("live terminal error was present"),
+                    );
+                }
+                // Live descendants can create or fail native obligations
+                // after the root processor returns. Validate only after they
+                // quiesce so a late cleanup failure cannot be reported as a
+                // successful strict run.
+                if result.is_ok() && strict_effects && !preview {
+                    let app_store = root_component.app_ctx().app_store();
+                    match async {
+                        let counts = app_store.native_effect_counts().await?;
+                        let has_tombstones =
+                            app_store.has_query_verified_tombstones().await?;
+                        Ok::<_, Error>((counts, has_tombstones))
+                    }
+                    .await
+                    {
+                        Ok((counts, has_tombstones))
+                            if counts.has_unresolved() || has_tombstones =>
+                        {
+                            result = Err(client_error!(
+                                "strict target-effect validation found unresolved cleanup obligations"
+                            ));
+                        }
+                        Err(error) => result = Err(error),
+                        Ok(_) => {}
+                    }
                 }
                 stats_for_task.notify_terminated();
                 result
@@ -189,7 +267,8 @@ impl<Prof: EngineProfile> App<Prof> {
     /// Drop the app, reverting all target states and clearing the database.
     ///
     /// Returns an `AppOpHandle<()>` for tracking progress and awaiting completion.
-    /// Synchronous setup (cancellation, context construction) happens before the spawn.
+    /// Synchronous context construction happens before the spawn. Evidence
+    /// preflight runs inside the task before live cancellation.
     ///
     /// **Live-component drain**: atomically cancels the app token AND snapshots
     /// the live-components registry, then awaits each captured controller's
@@ -204,16 +283,6 @@ impl<Prof: EngineProfile> App<Prof> {
         // Refresh the app token if a prior operation cancelled it, so the
         // cancel below applies to a token shared with any concurrent update.
         self.app_ctx().reset_cancellation_token_if_cancelled();
-        // Atomically cancel the app token AND snapshot the live-components
-        // registry under the registry lock. This closes the race where a
-        // concurrent mount_live_async could register *after* a separate
-        // snapshot but *before* observing a separately-issued cancel.
-        // Acquiring the lock first ensures any in-flight register-into-list
-        // either happens before our snapshot (caught) or queues behind the
-        // lock and sees the cancelled token immediately on first poll once
-        // we release.
-        let live_snapshot = self.app_ctx().cancel_and_snapshot_live_components();
-
         let processing_stats = ProcessingStats::default();
         let version_rx = processing_stats.subscribe();
         let providers = self
@@ -241,6 +310,14 @@ impl<Prof: EngineProfile> App<Prof> {
             processing_stats.clone(),
             host_ctx,
             Some(raise_on_error),
+            EffectMode::Compatibility,
+            // A CLI drop commonly runs in a fresh process where providers are
+            // registered only by executing the app. Preserve legacy cleanup
+            // behavior for those unregistered compatibility targets. The
+            // read-only evidence/tombstone preflight below still prevents any
+            // unresolved governed cleanup obligation from being erased.
+            false,
+            None,
         );
 
         let root_component = self.root_component.clone();
@@ -248,10 +325,38 @@ impl<Prof: EngineProfile> App<Prof> {
         let span = Span::current();
         let task = get_runtime().spawn(
             async move {
+                let app_store = root_component.app_ctx().app_store();
+                let native_effects = app_store.native_effect_counts().await?;
+                let has_verified_tombstones =
+                    app_store.has_query_verified_tombstones().await?;
+                if native_effects.has_unresolved() || has_verified_tombstones {
+                    client_bail!(
+                        "app drop is blocked by unresolved native target-effect or tombstone obligations"
+                    );
+                }
+                // Cancel and snapshot only after the read-only preflight, so
+                // a drop rejected by already-known evidence is non-disruptive.
+                let live_snapshot = root_component
+                    .app_ctx()
+                    .cancel_and_snapshot_live_components();
                 // ── Live-component drain (must complete BEFORE deleting the
                 // root component / clearing the DB, so leaked drain tasks
                 // don't race teardown of shared resources) ──
-                drain_live_components(live_snapshot).await;
+                drain_live_components(live_snapshot).await?;
+
+                // A live submit may have crossed its first fence immediately
+                // before cancellation and persisted an obligation while the
+                // drain was in progress. Recheck after quiescence and before
+                // the first root-delete mutation.
+                let app_store = root_component.app_ctx().app_store();
+                let native_effects = app_store.native_effect_counts().await?;
+                let has_verified_tombstones =
+                    app_store.has_query_verified_tombstones().await?;
+                if native_effects.has_unresolved() || has_verified_tombstones {
+                    client_bail!(
+                        "app drop is blocked by unresolved native target-effect or tombstone obligations"
+                    );
+                }
 
                 // Delete the root component (uses on_error from the context).
                 let handle = root_component.clone().delete(context.clone(), None)?;
@@ -304,10 +409,9 @@ impl<Prof: EngineProfile> App<Prof> {
 /// `LIVE_COMPONENT_DRAIN_TIMEOUT_SECS` timeout (defined in `live_component.rs`,
 /// shared with `mount_live_async`'s cancel-and-drain of a prior incarnation).
 ///
-/// On timeout, the drain is leaked — see the "drop_app" contract in
-/// `specs/live_component/design.md` (this is supported only when followed
-/// by process exit or another `app.update()` of the same `App` instance;
-/// new-`App`-after-drop is unsupported).
+/// A timeout fails the drop before root deletion. Continuing would allow a
+/// leaked task to create a native obligation after the preflight or mutate
+/// external state while operational tracking is being cleared.
 ///
 /// Awaits two things per component (inside the same timeout budget):
 ///  1. `cancel_and_await_quiescence()` — drains the per-subpath workers
@@ -321,21 +425,30 @@ impl<Prof: EngineProfile> App<Prof> {
 /// Per-component drains run concurrently via `futures::future::join_all`,
 /// so total wait is bounded by `max(per-component drain time)` rather than
 /// `sum(...)`.
-async fn drain_live_components<Prof: EngineProfile>(snapshot: Vec<Arc<LiveComponentState<Prof>>>) {
+async fn drain_live_components<Prof: EngineProfile>(
+    snapshot: Vec<Arc<LiveComponentState<Prof>>>,
+) -> Result<()> {
     if snapshot.is_empty() {
-        return;
+        return Ok(());
     }
     let drains = snapshot.into_iter().map(|state| async move {
-        let _ = tokio::time::timeout(
+        tokio::time::timeout(
             std::time::Duration::from_secs(LIVE_COMPONENT_DRAIN_TIMEOUT_SECS),
             async {
                 state.cancel_and_await_quiescence().await;
                 if let Some(handle) = state.live_task_handle() {
-                    let _ = handle.await;
+                    handle.await.map_err(|error| {
+                        internal_error!("live component task failed during drop: {error}")
+                    })?;
                 }
+                Ok::<_, Error>(())
             },
         )
-        .await;
+        .await
+        .map_err(|_| client_error!("live component drain timed out before app drop"))?
     });
-    futures::future::join_all(drains).await;
+    for result in futures::future::join_all(drains).await {
+        result?;
+    }
+    Ok(())
 }

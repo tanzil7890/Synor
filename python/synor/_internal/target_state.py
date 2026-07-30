@@ -1,36 +1,37 @@
 from __future__ import annotations
 
+import threading
+import weakref
 from typing import (
+    Any,
     Collection,
     Generic,
     Literal,
     NamedTuple,
     Protocol,
-    Any,
     Sequence,
     TypeAlias,
     overload,
 )
-import threading
-import weakref
+
 from typing_extensions import TypeVar
 
 from . import core
 from .component_ctx import get_context_from_ctx
 from .context_keys import ContextProvider
-from .pending_marker import PendingS, MaybePendingS, ResolvesTo
+from .pending_marker import MaybePendingS, PendingS, ResolvesTo
 from .serde import (
-    make_deserialize_fn,
     get_param_annotation,
+    make_deserialize_fn,
     qualified_name,
     unwrap_element_type,
 )
 from .typing import NonExistenceType, StableKey
 
-
 ActionT = TypeVar("ActionT")
 ActionT_co = TypeVar("ActionT_co", covariant=True)
 ActionT_contra = TypeVar("ActionT_contra", contravariant=True)
+_NativeEffectDescriptorTuple: TypeAlias = tuple[str, str, str, int, str]
 
 ValueT = TypeVar("ValueT", default=Any)
 ValueT_contra = TypeVar("ValueT_contra", contravariant=True, default=Any)
@@ -51,6 +52,10 @@ OptChildHandlerT_co = TypeVar(
     default=None,
     covariant=True,
 )
+
+
+def _unwrap_target_action(action: Any) -> Any:
+    return core._unwrap_target_action(action)
 
 
 class _TypedTargetHandlerWrapper:
@@ -160,6 +165,13 @@ class TargetActionSink(Generic[ActionT_contra, OptChildHandlerT_co]):
     ) -> "TargetActionSink[ActionT_contra, OptChildHandlerT_co]":
         canonical = _ASYNC_FN_DEDUPER.get_canonical(fn)
         return TargetActionSink(core.TargetActionSink.new_async(canonical))
+
+    @staticmethod
+    def _from_verified_wrapper(
+        fn: AsyncTargetActionSinkFn[ActionT_contra, OptChildHandlerT_co],
+    ) -> "TargetActionSink[ActionT_contra, OptChildHandlerT_co]":
+        canonical = _ASYNC_FN_DEDUPER.get_canonical(fn)
+        return TargetActionSink(core.TargetActionSink._new_verified_wrapper(canonical))
 
 
 class _ObjectDeduper:

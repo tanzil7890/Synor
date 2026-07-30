@@ -7,7 +7,7 @@ use crate::engine::deadline::DeadlineContext;
 use crate::engine::id_sequencer::IdSequencerManager;
 use crate::engine::profile::EngineProfile;
 use crate::engine::stats::ProcessingStats;
-use crate::engine::target_state::{TargetStateProvider, TargetStateProviderRegistry};
+use crate::engine::target_state::{EffectMode, TargetStateProvider, TargetStateProviderRegistry};
 use crate::prelude::*;
 
 use crate::state::stable_path::StableKey;
@@ -53,6 +53,11 @@ struct AppContextInner<Prof: EngineProfile> {
     live_components: parking_lot::Mutex<
         Vec<std::sync::Weak<crate::engine::live_component::LiveComponentState<Prof>>>,
     >,
+    /// Terminal errors reported by live tasks after their readiness guard has
+    /// already resolved. Strict App completion drains this latch after all
+    /// live descendants quiesce, so post-ready failures cannot be reduced to
+    /// log-only success.
+    live_terminal_errors: parking_lot::Mutex<HashMap<u64, Vec<synor_utils::error::SharedError>>>,
 }
 
 #[derive(Clone)]
@@ -80,6 +85,7 @@ impl<Prof: EngineProfile> AppContext<Prof> {
                     crate::engine::runtime::global_cancellation_token().child_token(),
                 ),
                 live_components: parking_lot::Mutex::new(Vec::new()),
+                live_terminal_errors: parking_lot::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -92,10 +98,42 @@ impl<Prof: EngineProfile> AppContext<Prof> {
     pub fn register_live_component(
         &self,
         weak: std::sync::Weak<crate::engine::live_component::LiveComponentState<Prof>>,
-    ) {
+    ) -> bool {
         let mut registry = self.inner.live_components.lock();
+        if self.inner.cancellation_token.lock().unwrap().is_cancelled() {
+            return false;
+        }
         registry.retain(|w| w.upgrade().is_some());
         registry.push(weak);
+        true
+    }
+
+    pub(crate) fn clear_live_terminal_errors(&self, operation_id: u64) {
+        self.inner.live_terminal_errors.lock().remove(&operation_id);
+    }
+
+    pub(crate) fn report_live_terminal_error(
+        &self,
+        operation_id: u64,
+        error: synor_utils::error::SharedError,
+    ) {
+        self.inner
+            .live_terminal_errors
+            .lock()
+            .entry(operation_id)
+            .or_default()
+            .push(error);
+    }
+
+    pub(crate) fn take_live_terminal_error(
+        &self,
+        operation_id: u64,
+    ) -> Option<synor_utils::error::SharedError> {
+        self.inner
+            .live_terminal_errors
+            .lock()
+            .remove(&operation_id)
+            .and_then(|errors| errors.into_iter().next())
     }
 
     /// Atomically: cancel the app token AND snapshot the live-components
@@ -616,6 +654,7 @@ pub(crate) struct ComponentBuildContext<Prof: EngineProfile> {
     /// `mount_inner_live`'s self-built parent context).
     pub on_error: Option<crate::engine::component::OnError>,
     pub preview_collector: Option<PreviewActionCollector<Prof>>,
+    pub effect_mode: EffectMode,
 }
 
 pub(crate) struct ComponentDeleteContext<Prof: EngineProfile> {
@@ -630,6 +669,14 @@ pub(crate) struct ComponentDeleteContext<Prof: EngineProfile> {
     ///
     /// See `specs/core/error_handling.md` for the unified principle.
     pub on_error: Option<crate::engine::component::OnError>,
+    pub effect_mode: EffectMode,
+    /// Explicit root App.drop must fail if cleanup loses its provider, even
+    /// in compatibility mode. Ordinary compatibility orphan GC preserves its
+    /// historical retry behavior.
+    pub provider_missing_is_error: bool,
+    /// Generation of the durable tombstone that dispatched this cleanup.
+    /// `None` is the conservative legacy value.
+    pub tombstone_generation: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -650,6 +697,7 @@ impl<Prof: EngineProfile> ComponentProcessingAction<Prof> {
         live: bool,
         on_error: Option<crate::engine::component::OnError>,
         preview_collector: Option<PreviewActionCollector<Prof>>,
+        effect_mode: EffectMode,
     ) -> Self {
         Self::Build(ComponentBuildContext {
             state: Mutex::new(Some(ComponentBuildingState {
@@ -665,6 +713,7 @@ impl<Prof: EngineProfile> ComponentProcessingAction<Prof> {
             live,
             on_error,
             preview_collector,
+            effect_mode,
         })
     }
 }
@@ -681,6 +730,12 @@ struct ComponentProcessorContextInner<Prof: EngineProfile> {
 
     /// Opaque per-operation context (e.g. ContextProvider on the Python side).
     host_ctx: Arc<Prof::HostCtx>,
+
+    /// Live-incarnation fence inherited by every operation spawned from a
+    /// live controller. A replacement cancels the old state before installing
+    /// the new incarnation; stale work must re-check this fence at each native
+    /// write/effect boundary.
+    live_fence: Option<Arc<crate::engine::live_component::LiveComponentState<Prof>>>,
 }
 
 /// A `ComponentProcessorContext` is a thin view over a shared `inner`
@@ -709,6 +764,27 @@ impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
         host_ctx: Arc<Prof::HostCtx>,
         processing_action: ComponentProcessingAction<Prof>,
     ) -> Self {
+        let live_fence = parent_context
+            .as_ref()
+            .and_then(|parent| parent.inner.live_fence.clone());
+        Self::new_with_live_fence(
+            component,
+            parent_context,
+            processing_stats,
+            host_ctx,
+            processing_action,
+            live_fence,
+        )
+    }
+
+    pub(crate) fn new_with_live_fence(
+        component: Component<Prof>,
+        parent_context: Option<ComponentProcessorContext<Prof>>,
+        processing_stats: ProcessingStats,
+        host_ctx: Arc<Prof::HostCtx>,
+        processing_action: ComponentProcessingAction<Prof>,
+        live_fence: Option<Arc<crate::engine::live_component::LiveComponentState<Prof>>>,
+    ) -> Self {
         Self {
             inner: Arc::new(ComponentProcessorContextInner {
                 component,
@@ -717,11 +793,31 @@ impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
                 inflight_permit: Mutex::new(None),
                 logic_deps: Mutex::new(HashSet::new()),
                 host_ctx,
+                live_fence,
             }),
             processing_stats,
             components_readiness: Default::default(),
             stats_groups: Arc::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn assert_live_generation_current(&self) -> Result<()> {
+        if self
+            .inner
+            .live_fence
+            .as_ref()
+            .is_some_and(|state| state.cancellation_token().is_cancelled())
+        {
+            return Err(crate::engine::live_component::make_cancelled_error());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn live_generation(&self) -> Option<u64> {
+        self.inner
+            .live_fence
+            .as_ref()
+            .map(|state| state.generation())
     }
 
     /// Derive a sibling view that reports into `group`'s stats, registers child
@@ -872,6 +968,20 @@ impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
         match &self.inner.processing_action {
             ComponentProcessingAction::Build(_) => ComponentProcessingMode::Build,
             ComponentProcessingAction::Delete { .. } => ComponentProcessingMode::Delete,
+        }
+    }
+
+    pub(crate) fn effect_mode(&self) -> EffectMode {
+        match &self.inner.processing_action {
+            ComponentProcessingAction::Build(build_ctx) => build_ctx.effect_mode,
+            ComponentProcessingAction::Delete(delete_ctx) => delete_ctx.effect_mode,
+        }
+    }
+
+    pub(crate) fn provider_missing_is_error(&self) -> bool {
+        match &self.inner.processing_action {
+            ComponentProcessingAction::Delete(delete_ctx) => delete_ctx.provider_missing_is_error,
+            ComponentProcessingAction::Build(_) => false,
         }
     }
 
@@ -1248,6 +1358,8 @@ mod tests {
             user_state_deletes: plan_data.deletes,
             user_state_clear_live: false,
             child_path_set: None,
+            native_effect_ids_to_finalize: Vec::new(),
+            blocked_native_effect_ids_to_resolve: Vec::new(),
         };
         let reconciler: ExistenceReconciler =
             Box::new(|_wtxn| -> BoxFuture<'_, crate::prelude::Result<()>> {

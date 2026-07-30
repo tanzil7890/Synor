@@ -30,8 +30,16 @@ use synor_utils::fingerprint::Fingerprint;
 
 use crate::prelude::*;
 use crate::state::db_schema::{
-    ChildExistenceInfo, DbEntryKey, FunctionMemoizationEntry, IdSequencerInfo, StablePathEntryKey,
-    StablePathNodeType, StateKind, TargetStateOwnerInfo,
+    CHILD_TOMBSTONE_SCHEMA_VERSION, ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo,
+    DbEntryKey, FunctionMemoizationEntry, IdSequencerInfo, LIVE_COMPONENT_GENERATION_KEY_SYMBOL,
+    NativeSchemaVersion, StablePathEntryKey, StablePathNodeType, StateKind, TargetStateOwnerInfo,
+};
+use crate::state::native_effect::{
+    NativeEffectCause, NativeEffectCounts, NativeEffectErrorCode, NativeEffectIntent,
+    NativeEffectLineageCursor, NativeEffectObligationCursor, NativeEffectStatus,
+    NativeVerificationPolicy, blocked_cleanup_action_id_for_epoch, native_effect_evidence_id,
+    native_effect_key_fingerprint, native_effect_lineage_key_fingerprint,
+    native_effect_obligation_key_fingerprint,
 };
 use crate::state::stable_path::{StableKey, StablePath, StablePathRef};
 use crate::state::target_state_path::TargetStatePath;
@@ -121,9 +129,9 @@ impl AppStore {
                 Ok(txn) => synor_utils::retryable::Ok(txn),
                 Err(heed::Error::Mdb(heed::MdbError::ReadersFull)) => {
                     warn!("LMDB readers full, retrying");
-                    Err(synor_utils::retryable::Error::retryable(
-                        internal_error!("LMDB readers full"),
-                    ))
+                    Err(synor_utils::retryable::Error::retryable(internal_error!(
+                        "LMDB readers full"
+                    )))
                 }
                 Err(e) => Err(synor_utils::retryable::Error::not_retryable(e)),
             }
@@ -219,6 +227,42 @@ fn key_id_sequencer(key: &StableKey) -> Result<Vec<u8>> {
     DbEntryKey::IdSequencer(key.clone()).encode()
 }
 
+fn key_native_schema_version() -> Result<Vec<u8>> {
+    DbEntryKey::NativeSchemaVersion.encode()
+}
+
+fn key_native_effect_prefix() -> Result<Vec<u8>> {
+    DbEntryKey::NativeEffectPrefix.encode()
+}
+
+fn key_native_effect(action_id: &str) -> Result<Vec<u8>> {
+    DbEntryKey::NativeEffect(native_effect_key_fingerprint(action_id)).encode()
+}
+
+fn key_native_effect_obligation_prefix() -> Result<Vec<u8>> {
+    DbEntryKey::NativeEffectObligationPrefix.encode()
+}
+
+fn key_native_effect_obligation(
+    tracking_locator: Fingerprint,
+    source_generation: u64,
+) -> Result<Vec<u8>> {
+    DbEntryKey::NativeEffectObligation(native_effect_obligation_key_fingerprint(
+        tracking_locator,
+        source_generation,
+    ))
+    .encode()
+}
+
+fn key_native_effect_lineage_prefix() -> Result<Vec<u8>> {
+    DbEntryKey::NativeEffectLineagePrefix.encode()
+}
+
+fn key_native_effect_lineage(tracking_locator: Fingerprint) -> Result<Vec<u8>> {
+    DbEntryKey::NativeEffectLineage(native_effect_lineage_key_fingerprint(tracking_locator))
+        .encode()
+}
+
 fn key_user_state(path: &StablePath, kind: StateKind, user_key: &StableKey) -> Result<Vec<u8>> {
     DbEntryKey::StablePath(
         path.clone(),
@@ -229,6 +273,44 @@ fn key_user_state(path: &StablePath, kind: StateKind, user_key: &StableKey) -> R
 
 fn key_user_state_prefix(path: &StablePath, kind: StateKind) -> Result<Vec<u8>> {
     DbEntryKey::StablePath(path.clone(), StablePathEntryKey::UserStatePrefix(kind)).encode()
+}
+
+fn decode_native_effect(bytes: &[u8]) -> Result<NativeEffectIntent> {
+    let intent: NativeEffectIntent = from_msgpack_slice(bytes)?;
+    intent.validate()?;
+    Ok(intent)
+}
+
+fn decode_native_effect_obligation(bytes: &[u8]) -> Result<NativeEffectObligationCursor> {
+    let cursor: NativeEffectObligationCursor = from_msgpack_slice(bytes)?;
+    cursor.validate()?;
+    Ok(cursor)
+}
+
+fn decode_native_effect_lineage(bytes: &[u8]) -> Result<NativeEffectLineageCursor> {
+    let cursor: NativeEffectLineageCursor = from_msgpack_slice(bytes)?;
+    cursor.validate()?;
+    Ok(cursor)
+}
+
+fn decode_tombstone(bytes: &[u8]) -> Result<ChildTombstoneInfo> {
+    let info = if bytes.is_empty() {
+        ChildTombstoneInfo::default()
+    } else {
+        from_msgpack_slice(bytes)?
+    };
+    info.validate()?;
+    Ok(info)
+}
+
+fn validate_native_effect_key(
+    stored_fingerprint: Fingerprint,
+    intent: &NativeEffectIntent,
+) -> Result<()> {
+    if native_effect_key_fingerprint(intent.evidence_id()) != stored_fingerprint {
+        internal_bail!("native effect key does not match its stored evidence ID");
+    }
+    Ok(())
 }
 
 // --- Tracking info -------------------------------------------------------
@@ -323,15 +405,20 @@ impl AppStore {
         &self,
         parent: &StablePath,
         relative: &StablePath,
-    ) -> Result<()> {
+        expected_generation: Option<u64>,
+    ) -> Result<bool> {
         let app_store = self.clone();
         let parent = parent.clone();
         let relative = relative.clone();
-        self.run_in_batcher(move |wtxn| {
+        self.run_in_batcher_typed(move |wtxn| {
             let app_store = app_store.clone();
             let parent = parent.clone();
             let relative = relative.clone();
-            Box::pin(async move { app_store.delete_tombstone(wtxn, &parent, &relative).await })
+            Box::pin(async move {
+                app_store
+                    .delete_tombstone(wtxn, &parent, &relative, expected_generation)
+                    .await
+            })
         })
         .await
     }
@@ -344,7 +431,11 @@ impl AppStore {
     ///
     /// Routed through the single-writer batcher (see
     /// [`Self::cleanup_tombstone_standalone`] for the rationale).
-    pub async fn ensure_existence_chain_standalone(&self, path: &StablePath) -> Result<()> {
+    pub async fn ensure_existence_chain_standalone(
+        &self,
+        path: &StablePath,
+        generation: Option<u64>,
+    ) -> Result<()> {
         let Some((_, _)) = path.as_ref().split_parent() else {
             return Ok(());
         };
@@ -359,11 +450,12 @@ impl AppStore {
                 };
                 let parent_owned: StablePath = parent.into();
                 app_store
-                    .ensure_path_node_type(
+                    .ensure_path_node_type_with_generation(
                         wtxn,
                         parent_owned.as_ref(),
                         key,
                         StablePathNodeType::Component,
+                        generation,
                     )
                     .await
             })
@@ -569,11 +661,22 @@ impl AppStore {
         parent: &StablePath,
         child_key: &StableKey,
         info: &ChildExistenceInfo,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let key = key_child_existence(parent, child_key)?;
+        if let Some(bytes) = self.db().get(&**txn, &key)? {
+            let existing: ChildExistenceInfo = from_msgpack_slice(bytes)?;
+            let stale_same_node = existing.node_type == info.node_type
+                && (matches!(
+                    (existing.generation, info.generation),
+                    (Some(existing), Some(proposed)) if proposed < existing
+                ) || matches!((existing.generation, info.generation), (Some(_), None)));
+            if stale_same_node {
+                return Ok(false);
+            }
+        }
         let value = rmp_serde::to_vec_named(info)?;
         self.db().put(&mut **txn, &key, &value)?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn delete_child_existence(
@@ -617,36 +720,226 @@ impl AppStore {
         txn: &mut WriteTxn<'_>,
         parent: &StablePath,
         relative_path: &StablePath,
-    ) -> Result<()> {
+        proposed: &ChildTombstoneInfo,
+    ) -> Result<bool> {
+        proposed.validate()?;
+        if proposed.schema_version != CHILD_TOMBSTONE_SCHEMA_VERSION {
+            client_bail!("new child tombstones must use the current schema");
+        }
         let key = key_tombstone(parent, relative_path)?;
-        self.db().put(&mut **txn, &key, &[])?;
-        Ok(())
+        let mut value = proposed.clone();
+        if let Some(bytes) = self.db().get(&**txn, &key)? {
+            let existing = decode_tombstone(bytes)?;
+            match (existing.generation, proposed.generation) {
+                (Some(existing), Some(proposed)) if proposed < existing => return Ok(false),
+                (Some(_), None) => return Ok(false),
+                (Some(existing_generation), Some(proposed_generation))
+                    if existing_generation == proposed_generation =>
+                {
+                    if existing.source_digest != proposed.source_digest
+                        || existing.verification_policy != proposed.verification_policy
+                    {
+                        client_bail!("child tombstone retry changed its persisted proof contract");
+                    }
+                    if existing.created_at_ms != 0 {
+                        value.created_at_ms = existing.created_at_ms;
+                    }
+                    value.attempt_count = existing
+                        .attempt_count
+                        .checked_add(1)
+                        .ok_or_else(|| internal_error!("child tombstone attempt count overflow"))?;
+                    value.last_error_code = None;
+                }
+                (None, None) => {
+                    if existing.schema_version != 0
+                        && (existing.source_digest != proposed.source_digest
+                            || existing.verification_policy != proposed.verification_policy)
+                    {
+                        client_bail!("child tombstone retry changed its persisted proof contract");
+                    }
+                    if existing.created_at_ms != 0 {
+                        value.created_at_ms = existing.created_at_ms;
+                    }
+                    value.attempt_count = existing
+                        .attempt_count
+                        .checked_add(1)
+                        .ok_or_else(|| internal_error!("child tombstone attempt count overflow"))?;
+                    value.last_error_code = None;
+                }
+                _ => {}
+            }
+        }
+        let encoded = rmp_serde::to_vec_named(&value)?;
+        self.db().put(&mut **txn, &key, &encoded)?;
+        Ok(true)
     }
 
+    /// Reopen an existing tombstone for another cleanup attempt through the
+    /// single-writer batcher. Same-generation records increment and clear the
+    /// prior error; a stale generation returns `false` without mutation.
+    pub async fn retry_tombstone(
+        &self,
+        parent: &StablePath,
+        relative_path: &StablePath,
+        tombstone: &ChildTombstoneInfo,
+    ) -> Result<bool> {
+        let app_store = self.clone();
+        let parent = parent.clone();
+        let relative_path = relative_path.clone();
+        let tombstone = tombstone.clone();
+        self.run_in_batcher_typed(move |wtxn| {
+            let app_store = app_store.clone();
+            let parent = parent.clone();
+            let relative_path = relative_path.clone();
+            let tombstone = tombstone.clone();
+            Box::pin(async move {
+                app_store
+                    .write_tombstone(wtxn, &parent, &relative_path, &tombstone)
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Delete a tombstone only if it still names the generation for which
+    /// cleanup completed. A stale cleanup can therefore never erase a newer
+    /// delete obligation at the same path.
     pub async fn delete_tombstone(
         &self,
         txn: &mut WriteTxn<'_>,
         parent: &StablePath,
         relative_path: &StablePath,
-    ) -> Result<()> {
+        expected_generation: Option<u64>,
+    ) -> Result<bool> {
         let key = key_tombstone(parent, relative_path)?;
+        let Some(bytes) = self.db().get(&**txn, &key)? else {
+            return Ok(false);
+        };
+        let current = decode_tombstone(bytes)?;
+        if current.generation != expected_generation {
+            return Ok(false);
+        }
         self.db().delete(&mut **txn, &key)?;
-        Ok(())
+        Ok(true)
     }
 
-    /// Relative paths of all tombstones for `parent`, from a fresh
-    /// snapshot. Used by `Committer::launch_child_component_gc` to find
-    /// which children need GC.
-    pub async fn list_tombstones(&self, parent: &StablePath) -> Result<Vec<StablePath>> {
+    async fn mark_tombstone_failed_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        parent: &StablePath,
+        relative_path: &StablePath,
+        expected_generation: Option<u64>,
+        error_code: NativeEffectErrorCode,
+    ) -> Result<bool> {
+        let key = key_tombstone(parent, relative_path)?;
+        let Some(bytes) = self.db().get(&**txn, &key)? else {
+            return Ok(false);
+        };
+        let mut current = decode_tombstone(bytes)?;
+        if current.generation != expected_generation {
+            return Ok(false);
+        }
+        current.schema_version = CHILD_TOMBSTONE_SCHEMA_VERSION;
+        current.attempt_count = current.attempt_count.max(1);
+        current.last_error_code = Some(error_code);
+        current.validate()?;
+        let encoded = rmp_serde::to_vec_named(&current)?;
+        self.db().put(&mut **txn, &key, &encoded)?;
+        Ok(true)
+    }
+
+    /// Persist a fixed cleanup failure only while the tombstone still names
+    /// the generation that failed.
+    pub async fn mark_tombstone_failed(
+        &self,
+        parent: &StablePath,
+        relative_path: &StablePath,
+        expected_generation: Option<u64>,
+        error_code: NativeEffectErrorCode,
+    ) -> Result<bool> {
+        let app_store = self.clone();
+        let parent = parent.clone();
+        let relative_path = relative_path.clone();
+        self.run_in_batcher_typed(move |wtxn| {
+            let app_store = app_store.clone();
+            let parent = parent.clone();
+            let relative_path = relative_path.clone();
+            Box::pin(async move {
+                app_store
+                    .mark_tombstone_failed_in_txn(
+                        wtxn,
+                        &parent,
+                        &relative_path,
+                        expected_generation,
+                        error_code,
+                    )
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Relative paths and metadata for every cleanup obligation under
+    /// `parent`. Empty legacy values decode conservatively.
+    pub async fn list_tombstones(
+        &self,
+        parent: &StablePath,
+    ) -> Result<Vec<(StablePath, ChildTombstoneInfo)>> {
         let rtxn = self.read_txn().await?;
         let prefix = key_tombstone_prefix(parent)?;
         let mut out = Vec::new();
         for entry in self.db().prefix_iter(&*rtxn, &prefix)? {
-            let (raw_key, _) = entry?;
+            let (raw_key, raw_value) = entry?;
             let relative: StablePath = storekey::decode(raw_key[prefix.len()..].as_ref())?;
-            out.push(relative);
+            out.push((relative, decode_tombstone(raw_value)?));
         }
         Ok(out)
+    }
+
+    /// Whether any cleanup obligation still requires query-verified
+    /// reconciliation. This global scan is used only at the strict App
+    /// completion boundary, after descendants have quiesced. It closes the
+    /// propagation gap where a background component's user error handler
+    /// swallows a pre-intent legacy-sink rejection.
+    pub async fn has_query_verified_tombstones(&self) -> Result<bool> {
+        let rtxn = self.read_txn().await?;
+        for entry in self.db().iter(&*rtxn)? {
+            let (raw_key, raw_value) = entry?;
+            if raw_key.first() != Some(&0x10) {
+                continue;
+            }
+            if matches!(
+                DbEntryKey::decode(raw_key)?,
+                DbEntryKey::StablePath(_, StablePathEntryKey::ChildComponentTombstone(_))
+            ) {
+                let tombstone = decode_tombstone(raw_value)?;
+                tombstone.validate()?;
+                if tombstone.verification_policy == NativeVerificationPolicy::QueryVerified {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    async fn has_query_verified_tombstones_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<bool> {
+        for entry in self.db().iter(&**txn)? {
+            let (raw_key, raw_value) = entry?;
+            if raw_key.first() != Some(&0x10) {
+                continue;
+            }
+            if matches!(
+                DbEntryKey::decode(raw_key)?,
+                DbEntryKey::StablePath(_, StablePathEntryKey::ChildComponentTombstone(_))
+            ) {
+                let tombstone = decode_tombstone(raw_value)?;
+                tombstone.validate()?;
+                if tombstone.verification_policy == NativeVerificationPolicy::QueryVerified {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Atomic existence-removal + tombstone-write, matching the contract of
@@ -658,11 +951,1337 @@ impl AppStore {
         child_key: &StableKey,
         owner_path: &StablePath,
         relative_child: &StablePath,
-    ) -> Result<()> {
+        cause: ChildTombstoneCause,
+        source_digest: Option<String>,
+        fallback_generation: Option<u64>,
+        verification_policy: NativeVerificationPolicy,
+    ) -> Result<Option<ChildTombstoneInfo>> {
+        let generation = self
+            .read_child_existence_in_txn(txn, parent, child_key)
+            .await?
+            .map_or(fallback_generation, |existing| existing.generation);
+        let tombstone =
+            ChildTombstoneInfo::new(cause, source_digest, generation, verification_policy)?;
+        // Write first. A newer tombstone rejects this stale operation without
+        // removing the corresponding newer child-existence record. Both
+        // writes still commit atomically in the caller-owned transaction.
+        if !self
+            .write_tombstone(txn, owner_path, relative_child, &tombstone)
+            .await?
+        {
+            return Ok(None);
+        }
         self.delete_child_existence(txn, parent, child_key).await?;
-        self.write_tombstone(txn, owner_path, relative_child)
-            .await?;
+        Ok(Some(tombstone))
+    }
+}
+
+// --- Native effect evidence ----------------------------------------------
+
+impl AppStore {
+    async fn native_schema_version_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+    ) -> Result<Option<NativeSchemaVersion>> {
+        let key = key_native_schema_version()?;
+        self.db()
+            .get(&**txn, &key)?
+            .map(from_msgpack_slice)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    async fn native_keyspaces_are_empty_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<bool> {
+        let effect_prefix = key_native_effect_prefix()?;
+        if self
+            .db()
+            .prefix_iter(&**txn, &effect_prefix)?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let obligation_prefix = key_native_effect_obligation_prefix()?;
+        if self
+            .db()
+            .prefix_iter(&**txn, &obligation_prefix)?
+            .next()
+            .transpose()?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let lineage_prefix = key_native_effect_lineage_prefix()?;
+        Ok(self
+            .db()
+            .prefix_iter(&**txn, &lineage_prefix)?
+            .next()
+            .transpose()?
+            .is_none())
+    }
+
+    fn validate_native_cursor_integrity(
+        &self,
+        txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    ) -> Result<()> {
+        let lineage_prefix = key_native_effect_lineage_prefix()?;
+        for entry in self.db().prefix_iter(txn, &lineage_prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffectLineage(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                internal_bail!("unexpected key in native effect lineage keyspace");
+            };
+            let cursor = decode_native_effect_lineage(raw_value)?;
+            if native_effect_lineage_key_fingerprint(cursor.tracking_locator) != fingerprint {
+                internal_bail!("native effect lineage key does not match its tracking locator");
+            }
+            let evidence_key = key_native_effect(&cursor.current_evidence_id)?;
+            let Some(evidence_bytes) = self.db().get(txn, &evidence_key)? else {
+                internal_bail!("native effect lineage references missing evidence");
+            };
+            let intent = decode_native_effect(evidence_bytes)?;
+            if intent.evidence_id() != cursor.current_evidence_id
+                || intent.tracking_locator != cursor.tracking_locator
+                || intent.cause == NativeEffectCause::ProviderMissing
+            {
+                internal_bail!("native effect lineage references mismatched evidence");
+            }
+        }
+
+        let obligation_prefix = key_native_effect_obligation_prefix()?;
+        for entry in self.db().prefix_iter(txn, &obligation_prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffectObligation(fingerprint) = DbEntryKey::decode(raw_key)?
+            else {
+                internal_bail!("unexpected key in native effect obligation keyspace");
+            };
+            let cursor = decode_native_effect_obligation(raw_value)?;
+            if native_effect_obligation_key_fingerprint(
+                cursor.tracking_locator,
+                cursor.source_generation,
+            ) != fingerprint
+            {
+                internal_bail!("native effect obligation key does not match its tracking metadata");
+            }
+            let action_id = blocked_cleanup_action_id_for_epoch(
+                cursor.tracking_locator,
+                cursor.source_generation,
+                cursor.current_epoch,
+            );
+            let evidence_key = key_native_effect(&action_id)?;
+            let Some(evidence_bytes) = self.db().get(txn, &evidence_key)? else {
+                internal_bail!("native cleanup obligation cursor references missing evidence");
+            };
+            let intent = decode_native_effect(evidence_bytes)?;
+            Self::validate_effect_obligation_lineage(
+                &intent,
+                cursor.tracking_locator,
+                cursor.source_generation,
+                &action_id,
+            )?;
+            if !matches!(
+                intent.status,
+                NativeEffectStatus::Blocked | NativeEffectStatus::Completed
+            ) {
+                internal_bail!("native cleanup obligation has an invalid lifecycle status");
+            }
+        }
         Ok(())
+    }
+
+    /// Validate the additive native schema inside a caller-owned write
+    /// transaction. A missing marker is valid only when the effect keyspace is
+    /// also empty, which is the pre-feature compatibility state.
+    pub async fn validate_native_schema_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+    ) -> Result<Option<NativeSchemaVersion>> {
+        let version = self.native_schema_version_in_txn(txn).await?;
+        match version {
+            Some(version) if version.is_supported() => Ok(Some(version)),
+            Some(_) => client_bail!("native effect schema is newer than this binary"),
+            None if self.native_keyspaces_are_empty_in_txn(txn).await? => Ok(None),
+            None => internal_bail!("native effect metadata exists without a schema marker"),
+        }
+    }
+
+    async fn ensure_native_schema_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<()> {
+        let version = self.validate_native_schema_in_txn(txn).await?;
+        if version == Some(NativeSchemaVersion::CURRENT) {
+            return Ok(());
+        }
+        if version.is_some() {
+            self.migrate_native_effect_lineages_in_txn(txn).await?;
+        }
+        let key = key_native_schema_version()?;
+        let value = rmp_serde::to_vec_named(&NativeSchemaVersion::CURRENT)?;
+        self.db().put(&mut **txn, &key, &value)?;
+        Ok(())
+    }
+
+    /// Validate the native schema from a fresh snapshot. Returns `None` for an
+    /// untouched pre-feature database.
+    pub async fn validate_native_schema(&self) -> Result<Option<NativeSchemaVersion>> {
+        let rtxn = self.read_txn().await?;
+        let schema_key = key_native_schema_version()?;
+        let version: Option<NativeSchemaVersion> = self
+            .db()
+            .get(&*rtxn, &schema_key)?
+            .map(from_msgpack_slice)
+            .transpose()?;
+        match version {
+            Some(version) if version.is_supported() => {
+                self.validate_native_cursor_integrity(&rtxn)?;
+                Ok(Some(version))
+            }
+            Some(_) => client_bail!("native effect schema is newer than this binary"),
+            None => {
+                let effect_prefix = key_native_effect_prefix()?;
+                if self
+                    .db()
+                    .prefix_iter(&*rtxn, &effect_prefix)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+                {
+                    internal_bail!("native effect metadata exists without a schema marker");
+                }
+                let obligation_prefix = key_native_effect_obligation_prefix()?;
+                if self
+                    .db()
+                    .prefix_iter(&*rtxn, &obligation_prefix)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+                {
+                    internal_bail!("native effect metadata exists without a schema marker");
+                }
+                let lineage_prefix = key_native_effect_lineage_prefix()?;
+                if self
+                    .db()
+                    .prefix_iter(&*rtxn, &lineage_prefix)?
+                    .next()
+                    .transpose()?
+                    .is_some()
+                {
+                    internal_bail!("native effect metadata exists without a schema marker");
+                }
+                Ok(None)
+            }
+        }
+    }
+
+    async fn read_native_effect_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        evidence_id: &str,
+    ) -> Result<Option<NativeEffectIntent>> {
+        let key = key_native_effect(evidence_id)?;
+        let Some(bytes) = self.db().get(&**txn, &key)? else {
+            return Ok(None);
+        };
+        let intent = decode_native_effect(bytes)?;
+        if intent.evidence_id() != evidence_id {
+            internal_bail!("native effect evidence ID collided with an existing key");
+        }
+        Ok(Some(intent))
+    }
+
+    async fn write_native_effect_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        intent: &NativeEffectIntent,
+    ) -> Result<()> {
+        intent.validate()?;
+        let key = key_native_effect(intent.evidence_id())?;
+        let value = rmp_serde::to_vec_named(intent)?;
+        self.db().put(&mut **txn, &key, &value)?;
+        Ok(())
+    }
+
+    async fn read_native_effect_obligation_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Result<Option<NativeEffectObligationCursor>> {
+        let key = key_native_effect_obligation(tracking_locator, source_generation)?;
+        let Some(bytes) = self.db().get(&**txn, &key)? else {
+            return Ok(None);
+        };
+        let cursor = decode_native_effect_obligation(bytes)?;
+        if cursor.tracking_locator != tracking_locator
+            || cursor.source_generation != source_generation
+        {
+            internal_bail!("native effect obligation cursor collided with an existing key");
+        }
+        Ok(Some(cursor))
+    }
+
+    async fn write_native_effect_obligation_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        cursor: NativeEffectObligationCursor,
+    ) -> Result<()> {
+        cursor.validate()?;
+        let key = key_native_effect_obligation(cursor.tracking_locator, cursor.source_generation)?;
+        let value = rmp_serde::to_vec_named(&cursor)?;
+        self.db().put(&mut **txn, &key, &value)?;
+        Ok(())
+    }
+
+    async fn read_native_effect_lineage_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+    ) -> Result<Option<NativeEffectLineageCursor>> {
+        let key = key_native_effect_lineage(tracking_locator)?;
+        let Some(bytes) = self.db().get(&**txn, &key)? else {
+            return Ok(None);
+        };
+        let cursor = decode_native_effect_lineage(bytes)?;
+        if cursor.tracking_locator != tracking_locator {
+            internal_bail!("native effect lineage cursor collided with an existing key");
+        }
+        Ok(Some(cursor))
+    }
+
+    async fn write_native_effect_lineage_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        cursor: &NativeEffectLineageCursor,
+    ) -> Result<()> {
+        cursor.validate()?;
+        let key = key_native_effect_lineage(cursor.tracking_locator)?;
+        let value = rmp_serde::to_vec_named(cursor)?;
+        self.db().put(&mut **txn, &key, &value)?;
+        Ok(())
+    }
+
+    /// One-time v1/v2 migration. Build every ordinary locator cursor in one
+    /// bounded scan before installing schema v3, avoiding an
+    /// O(targets × retained-effects) lazy lookup path.
+    async fn migrate_native_effect_lineages_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<()> {
+        let prefix = key_native_effect_prefix()?;
+        let mut by_locator: std::collections::HashMap<
+            Fingerprint,
+            (Option<NativeEffectIntent>, Option<NativeEffectIntent>),
+        > = std::collections::HashMap::new();
+        for entry in self.db().prefix_iter(&**txn, &prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffect(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                internal_bail!("unexpected key in native effect keyspace");
+            };
+            let intent = decode_native_effect(raw_value)?;
+            validate_native_effect_key(fingerprint, &intent)?;
+            if intent.cause == NativeEffectCause::ProviderMissing {
+                continue;
+            }
+            let entry = by_locator
+                .entry(intent.tracking_locator)
+                .or_insert((None, None));
+            if intent.status == NativeEffectStatus::Completed {
+                if entry
+                    .1
+                    .as_ref()
+                    .is_none_or(|current| intent.updated_at_unix_ms > current.updated_at_unix_ms)
+                {
+                    entry.1 = Some(intent);
+                }
+            } else if entry.0.replace(intent).is_some() {
+                internal_bail!("multiple unresolved native effects share one tracking locator");
+            }
+        }
+        for (tracking_locator, (unresolved, latest_completed)) in by_locator {
+            let intent = unresolved
+                .or(latest_completed)
+                .ok_or_else(|| internal_error!("native lineage migration lost its effect"))?;
+            let cursor = NativeEffectLineageCursor::new(
+                tracking_locator,
+                1,
+                intent.evidence_id().to_owned(),
+            )?;
+            self.write_native_effect_lineage_in_txn(txn, &cursor)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Read the active ordinary effect without upgrading schema metadata or
+    /// allocating a lineage cursor. Preview planning uses this path because
+    /// its enclosing transaction must remain byte-for-byte write-free.
+    pub async fn active_native_effect_id_for_locator_read_only_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+    ) -> Result<Option<String>> {
+        let version = self.validate_native_schema_in_txn(txn).await?;
+        if version == Some(NativeSchemaVersion::CURRENT) {
+            let Some(cursor) = self
+                .read_native_effect_lineage_in_txn(txn, tracking_locator)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let Some(intent) = self
+                .read_native_effect_in_txn(txn, &cursor.current_evidence_id)
+                .await?
+            else {
+                internal_bail!("native effect lineage references missing evidence");
+            };
+            if intent.tracking_locator != tracking_locator {
+                internal_bail!("native effect lineage references a different tracking locator");
+            }
+            return Ok((intent.status != NativeEffectStatus::Completed)
+                .then_some(cursor.current_evidence_id));
+        }
+
+        let prefix = key_native_effect_prefix()?;
+        let mut unresolved = None;
+        for entry in self.db().prefix_iter(&**txn, &prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffect(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                internal_bail!("unexpected key in native effect keyspace");
+            };
+            let intent = decode_native_effect(raw_value)?;
+            validate_native_effect_key(fingerprint, &intent)?;
+            if intent.tracking_locator != tracking_locator
+                || intent.cause == NativeEffectCause::ProviderMissing
+                || intent.status == NativeEffectStatus::Completed
+            {
+                continue;
+            }
+            if unresolved
+                .replace(intent.evidence_id().to_owned())
+                .is_some()
+            {
+                internal_bail!("multiple unresolved native effects share one tracking locator");
+            }
+        }
+        Ok(unresolved)
+    }
+
+    async fn plan_native_effect_lineage_details_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        proposed: NativeEffectIntent,
+    ) -> Result<(NativeEffectIntent, u64)> {
+        proposed.validate()?;
+        let version = self.validate_native_schema_in_txn(txn).await?;
+        let tracking_locator = proposed.tracking_locator;
+        let existing = if version == Some(NativeSchemaVersion::CURRENT) {
+            match self
+                .read_native_effect_lineage_in_txn(txn, tracking_locator)
+                .await?
+            {
+                Some(cursor) => {
+                    let Some(intent) = self
+                        .read_native_effect_in_txn(txn, &cursor.current_evidence_id)
+                        .await?
+                    else {
+                        internal_bail!("native effect lineage references missing evidence");
+                    };
+                    if intent.tracking_locator != tracking_locator
+                        || intent.cause == NativeEffectCause::ProviderMissing
+                    {
+                        internal_bail!("native effect lineage references mismatched evidence");
+                    }
+                    Some((intent, cursor.current_epoch))
+                }
+                None => None,
+            }
+        } else {
+            let prefix = key_native_effect_prefix()?;
+            let mut unresolved = None;
+            let mut latest_completed = None;
+            for entry in self.db().prefix_iter(&**txn, &prefix)? {
+                let (raw_key, raw_value) = entry?;
+                let DbEntryKey::NativeEffect(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                    internal_bail!("unexpected key in native effect keyspace");
+                };
+                let intent = decode_native_effect(raw_value)?;
+                validate_native_effect_key(fingerprint, &intent)?;
+                if intent.tracking_locator != tracking_locator
+                    || intent.cause == NativeEffectCause::ProviderMissing
+                {
+                    continue;
+                }
+                if intent.status == NativeEffectStatus::Completed {
+                    if latest_completed
+                        .as_ref()
+                        .is_none_or(|current: &NativeEffectIntent| {
+                            intent.updated_at_unix_ms > current.updated_at_unix_ms
+                        })
+                    {
+                        latest_completed = Some(intent);
+                    }
+                } else if unresolved.replace(intent).is_some() {
+                    internal_bail!("multiple unresolved native effects share one tracking locator");
+                }
+            }
+            unresolved.or(latest_completed).map(|intent| (intent, 1))
+        };
+
+        match existing {
+            Some((intent, epoch)) if intent.status != NativeEffectStatus::Completed => {
+                Self::require_same_native_effect_contract(&intent, &proposed)?;
+                Ok((
+                    proposed.with_evidence_id(intent.evidence_id().to_owned())?,
+                    epoch,
+                ))
+            }
+            Some((_intent, epoch)) => {
+                let next_epoch = epoch
+                    .checked_add(1)
+                    .ok_or_else(|| internal_error!("native effect lineage epoch overflow"))?;
+                let evidence_id = native_effect_evidence_id(tracking_locator, next_epoch);
+                if self
+                    .read_native_effect_in_txn(txn, &evidence_id)
+                    .await?
+                    .is_some()
+                {
+                    internal_bail!("native effect evidence ID collided with an existing record");
+                }
+                Ok((proposed.with_evidence_id(evidence_id)?, next_epoch))
+            }
+            None => {
+                let evidence_id = native_effect_evidence_id(tracking_locator, 1);
+                if self
+                    .read_native_effect_in_txn(txn, &evidence_id)
+                    .await?
+                    .is_some()
+                {
+                    internal_bail!("native effect evidence ID collided with an existing record");
+                }
+                Ok((proposed.with_evidence_id(evidence_id)?, 1))
+            }
+        }
+    }
+
+    /// Bind an ordinary effect to the evidence identity it would receive at
+    /// commit, without writing schema, cursor, or evidence metadata.
+    pub async fn plan_native_effect_lineage_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        proposed: NativeEffectIntent,
+    ) -> Result<NativeEffectIntent> {
+        self.plan_native_effect_lineage_details_in_txn(txn, proposed)
+            .await
+            .map(|(intent, _)| intent)
+    }
+
+    /// Return the active ordinary effect for a tracking locator, if any.
+    /// Lookup bootstraps legacy records but never advances a completed
+    /// lineage, so read-only recovery checks cannot create a new lifecycle.
+    pub async fn active_native_effect_id_for_locator_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+    ) -> Result<Option<String>> {
+        let version = self.validate_native_schema_in_txn(txn).await?;
+        if version.is_some() && version != Some(NativeSchemaVersion::CURRENT) {
+            self.ensure_native_schema_in_txn(txn).await?;
+        }
+        let Some(cursor) = self
+            .read_native_effect_lineage_in_txn(txn, tracking_locator)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let Some(intent) = self
+            .read_native_effect_in_txn(txn, &cursor.current_evidence_id)
+            .await?
+        else {
+            internal_bail!("native effect lineage references missing evidence");
+        };
+        if intent.tracking_locator != tracking_locator {
+            internal_bail!("native effect lineage references a different tracking locator");
+        }
+        Ok((intent.status != NativeEffectStatus::Completed).then_some(cursor.current_evidence_id))
+    }
+
+    /// Validate a previewed retry against its retained immutable proof
+    /// contract without changing the evidence record or its lineage.
+    pub async fn validate_native_effect_retry_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        evidence_id: &str,
+        proposed: &NativeEffectIntent,
+    ) -> Result<()> {
+        let Some(existing) = self.read_native_effect_in_txn(txn, evidence_id).await? else {
+            internal_bail!("native effect lineage references missing evidence");
+        };
+        Self::require_same_native_effect_contract(&existing, proposed)
+    }
+
+    /// Bind a proposed ordinary effect to its retained evidence lineage.
+    /// Unresolved retries must preserve the exact proof contract. A successor
+    /// evidence ID is allocated only after the prior record is Completed.
+    pub async fn bind_native_effect_lineage_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        proposed: NativeEffectIntent,
+    ) -> Result<NativeEffectIntent> {
+        proposed.validate()?;
+        self.ensure_native_schema_in_txn(txn).await?;
+        let tracking_locator = proposed.tracking_locator;
+        let mut next_epoch = 1;
+        if let Some(cursor) = self
+            .read_native_effect_lineage_in_txn(txn, tracking_locator)
+            .await?
+        {
+            let Some(existing) = self
+                .read_native_effect_in_txn(txn, &cursor.current_evidence_id)
+                .await?
+            else {
+                internal_bail!("native effect lineage references missing evidence");
+            };
+            if existing.status != NativeEffectStatus::Completed {
+                Self::require_same_native_effect_contract(&existing, &proposed)?;
+                return proposed.with_evidence_id(cursor.current_evidence_id);
+            }
+            next_epoch = cursor
+                .current_epoch
+                .checked_add(1)
+                .ok_or_else(|| internal_error!("native effect lineage epoch overflow"))?;
+        }
+
+        let evidence_id = native_effect_evidence_id(tracking_locator, next_epoch);
+        if self
+            .read_native_effect_in_txn(txn, &evidence_id)
+            .await?
+            .is_some()
+        {
+            internal_bail!("native effect evidence ID collided with an existing record");
+        }
+        let bound = proposed.with_evidence_id(evidence_id.clone())?;
+        let cursor = NativeEffectLineageCursor::new(tracking_locator, next_epoch, evidence_id)?;
+        self.write_native_effect_lineage_in_txn(txn, &cursor)
+            .await?;
+        Ok(bound)
+    }
+
+    fn validate_effect_obligation_lineage(
+        intent: &NativeEffectIntent,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+        expected_action_id: &str,
+    ) -> Result<()> {
+        if intent.tracking_locator != tracking_locator
+            || intent.evidence_id() != expected_action_id
+            || intent.descriptor.action_id != expected_action_id
+            || intent.descriptor.source_generation != source_generation
+            || intent.descriptor.operation
+                != crate::state::native_effect::NativeEffectOperation::Cleanup
+            || intent.descriptor.source_digest != "0".repeat(64)
+            || intent.descriptor.target_locator_digest != "0".repeat(64)
+            || intent.cause != NativeEffectCause::ProviderMissing
+            || intent.verification_policy != NativeVerificationPolicy::QueryVerified
+        {
+            internal_bail!("native cleanup obligation ID is bound to different metadata");
+        }
+        Ok(())
+    }
+
+    /// Allocate a stable action ID for a provider-missing observation.
+    ///
+    /// Retries reuse the current unresolved obligation. Once that obligation
+    /// is completed, a checked monotonic epoch produces a new ID while the
+    /// completed record remains immutable.
+    pub async fn allocate_blocked_cleanup_action_id_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Result<String> {
+        if source_generation == 0 {
+            client_bail!("native cleanup obligation generation must be at least one");
+        }
+        self.ensure_native_schema_in_txn(txn).await?;
+        let mut cursor = match self
+            .read_native_effect_obligation_in_txn(txn, tracking_locator, source_generation)
+            .await?
+        {
+            Some(cursor) => cursor,
+            None => NativeEffectObligationCursor::new(tracking_locator, source_generation)?,
+        };
+
+        loop {
+            let action_id = blocked_cleanup_action_id_for_epoch(
+                tracking_locator,
+                source_generation,
+                cursor.current_epoch,
+            );
+            match self.read_native_effect_in_txn(txn, &action_id).await? {
+                Some(intent) => {
+                    Self::validate_effect_obligation_lineage(
+                        &intent,
+                        tracking_locator,
+                        source_generation,
+                        &action_id,
+                    )?;
+                    match intent.status {
+                        NativeEffectStatus::Blocked => {
+                            self.write_native_effect_obligation_in_txn(txn, cursor)
+                                .await?;
+                            return Ok(action_id);
+                        }
+                        NativeEffectStatus::Completed => {}
+                        _ => {
+                            internal_bail!(
+                                "native cleanup obligation has an invalid lifecycle status"
+                            );
+                        }
+                    }
+                    cursor.current_epoch =
+                        cursor.current_epoch.checked_add(1).ok_or_else(|| {
+                            internal_error!("native cleanup obligation epoch overflow")
+                        })?;
+                }
+                None => {
+                    self.write_native_effect_obligation_in_txn(txn, cursor)
+                        .await?;
+                    return Ok(action_id);
+                }
+            }
+        }
+    }
+
+    /// Return the current blocked provider-missing obligation without
+    /// allocating a new lifecycle after completed evidence.
+    pub async fn active_blocked_cleanup_action_id_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Result<Option<String>> {
+        if source_generation == 0 {
+            return Ok(None);
+        }
+        self.validate_native_schema_in_txn(txn).await?;
+        let cursor = match self
+            .read_native_effect_obligation_in_txn(txn, tracking_locator, source_generation)
+            .await?
+        {
+            Some(cursor) => cursor,
+            None => {
+                let legacy_action_id =
+                    blocked_cleanup_action_id_for_epoch(tracking_locator, source_generation, 1);
+                let Some(intent) = self
+                    .read_native_effect_in_txn(txn, &legacy_action_id)
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                Self::validate_effect_obligation_lineage(
+                    &intent,
+                    tracking_locator,
+                    source_generation,
+                    &legacy_action_id,
+                )?;
+                self.ensure_native_schema_in_txn(txn).await?;
+                let cursor =
+                    NativeEffectObligationCursor::new(tracking_locator, source_generation)?;
+                self.write_native_effect_obligation_in_txn(txn, cursor)
+                    .await?;
+                cursor
+            }
+        };
+        let action_id = blocked_cleanup_action_id_for_epoch(
+            tracking_locator,
+            source_generation,
+            cursor.current_epoch,
+        );
+        let Some(intent) = self.read_native_effect_in_txn(txn, &action_id).await? else {
+            internal_bail!("native cleanup obligation cursor references missing evidence");
+        };
+        Self::validate_effect_obligation_lineage(
+            &intent,
+            tracking_locator,
+            source_generation,
+            &action_id,
+        )?;
+        match intent.status {
+            NativeEffectStatus::Blocked => Ok(Some(action_id)),
+            NativeEffectStatus::Completed => Ok(None),
+            _ => internal_bail!("native cleanup obligation has an invalid lifecycle status"),
+        }
+    }
+
+    /// Read a provider-missing obligation without installing legacy schema or
+    /// cursor metadata. This is the preview-safe counterpart to
+    /// [`Self::active_blocked_cleanup_action_id_in_txn`].
+    pub async fn active_blocked_cleanup_action_id_read_only_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Result<Option<String>> {
+        if source_generation == 0 {
+            return Ok(None);
+        }
+        self.validate_native_schema_in_txn(txn).await?;
+        let cursor = self
+            .read_native_effect_obligation_in_txn(txn, tracking_locator, source_generation)
+            .await?;
+        let has_cursor = cursor.is_some();
+        let epoch = cursor.map_or(1, |cursor| cursor.current_epoch);
+        let action_id =
+            blocked_cleanup_action_id_for_epoch(tracking_locator, source_generation, epoch);
+        let Some(intent) = self.read_native_effect_in_txn(txn, &action_id).await? else {
+            if has_cursor {
+                internal_bail!("native cleanup obligation cursor references missing evidence");
+            }
+            return Ok(None);
+        };
+        Self::validate_effect_obligation_lineage(
+            &intent,
+            tracking_locator,
+            source_generation,
+            &action_id,
+        )?;
+        match intent.status {
+            NativeEffectStatus::Blocked => Ok(Some(action_id)),
+            NativeEffectStatus::Completed => Ok(None),
+            _ => internal_bail!("native cleanup obligation has an invalid lifecycle status"),
+        }
+    }
+
+    async fn plan_blocked_cleanup_action_details_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Result<(String, u64)> {
+        if source_generation == 0 {
+            client_bail!("native cleanup obligation generation must be at least one");
+        }
+        self.validate_native_schema_in_txn(txn).await?;
+        let cursor = self
+            .read_native_effect_obligation_in_txn(txn, tracking_locator, source_generation)
+            .await?;
+        let cursor_existed = cursor.is_some();
+        let mut epoch = cursor.map_or(1, |cursor| cursor.current_epoch);
+        let mut first = true;
+        loop {
+            let action_id =
+                blocked_cleanup_action_id_for_epoch(tracking_locator, source_generation, epoch);
+            match self.read_native_effect_in_txn(txn, &action_id).await? {
+                Some(intent) => {
+                    Self::validate_effect_obligation_lineage(
+                        &intent,
+                        tracking_locator,
+                        source_generation,
+                        &action_id,
+                    )?;
+                    match intent.status {
+                        NativeEffectStatus::Blocked => return Ok((action_id, epoch)),
+                        NativeEffectStatus::Completed => {
+                            epoch = epoch.checked_add(1).ok_or_else(|| {
+                                internal_error!("native cleanup obligation epoch overflow")
+                            })?;
+                            first = false;
+                        }
+                        _ => {
+                            internal_bail!(
+                                "native cleanup obligation has an invalid lifecycle status"
+                            );
+                        }
+                    }
+                }
+                None if cursor_existed && first => {
+                    internal_bail!("native cleanup obligation cursor references missing evidence");
+                }
+                None => return Ok((action_id, epoch)),
+            }
+        }
+    }
+
+    /// Return the stable blocker identity that commit would allocate without
+    /// changing the obligation cursor or native schema.
+    pub async fn plan_blocked_cleanup_action_id_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Result<String> {
+        self.plan_blocked_cleanup_action_details_in_txn(txn, tracking_locator, source_generation)
+            .await
+            .map(|(action_id, _)| action_id)
+    }
+
+    /// Terminal precommit writer for all native metadata. Every contract,
+    /// lifecycle transition, and prospective cursor is validated first; only
+    /// then are schema, evidence, and cursor records written.
+    pub async fn apply_precommit_native_effects_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        ordinary: &[NativeEffectIntent],
+        blocked: &[NativeEffectIntent],
+    ) -> Result<()> {
+        let mut ordinary_writes = Vec::with_capacity(ordinary.len());
+        let mut ordinary_cursors = Vec::with_capacity(ordinary.len());
+        let mut seen_ordinary = std::collections::HashSet::new();
+        for proposed in ordinary {
+            if !seen_ordinary.insert(proposed.tracking_locator) {
+                internal_bail!("precommit contains duplicate ordinary native effect lineages");
+            }
+            let (planned, epoch) = self
+                .plan_native_effect_lineage_details_in_txn(txn, proposed.clone())
+                .await?;
+            if planned.evidence_id() != proposed.evidence_id() {
+                client_bail!("native effect evidence lineage changed before precommit");
+            }
+            let write = match self
+                .read_native_effect_in_txn(txn, proposed.evidence_id())
+                .await?
+            {
+                Some(existing) => {
+                    Self::require_same_native_effect_contract(&existing, proposed)?;
+                    if matches!(
+                        existing.status,
+                        NativeEffectStatus::Blocked
+                            | NativeEffectStatus::Verified
+                            | NativeEffectStatus::Completed
+                    ) {
+                        None
+                    } else {
+                        let mut intent = existing;
+                        intent.start_attempt()?;
+                        Some(intent)
+                    }
+                }
+                None => {
+                    let mut intent = proposed.clone();
+                    intent.start_attempt()?;
+                    Some(intent)
+                }
+            };
+            ordinary_writes.push(write);
+            ordinary_cursors.push(NativeEffectLineageCursor::new(
+                proposed.tracking_locator,
+                epoch,
+                proposed.evidence_id().to_owned(),
+            )?);
+        }
+
+        let mut blocked_writes = Vec::with_capacity(blocked.len());
+        let mut blocked_cursors = Vec::with_capacity(blocked.len());
+        let mut seen_blocked = std::collections::HashSet::new();
+        for proposed in blocked {
+            let tracking_locator = proposed.tracking_locator;
+            let source_generation = proposed.descriptor.source_generation;
+            if !seen_blocked.insert((tracking_locator, source_generation)) {
+                internal_bail!("precommit contains duplicate native cleanup obligations");
+            }
+            let (action_id, epoch) = self
+                .plan_blocked_cleanup_action_details_in_txn(
+                    txn,
+                    tracking_locator,
+                    source_generation,
+                )
+                .await?;
+            if action_id != proposed.evidence_id() || action_id != proposed.descriptor.action_id {
+                client_bail!("native cleanup obligation lineage changed before precommit");
+            }
+            Self::validate_effect_obligation_lineage(
+                proposed,
+                tracking_locator,
+                source_generation,
+                &action_id,
+            )?;
+            let write = match self.read_native_effect_in_txn(txn, &action_id).await? {
+                Some(existing) => {
+                    Self::require_same_native_effect_contract(&existing, proposed)?;
+                    if matches!(
+                        existing.status,
+                        NativeEffectStatus::Verified | NativeEffectStatus::Completed
+                    ) {
+                        None
+                    } else {
+                        let mut intent = existing;
+                        intent.mark_blocked(NativeEffectErrorCode::ProviderMissing)?;
+                        Some(intent)
+                    }
+                }
+                None => {
+                    let mut intent = proposed.clone();
+                    intent.mark_blocked(NativeEffectErrorCode::ProviderMissing)?;
+                    Some(intent)
+                }
+            };
+            let mut cursor =
+                NativeEffectObligationCursor::new(tracking_locator, source_generation)?;
+            cursor.current_epoch = epoch;
+            cursor.validate()?;
+            blocked_writes.push(write);
+            blocked_cursors.push(cursor);
+        }
+
+        if ordinary.is_empty() && blocked.is_empty() {
+            return Ok(());
+        }
+        self.ensure_native_schema_in_txn(txn).await?;
+        for intent in ordinary_writes.into_iter().flatten() {
+            self.write_native_effect_in_txn(txn, &intent).await?;
+        }
+        for intent in blocked_writes.into_iter().flatten() {
+            self.write_native_effect_in_txn(txn, &intent).await?;
+        }
+        for cursor in &ordinary_cursors {
+            self.write_native_effect_lineage_in_txn(txn, cursor).await?;
+        }
+        for cursor in blocked_cursors {
+            self.write_native_effect_obligation_in_txn(txn, cursor)
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn require_same_native_effect_contract(
+        existing: &NativeEffectIntent,
+        proposed: &NativeEffectIntent,
+    ) -> Result<()> {
+        if !existing.proof_contract_matches(proposed) {
+            client_bail!("native effect retry changed its persisted proof contract");
+        }
+        Ok(())
+    }
+
+    /// Insert or reopen a native effect before external apply. Identity,
+    /// generation, locator, operation, tracking locator, and verification
+    /// policy are immutable across retries.
+    ///
+    /// This method intentionally takes a caller-owned transaction so precommit
+    /// can persist the effect atomically with ordinary target tracking.
+    pub async fn upsert_native_effect_intent_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        proposed: &NativeEffectIntent,
+    ) -> Result<()> {
+        proposed.validate()?;
+        self.ensure_native_schema_in_txn(txn).await?;
+
+        let mut intent = match self
+            .read_native_effect_in_txn(txn, proposed.evidence_id())
+            .await?
+        {
+            Some(existing) => {
+                Self::require_same_native_effect_contract(&existing, proposed)?;
+                if matches!(
+                    existing.status,
+                    NativeEffectStatus::Blocked
+                        | NativeEffectStatus::Verified
+                        | NativeEffectStatus::Completed
+                ) {
+                    return Ok(());
+                }
+                existing
+            }
+            None => proposed.clone(),
+        };
+        intent.start_attempt()?;
+        self.write_native_effect_in_txn(txn, &intent).await
+    }
+
+    /// Persist a blocked cleanup obligation when apply cannot safely be
+    /// attempted (for example, because its provider is unavailable).
+    pub async fn upsert_blocked_native_effect_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        proposed: &NativeEffectIntent,
+        error_code: NativeEffectErrorCode,
+    ) -> Result<()> {
+        proposed.validate()?;
+        self.ensure_native_schema_in_txn(txn).await?;
+
+        let mut intent = match self
+            .read_native_effect_in_txn(txn, proposed.evidence_id())
+            .await?
+        {
+            Some(existing) => {
+                Self::require_same_native_effect_contract(&existing, proposed)?;
+                if matches!(
+                    existing.status,
+                    NativeEffectStatus::Verified | NativeEffectStatus::Completed
+                ) {
+                    return Ok(());
+                }
+                existing
+            }
+            None => proposed.clone(),
+        };
+        intent.mark_blocked(error_code)?;
+        self.write_native_effect_in_txn(txn, &intent).await
+    }
+
+    async fn load_native_effect_batch_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        action_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<Vec<NativeEffectIntent>> {
+        let mut intents = Vec::with_capacity(action_ids.len());
+        for action_id in action_ids {
+            let Some(intent) = self.read_native_effect_in_txn(txn, action_id).await? else {
+                client_bail!("native effect transition references an unknown action ID");
+            };
+            intents.push(intent);
+        }
+        Ok(intents)
+    }
+
+    pub async fn is_native_effect_blocked_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        action_id: &str,
+    ) -> Result<bool> {
+        self.validate_native_schema_in_txn(txn).await?;
+        Ok(matches!(
+            self.read_native_effect_in_txn(txn, action_id).await?,
+            Some(intent) if intent.status == NativeEffectStatus::Blocked
+        ))
+    }
+
+    async fn mark_native_effects_verified_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        action_ids: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        self.ensure_native_schema_in_txn(txn).await?;
+        let mut intents = self
+            .load_native_effect_batch_in_txn(txn, action_ids)
+            .await?;
+        for intent in &intents {
+            if intent.verification_policy != NativeVerificationPolicy::QueryVerified {
+                client_bail!("legacy native effect cannot be marked query-verified");
+            }
+            if intent.status == NativeEffectStatus::Blocked {
+                client_bail!("blocked native effect requires the recovery transition");
+            }
+        }
+        for intent in &mut intents {
+            if intent.status != NativeEffectStatus::Completed {
+                intent.mark_verified();
+                self.write_native_effect_in_txn(txn, intent).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist verified postconditions in a standalone batched transaction.
+    /// This does not complete an effect; finalization remains the responsibility
+    /// of [`Self::finalize_native_effects_in_txn`] in the final tracking commit.
+    pub async fn mark_native_effects_verified(&self, action_ids: &[String]) -> Result<()> {
+        if action_ids.is_empty() {
+            return Ok(());
+        }
+        let action_ids: std::collections::BTreeSet<String> = action_ids.iter().cloned().collect();
+        let app_store = self.clone();
+        self.run_in_batcher(move |wtxn| {
+            let app_store = app_store.clone();
+            let action_ids = action_ids.clone();
+            Box::pin(async move {
+                app_store
+                    .mark_native_effects_verified_in_txn(wtxn, &action_ids)
+                    .await
+            })
+        })
+        .await
+    }
+
+    async fn mark_native_effects_failed_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        action_ids: &std::collections::BTreeSet<String>,
+        error_code: NativeEffectErrorCode,
+    ) -> Result<()> {
+        self.ensure_native_schema_in_txn(txn).await?;
+        let mut intents = self
+            .load_native_effect_batch_in_txn(txn, action_ids)
+            .await?;
+        for intent in &intents {
+            if intent.status == NativeEffectStatus::Verified {
+                client_bail!("verified native effect cannot regress to failed");
+            }
+        }
+        for intent in &mut intents {
+            if intent.status != NativeEffectStatus::Completed {
+                intent.mark_failed(error_code);
+                self.write_native_effect_in_txn(txn, intent).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist a fixed, metadata-only failure code for a batch of effects.
+    pub async fn mark_native_effects_failed(
+        &self,
+        action_ids: &[String],
+        error_code: NativeEffectErrorCode,
+    ) -> Result<()> {
+        if action_ids.is_empty() {
+            return Ok(());
+        }
+        let action_ids: std::collections::BTreeSet<String> = action_ids.iter().cloned().collect();
+        let app_store = self.clone();
+        self.run_in_batcher(move |wtxn| {
+            let app_store = app_store.clone();
+            let action_ids = action_ids.clone();
+            Box::pin(async move {
+                app_store
+                    .mark_native_effects_failed_in_txn(wtxn, &action_ids, error_code)
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Complete verified effects in the caller's final tracking transaction.
+    /// Pending, failed, blocked, and legacy-unverified records cannot be
+    /// finalized.
+    pub async fn finalize_native_effects_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        action_ids: &[String],
+    ) -> Result<()> {
+        if action_ids.is_empty() {
+            return Ok(());
+        }
+        self.ensure_native_schema_in_txn(txn).await?;
+        let action_ids: std::collections::BTreeSet<String> = action_ids.iter().cloned().collect();
+        let mut intents = self
+            .load_native_effect_batch_in_txn(txn, &action_ids)
+            .await?;
+        for intent in &intents {
+            if intent.status != NativeEffectStatus::Verified
+                && intent.status != NativeEffectStatus::Completed
+            {
+                client_bail!("native effect must be verified before final commit");
+            }
+            if intent.verification_policy != NativeVerificationPolicy::QueryVerified {
+                client_bail!("legacy native effect cannot be finalized as verified");
+            }
+        }
+        for intent in &mut intents {
+            if intent.status != NativeEffectStatus::Completed {
+                intent.mark_completed();
+                self.write_native_effect_in_txn(txn, intent).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve provider-missing obligations in the caller's final tracking
+    /// transaction. Unknown and non-blocked IDs are idempotent no-ops.
+    ///
+    /// Only a verified strict recovery can complete a blocked record. A
+    /// compatibility recovery (`verified == false`) deliberately leaves the
+    /// record blocked and its tracking obligation retained.
+    pub async fn resolve_blocked_native_effects_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        action_ids: &[String],
+        verified: bool,
+    ) -> Result<()> {
+        if action_ids.is_empty() || !verified {
+            return Ok(());
+        }
+        self.validate_native_schema_in_txn(txn).await?;
+        let action_ids: std::collections::BTreeSet<String> = action_ids.iter().cloned().collect();
+        let mut intents = Vec::new();
+        for action_id in action_ids {
+            let Some(intent) = self.read_native_effect_in_txn(txn, &action_id).await? else {
+                continue;
+            };
+            if intent.status != NativeEffectStatus::Blocked {
+                continue;
+            }
+            if intent.verification_policy != NativeVerificationPolicy::QueryVerified {
+                client_bail!("legacy blocked effect cannot be resolved as verified");
+            }
+            intents.push(intent);
+        }
+        for mut intent in intents {
+            intent.mark_completed();
+            self.write_native_effect_in_txn(txn, &intent).await?;
+        }
+        Ok(())
+    }
+
+    /// Read one effect record by its safe action ID.
+    pub async fn native_effect(&self, evidence_id: &str) -> Result<Option<NativeEffectIntent>> {
+        self.validate_native_schema().await?;
+        let rtxn = self.read_txn().await?;
+        let key = key_native_effect(evidence_id)?;
+        let Some(bytes) = self.db().get(&*rtxn, &key)? else {
+            return Ok(None);
+        };
+        let intent = decode_native_effect(bytes)?;
+        if intent.evidence_id() != evidence_id {
+            internal_bail!("native effect evidence ID collided with an existing key");
+        }
+        Ok(Some(intent))
+    }
+
+    async fn native_effect_counts_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+    ) -> Result<NativeEffectCounts> {
+        self.validate_native_schema_in_txn(txn).await?;
+        self.validate_native_cursor_integrity(&**txn)?;
+        let prefix = key_native_effect_prefix()?;
+        let mut counts = NativeEffectCounts::default();
+        for entry in self.db().prefix_iter(&**txn, &prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffect(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                internal_bail!("unexpected key in native effect keyspace");
+            };
+            let intent = decode_native_effect(raw_value)?;
+            validate_native_effect_key(fingerprint, &intent)?;
+            counts.add(intent.status)?;
+        }
+        Ok(counts)
+    }
+
+    /// Metadata-only status totals for inspection and health reporting.
+    pub async fn native_effect_counts(&self) -> Result<NativeEffectCounts> {
+        self.validate_native_schema().await?;
+        let rtxn = self.read_txn().await?;
+        self.validate_native_cursor_integrity(&rtxn)?;
+        let prefix = key_native_effect_prefix()?;
+        let mut counts = NativeEffectCounts::default();
+        for entry in self.db().prefix_iter(&*rtxn, &prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffect(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                internal_bail!("unexpected key in native effect keyspace");
+            };
+            let intent = decode_native_effect(raw_value)?;
+            validate_native_effect_key(fingerprint, &intent)?;
+            counts.add(intent.status)?;
+        }
+        Ok(counts)
+    }
+
+    pub async fn has_blocked_native_effects_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<bool> {
+        Ok(self.native_effect_counts_in_txn(txn).await?.blocked != 0)
+    }
+
+    pub async fn has_blocked_native_effects(&self) -> Result<bool> {
+        Ok(self.native_effect_counts().await?.blocked != 0)
+    }
+
+    pub async fn has_unresolved_native_effects_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+    ) -> Result<bool> {
+        Ok(self
+            .native_effect_counts_in_txn(txn)
+            .await?
+            .has_unresolved())
+    }
+
+    pub async fn has_unresolved_native_effects(&self) -> Result<bool> {
+        Ok(self.native_effect_counts().await?.has_unresolved())
     }
 }
 
@@ -794,8 +2413,48 @@ impl AppStore {
 // --- App-level -----------------------------------------------------------
 
 impl AppStore {
+    /// Clear operational state while retaining native schema/effect evidence,
+    /// obligation cursors, and the live-generation sequencer. Returns `false`
+    /// without writing if any effect is not completed or a query-verified
+    /// child cleanup obligation remains.
+    pub async fn clear_operational_state_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<bool> {
+        if self.has_unresolved_native_effects_in_txn(txn).await?
+            || self.has_query_verified_tombstones_in_txn(txn).await?
+        {
+            return Ok(false);
+        }
+        let schema_key = key_native_schema_version()?;
+        let effect_prefix = key_native_effect_prefix()?;
+        let obligation_prefix = key_native_effect_obligation_prefix()?;
+        let lineage_prefix = key_native_effect_lineage_prefix()?;
+        let live_generation_key = key_id_sequencer(&StableKey::Symbol(
+            LIVE_COMPONENT_GENERATION_KEY_SYMBOL.into(),
+        ))?;
+        let db = self.db();
+        let mut iter = db.iter_mut(&mut **txn)?;
+        while let Some((key, _)) = iter.next().transpose()? {
+            let retain = key == schema_key.as_slice()
+                || key.starts_with(&effect_prefix)
+                || key.starts_with(&obligation_prefix)
+                || key.starts_with(&lineage_prefix)
+                || key == live_generation_key.as_slice();
+            if !retain {
+                // Safety: the borrowed key/value are not used after deleting
+                // the cursor's current entry.
+                unsafe {
+                    iter.del_current()?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
     pub async fn clear_all(&self, txn: &mut WriteTxn<'_>) -> Result<()> {
-        self.db().clear(&mut **txn)?;
+        if !self.clear_operational_state_in_txn(txn).await? {
+            client_bail!(
+                "app clear blocked by unresolved native effects or query-verified tombstones"
+            );
+        }
         Ok(())
     }
 }
@@ -832,35 +2491,54 @@ impl AppStore {
         key: &StableKey,
         target_node_type: StablePathNodeType,
     ) -> Result<()> {
+        self.ensure_path_node_type_with_generation(txn, parent_path, key, target_node_type, None)
+            .await
+    }
+
+    async fn ensure_path_node_type_with_generation(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        parent_path: StablePathRef<'_>,
+        key: &StableKey,
+        target_node_type: StablePathNodeType,
+        generation: Option<u64>,
+    ) -> Result<()> {
         let parent_owned: StablePath = parent_path.into();
         let existing = self
             .read_child_existence_in_txn(txn, &parent_owned, key)
             .await?;
         let existing_node_type = existing.as_ref().map(|i| i.node_type);
-        match (existing_node_type, target_node_type) {
-            (None, _) | (Some(StablePathNodeType::Directory), StablePathNodeType::Component) => {
-                self.write_child_existence(
-                    txn,
-                    &parent_owned,
-                    key,
-                    &ChildExistenceInfo {
-                        node_type: target_node_type,
-                    },
+        let should_write = matches!(
+            (existing_node_type, target_node_type),
+            (None, _)
+                | (
+                    Some(StablePathNodeType::Directory),
+                    StablePathNodeType::Component
                 )
-                .await?;
-            }
-            _ => {
-                // No-op for all other cases
-            }
+        ) || (existing_node_type == Some(StablePathNodeType::Component)
+            && target_node_type == StablePathNodeType::Component
+            && generation.is_some());
+        if should_write {
+            self.write_child_existence(
+                txn,
+                &parent_owned,
+                key,
+                &ChildExistenceInfo {
+                    node_type: target_node_type,
+                    generation,
+                },
+            )
+            .await?;
         }
         if existing_node_type.is_none()
             && let Some((parent, key)) = parent_path.split_parent()
         {
-            return Box::pin(self.ensure_path_node_type(
+            return Box::pin(self.ensure_path_node_type_with_generation(
                 txn,
                 parent,
                 key,
                 StablePathNodeType::Directory,
+                None,
             ))
             .await;
         }
@@ -882,6 +2560,31 @@ impl AppStore {
     ) -> Result<Option<Vec<u8>>> {
         let rtxn = self.read_txn().await?;
         let key = key_user_state(path, kind, user_key)?;
+        Ok(self.db().get(&*rtxn, &key)?.map(<[u8]>::to_vec))
+    }
+
+    /// Read live user state only when the component's durable existence row
+    /// still names this exact live incarnation.
+    pub async fn read_live_user_state(
+        &self,
+        path: &StablePath,
+        user_key: &StableKey,
+        generation: u64,
+    ) -> Result<Option<Vec<u8>>> {
+        let Some((parent_ref, child_key)) = path.as_ref().split_parent() else {
+            client_bail!("live committed state requires a non-root component path");
+        };
+        let rtxn = self.read_txn().await?;
+        let parent: StablePath = parent_ref.into();
+        let existence_key = key_child_existence(&parent, child_key)?;
+        let Some(existence_bytes) = self.db().get(&*rtxn, &existence_key)? else {
+            client_bail!("live component generation is no longer current");
+        };
+        let existence: ChildExistenceInfo = from_msgpack_slice(existence_bytes)?;
+        if existence.generation != Some(generation) {
+            client_bail!("live component generation is no longer current");
+        }
+        let key = key_user_state(path, StateKind::Live, user_key)?;
         Ok(self.db().get(&*rtxn, &key)?.map(<[u8]>::to_vec))
     }
 
@@ -922,6 +2625,45 @@ impl AppStore {
             Box::pin(async move {
                 app_store
                     .write_user_state(wtxn, &path, kind, &user_key, &value)
+                    .await
+            })
+        })
+        .await
+    }
+
+    /// Write live user state only if the component's durable generation still
+    /// matches. The generation check and value write share one batched write
+    /// transaction, preventing a stale incarnation from committing after a
+    /// newer existence row becomes visible.
+    pub async fn write_live_user_state_standalone(
+        &self,
+        path: &StablePath,
+        user_key: &StableKey,
+        value: &[u8],
+        generation: u64,
+    ) -> Result<()> {
+        let app_store = self.clone();
+        let path = path.clone();
+        let user_key = user_key.clone();
+        let value = value.to_vec();
+        self.run_in_batcher(move |wtxn| {
+            let app_store = app_store.clone();
+            let path = path.clone();
+            let user_key = user_key.clone();
+            let value = value.clone();
+            Box::pin(async move {
+                let Some((parent_ref, child_key)) = path.as_ref().split_parent() else {
+                    client_bail!("live committed state requires a non-root component path");
+                };
+                let parent: StablePath = parent_ref.into();
+                let existence = app_store
+                    .read_child_existence_in_txn(wtxn, &parent, child_key)
+                    .await?;
+                if existence.and_then(|info| info.generation) != Some(generation) {
+                    client_bail!("live component generation is no longer current");
+                }
+                app_store
+                    .write_user_state(wtxn, &path, StateKind::Live, &user_key, &value)
                     .await
             })
         })
@@ -1006,13 +2748,25 @@ impl AppStore {
 
 #[cfg(test)]
 mod tests {
-    use super::AppStore;
-    use crate::state::db_schema::StateKind;
+    use super::{
+        AppStore, key_child_existence, key_native_effect, key_native_effect_lineage,
+        key_native_effect_obligation, key_native_schema_version, key_tombstone,
+    };
+    use crate::state::db_schema::{
+        ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo,
+        LIVE_COMPONENT_GENERATION_KEY_SYMBOL, NativeSchemaVersion, StablePathNodeType, StateKind,
+    };
+    use crate::state::native_effect::{
+        NativeEffectCause, NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent,
+        NativeEffectLineageCursor, NativeEffectOperation, NativeEffectStatus,
+        NativeVerificationPolicy, blocked_cleanup_action_id,
+    };
     use crate::state::stable_path::{StableKey, StablePath};
     use crate::state_store::test_support::make_test_store;
     use crate::state_store::txn::WriteTxn;
     use std::collections::HashMap;
     use std::sync::Arc;
+    use synor_utils::fingerprint::Fingerprint;
 
     fn comp_path(name: &str) -> StablePath {
         StablePath(Arc::from(vec![StableKey::Str(Arc::from(name))]))
@@ -1024,6 +2778,214 @@ mod tests {
 
     fn to_map(pairs: Vec<(StableKey, Vec<u8>)>) -> HashMap<StableKey, Vec<u8>> {
         pairs.into_iter().collect()
+    }
+
+    fn effect_intent(action_id: &str, policy: NativeVerificationPolicy) -> NativeEffectIntent {
+        NativeEffectIntent::new(
+            NativeEffectDescriptor {
+                action_id: action_id.to_owned(),
+                operation: NativeEffectOperation::Delete,
+                source_digest: "a".repeat(64),
+                source_generation: 3,
+                target_locator_digest: "b".repeat(64),
+            },
+            Fingerprint::from_bytes(action_id.as_bytes()),
+            policy,
+        )
+        .unwrap()
+    }
+
+    fn provider_missing_intent(
+        action_id: String,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> NativeEffectIntent {
+        NativeEffectIntent::new(
+            NativeEffectDescriptor {
+                action_id,
+                operation: NativeEffectOperation::Cleanup,
+                source_digest: "0".repeat(64),
+                source_generation,
+                target_locator_digest: "0".repeat(64),
+            },
+            tracking_locator,
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap()
+        .with_cause(NativeEffectCause::ProviderMissing)
+    }
+
+    async fn allocate_and_block(
+        store: &AppStore,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> String {
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                Box::pin(async move {
+                    let action_id = store
+                        .allocate_blocked_cleanup_action_id_in_txn(
+                            wtxn,
+                            tracking_locator,
+                            source_generation,
+                        )
+                        .await?;
+                    let intent = provider_missing_intent(
+                        action_id.clone(),
+                        tracking_locator,
+                        source_generation,
+                    );
+                    store
+                        .upsert_blocked_native_effect_in_txn(
+                            wtxn,
+                            &intent,
+                            NativeEffectErrorCode::ProviderMissing,
+                        )
+                        .await?;
+                    Ok(action_id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn active_blocker(
+        store: &AppStore,
+        tracking_locator: Fingerprint,
+        source_generation: u64,
+    ) -> Option<String> {
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .active_blocked_cleanup_action_id_in_txn(
+                            wtxn,
+                            tracking_locator,
+                            source_generation,
+                        )
+                        .await
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn raw_app_entries(store: &AppStore) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let rtxn = store.read_txn().await.unwrap();
+        store
+            .db()
+            .iter(&*rtxn)
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.to_vec(), value.to_vec())
+            })
+            .collect()
+    }
+
+    async fn bind_and_complete_effect(store: &AppStore, action_id: &str) -> String {
+        let proposed = effect_intent(action_id, NativeVerificationPolicy::QueryVerified);
+        let store_for_txn = store.clone();
+        let proposed_for_txn = proposed.clone();
+        let evidence_id = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let proposed = proposed_for_txn.clone();
+                Box::pin(async move {
+                    let bound = store
+                        .bind_native_effect_lineage_in_txn(wtxn, proposed)
+                        .await?;
+                    let evidence_id = bound.evidence_id().to_owned();
+                    store
+                        .upsert_native_effect_intent_in_txn(wtxn, &bound)
+                        .await?;
+                    Ok(evidence_id)
+                })
+            })
+            .await
+            .unwrap();
+        store
+            .mark_native_effects_verified(std::slice::from_ref(&evidence_id))
+            .await
+            .unwrap();
+        let store_for_txn = store.clone();
+        let evidence_for_txn = evidence_id.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let evidence_id = evidence_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(wtxn, &[evidence_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        evidence_id
+    }
+
+    async fn complete_blocker(store: &AppStore, action_id: &str) {
+        let store_for_txn = store.clone();
+        let action_for_txn = action_id.to_owned();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let action_id = action_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .resolve_blocked_native_effects_in_txn(wtxn, &[action_id], true)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    async fn assert_cursor_corruption_is_fail_closed(store: &AppStore, expected_error: &str) {
+        let before = raw_app_entries(store).await;
+        assert!(before.iter().any(|(key, value)| {
+            key.as_slice() == b"cursor-integrity-operational" && value.as_slice() == b"must-survive"
+        }));
+
+        let schema_error = store
+            .validate_native_schema()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            schema_error.contains(expected_error),
+            "unexpected schema error: {schema_error}"
+        );
+        assert_eq!(raw_app_entries(store).await, before);
+
+        let counts_error = store.native_effect_counts().await.unwrap_err().to_string();
+        assert!(
+            counts_error.contains(expected_error),
+            "unexpected counts error: {counts_error}"
+        );
+        assert_eq!(raw_app_entries(store).await, before);
+
+        let drop_error = store
+            .storage
+            .drop_app("test_app")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            drop_error.contains(expected_error),
+            "unexpected drop error: {drop_error}"
+        );
+        assert_eq!(raw_app_entries(store).await, before);
     }
 
     /// Read back a component's Regular user states through the production
@@ -1361,6 +3323,1104 @@ mod tests {
                 .is_none()
         );
     }
+
+    #[tokio::test]
+    async fn native_effect_requires_verified_finalization_and_retains_evidence() {
+        let (store, _dir) = make_test_store().await;
+        assert_eq!(store.validate_native_schema().await.unwrap(), None);
+        assert_eq!(store.native_effect_counts().await.unwrap().pending, 0);
+
+        let intent = effect_intent(
+            "delete:tenant.source.3",
+            NativeVerificationPolicy::QueryVerified,
+        );
+        let action_id = intent.descriptor.action_id.clone();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let intent = intent.clone();
+                Box::pin(async move {
+                    store
+                        .upsert_native_effect_intent_in_txn(wtxn, &intent)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        let pending = store.native_effect(&action_id).await.unwrap().unwrap();
+        assert_eq!(pending.status, NativeEffectStatus::Pending);
+        assert_eq!(pending.attempt_count, 1);
+
+        let ids = vec![action_id.clone()];
+        store.mark_native_effects_verified(&ids).await.unwrap();
+        assert_eq!(
+            store
+                .native_effect(&action_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Verified
+        );
+
+        let store_for_txn = store.clone();
+        let ids_for_txn = ids.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let ids = ids_for_txn.clone();
+                Box::pin(async move { store.finalize_native_effects_in_txn(wtxn, &ids).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .native_effect(&action_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Completed
+        );
+        assert_eq!(store.native_effect_counts().await.unwrap().completed, 1);
+    }
+
+    #[tokio::test]
+    async fn ordinary_effect_lineage_requires_exact_retry_and_allocates_successor_evidence() {
+        let (store, _dir) = make_test_store().await;
+        let proposed = effect_intent(
+            "delete:connector-visible",
+            NativeVerificationPolicy::QueryVerified,
+        );
+        let tracking_locator = proposed.tracking_locator;
+
+        let store_for_txn = store.clone();
+        let proposed_for_txn = proposed.clone();
+        let first_evidence_id = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let proposed = proposed_for_txn.clone();
+                Box::pin(async move {
+                    let bound = store
+                        .bind_native_effect_lineage_in_txn(wtxn, proposed)
+                        .await?;
+                    let evidence_id = bound.evidence_id().to_owned();
+                    store
+                        .upsert_native_effect_intent_in_txn(wtxn, &bound)
+                        .await?;
+                    Ok(evidence_id)
+                })
+            })
+            .await
+            .unwrap();
+        assert_ne!(first_evidence_id, proposed.descriptor.action_id);
+
+        store
+            .mark_native_effects_verified(std::slice::from_ref(&first_evidence_id))
+            .await
+            .unwrap();
+
+        let store_for_txn = store.clone();
+        let active_id = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .active_native_effect_id_for_locator_in_txn(wtxn, tracking_locator)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(active_id.as_deref(), Some(first_evidence_id.as_str()));
+
+        let mut changed = proposed.clone();
+        changed.descriptor.action_id = "delete:changed-contract".to_owned();
+        let store_for_txn = store.clone();
+        assert!(
+            store
+                .storage
+                .run_txn(move |wtxn| {
+                    let store = store_for_txn.clone();
+                    let changed = changed.clone();
+                    Box::pin(async move {
+                        store
+                            .bind_native_effect_lineage_in_txn(wtxn, changed)
+                            .await
+                            .map(|_| ())
+                    })
+                })
+                .await
+                .is_err()
+        );
+
+        let store_for_txn = store.clone();
+        let proposed_for_txn = proposed.clone();
+        let retry_evidence_id = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let proposed = proposed_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .bind_native_effect_lineage_in_txn(wtxn, proposed)
+                        .await
+                        .map(|bound| bound.evidence_id().to_owned())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(retry_evidence_id, first_evidence_id);
+
+        let store_for_txn = store.clone();
+        let first_for_txn = first_evidence_id.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let evidence_id = first_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(wtxn, &[evidence_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        // Simulate App.drop's operational clear. Completed evidence and its
+        // lineage cursor must survive so a reused App allocates a successor.
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                Box::pin(async move {
+                    assert!(store.clear_operational_state_in_txn(wtxn).await?);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let store_for_txn = store.clone();
+        let proposed_for_txn = proposed.clone();
+        let second_evidence_id = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let proposed = proposed_for_txn.clone();
+                Box::pin(async move {
+                    let bound = store
+                        .bind_native_effect_lineage_in_txn(wtxn, proposed)
+                        .await?;
+                    let evidence_id = bound.evidence_id().to_owned();
+                    store
+                        .upsert_native_effect_intent_in_txn(wtxn, &bound)
+                        .await?;
+                    Ok(evidence_id)
+                })
+            })
+            .await
+            .unwrap();
+        assert_ne!(second_evidence_id, first_evidence_id);
+        assert_eq!(
+            store
+                .native_effect(&first_evidence_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Completed
+        );
+        assert_eq!(
+            store
+                .native_effect(&second_evidence_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_cursor_missing_evidence_blocks_reads_and_drop_without_mutation() {
+        let (store, _dir) = make_test_store().await;
+        let evidence_id = bind_and_complete_effect(&store, "delete:cursor-missing-evidence").await;
+        let evidence_key = key_native_effect(&evidence_id).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let evidence_key = evidence_key.clone();
+                Box::pin(async move {
+                    assert!(store.db().delete(&mut **wtxn, &evidence_key)?);
+                    store.db().put(
+                        &mut **wtxn,
+                        b"cursor-integrity-operational",
+                        b"must-survive",
+                    )?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_cursor_corruption_is_fail_closed(
+            &store,
+            "native effect lineage references missing evidence",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lineage_cursor_mismatched_evidence_blocks_reads_and_drop_without_mutation() {
+        let (store, _dir) = make_test_store().await;
+        let first_action_id = "delete:cursor-mismatched-first";
+        let first_tracking_locator = Fingerprint::from_bytes(first_action_id.as_bytes());
+        bind_and_complete_effect(&store, first_action_id).await;
+        let second_evidence_id =
+            bind_and_complete_effect(&store, "delete:cursor-mismatched-second").await;
+
+        let mismatched_cursor =
+            NativeEffectLineageCursor::new(first_tracking_locator, 1, second_evidence_id).unwrap();
+        let cursor_key = key_native_effect_lineage(first_tracking_locator).unwrap();
+        let cursor_value = rmp_serde::to_vec_named(&mismatched_cursor).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let cursor_key = cursor_key.clone();
+                let cursor_value = cursor_value.clone();
+                Box::pin(async move {
+                    store.db().put(&mut **wtxn, &cursor_key, &cursor_value)?;
+                    store.db().put(
+                        &mut **wtxn,
+                        b"cursor-integrity-operational",
+                        b"must-survive",
+                    )?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_cursor_corruption_is_fail_closed(
+            &store,
+            "native effect lineage references mismatched evidence",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn obligation_cursor_missing_evidence_blocks_reads_and_drop_without_mutation() {
+        let (store, _dir) = make_test_store().await;
+        let tracking_locator = Fingerprint::from_bytes(b"obligation-missing-evidence");
+        let generation = 23;
+        let action_id = allocate_and_block(&store, tracking_locator, generation).await;
+        complete_blocker(&store, &action_id).await;
+
+        let evidence_key = key_native_effect(&action_id).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let evidence_key = evidence_key.clone();
+                Box::pin(async move {
+                    assert!(store.db().delete(&mut **wtxn, &evidence_key)?);
+                    store.db().put(
+                        &mut **wtxn,
+                        b"cursor-integrity-operational",
+                        b"must-survive",
+                    )?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_cursor_corruption_is_fail_closed(
+            &store,
+            "native cleanup obligation cursor references missing evidence",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn obligation_cursor_forged_evidence_blocks_reads_and_drop_without_mutation() {
+        let (store, _dir) = make_test_store().await;
+        let tracking_locator = Fingerprint::from_bytes(b"obligation-forged-evidence");
+        let generation = 29;
+        let action_id = allocate_and_block(&store, tracking_locator, generation).await;
+        complete_blocker(&store, &action_id).await;
+
+        let mut forged = store.native_effect(&action_id).await.unwrap().unwrap();
+        assert_eq!(forged.status, NativeEffectStatus::Completed);
+        forged.cause = NativeEffectCause::Explicit;
+        let evidence_key = key_native_effect(&action_id).unwrap();
+        let evidence_value = rmp_serde::to_vec_named(&forged).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let evidence_key = evidence_key.clone();
+                let evidence_value = evidence_value.clone();
+                Box::pin(async move {
+                    store
+                        .db()
+                        .put(&mut **wtxn, &evidence_key, &evidence_value)?;
+                    store.db().put(
+                        &mut **wtxn,
+                        b"cursor-integrity-operational",
+                        b"must-survive",
+                    )?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_cursor_corruption_is_fail_closed(
+            &store,
+            "native cleanup obligation ID is bound to different metadata",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn blocked_effect_resolution_is_strict_and_idempotent() {
+        let (store, _dir) = make_test_store().await;
+        let intent = effect_intent(
+            "cleanup:provider-missing",
+            NativeVerificationPolicy::QueryVerified,
+        );
+        let action_id = intent.descriptor.action_id.clone();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let intent = intent.clone();
+                Box::pin(async move {
+                    store
+                        .upsert_blocked_native_effect_in_txn(
+                            wtxn,
+                            &intent,
+                            NativeEffectErrorCode::ProviderMissing,
+                        )
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let ids = vec![action_id.clone(), "unknown:effect".to_owned()];
+        let store_for_txn = store.clone();
+        let ids_for_txn = ids.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let ids = ids_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .resolve_blocked_native_effects_in_txn(wtxn, &ids, false)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(store.has_blocked_native_effects().await.unwrap());
+
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let ids = ids.clone();
+                Box::pin(async move {
+                    store
+                        .resolve_blocked_native_effects_in_txn(wtxn, &ids, true)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(!store.has_blocked_native_effects().await.unwrap());
+        assert_eq!(
+            store
+                .native_effect(&action_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_provider_missing_lifecycle_allocates_new_stable_evidence() {
+        let (store, _dir) = make_test_store().await;
+        let tracking_locator = Fingerprint::from_bytes(b"repeated-provider-obligation");
+        let generation = 11;
+
+        let first = allocate_and_block(&store, tracking_locator, generation).await;
+        assert_eq!(
+            first,
+            blocked_cleanup_action_id(tracking_locator, generation)
+        );
+        let store_for_txn = store.clone();
+        let first_for_txn = first.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let first = first_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .resolve_blocked_native_effects_in_txn(wtxn, &[first], true)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            active_blocker(&store, tracking_locator, generation).await,
+            None
+        );
+
+        let second = allocate_and_block(&store, tracking_locator, generation).await;
+        assert_ne!(first, second);
+        assert_eq!(
+            allocate_and_block(&store, tracking_locator, generation).await,
+            second
+        );
+        let counts = store.native_effect_counts().await.unwrap();
+        assert_eq!(counts.completed, 1);
+        assert_eq!(counts.blocked, 1);
+        assert_eq!(
+            store.native_effect(&first).await.unwrap().unwrap().status,
+            NativeEffectStatus::Completed
+        );
+        assert_eq!(
+            store.native_effect(&second).await.unwrap().unwrap().status,
+            NativeEffectStatus::Blocked
+        );
+
+        let active = active_blocker(&store, tracking_locator, generation).await;
+        assert_eq!(active.as_deref(), Some(second.as_str()));
+
+        let store_for_txn = store.clone();
+        let second_for_txn = second.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let second = second_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .resolve_blocked_native_effects_in_txn(wtxn, &[second], true)
+                        .await?;
+                    assert!(store.clear_operational_state_in_txn(wtxn).await?);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let rtxn = store.read_txn().await.unwrap();
+        assert!(
+            store
+                .db()
+                .get(
+                    &*rtxn,
+                    &key_native_effect_obligation(tracking_locator, generation).unwrap(),
+                )
+                .unwrap()
+                .is_some()
+        );
+        drop(rtxn);
+
+        let third = allocate_and_block(&store, tracking_locator, generation).await;
+        assert_ne!(second, third);
+        let counts = store.native_effect_counts().await.unwrap();
+        assert_eq!(counts.completed, 2);
+        assert_eq!(counts.blocked, 1);
+    }
+
+    #[tokio::test]
+    async fn operational_clear_retains_live_generation_sequencer() {
+        let (store, _dir) = make_test_store().await;
+        let generation_key = StableKey::Symbol(LIVE_COMPONENT_GENERATION_KEY_SYMBOL.into());
+        assert_eq!(store.reserve_id_range(&generation_key, 1).await.unwrap(), 1);
+
+        let child_key = StableKey::Str(Arc::from("operational-child"));
+        let store_for_txn = store.clone();
+        let child_key_for_txn = child_key.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let child_key = child_key_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .write_child_existence(
+                            wtxn,
+                            &StablePath::root(),
+                            &child_key,
+                            &ChildExistenceInfo {
+                                node_type: StablePathNodeType::Component,
+                                generation: Some(1),
+                            },
+                        )
+                        .await?;
+                    assert!(store.clear_operational_state_in_txn(wtxn).await?);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(store.reserve_id_range(&generation_key, 1).await.unwrap(), 2);
+        let rtxn = store.read_txn().await.unwrap();
+        assert!(
+            store
+                .db()
+                .get(
+                    &*rtxn,
+                    &key_child_existence(&StablePath::root(), &child_key).unwrap(),
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_completed_blocker_without_cursor_advances_to_a_new_epoch() {
+        let (store, _dir) = make_test_store().await;
+        let tracking_locator = Fingerprint::from_bytes(b"legacy-provider-obligation");
+        let generation = 17;
+        let first = blocked_cleanup_action_id(tracking_locator, generation);
+        let intent = provider_missing_intent(first.clone(), tracking_locator, generation);
+        let schema_key = key_native_schema_version().unwrap();
+        let schema_v1 = rmp_serde::to_vec_named(&NativeSchemaVersion(1)).unwrap();
+        let store_for_txn = store.clone();
+        let first_for_txn = first.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let intent = intent.clone();
+                let first = first_for_txn.clone();
+                let schema_key = schema_key.clone();
+                let schema_v1 = schema_v1.clone();
+                Box::pin(async move {
+                    store
+                        .upsert_blocked_native_effect_in_txn(
+                            wtxn,
+                            &intent,
+                            NativeEffectErrorCode::ProviderMissing,
+                        )
+                        .await?;
+                    store
+                        .resolve_blocked_native_effects_in_txn(wtxn, &[first], true)
+                        .await?;
+                    // Model a schema-v1 database written before allocation
+                    // cursors existed.
+                    store.db().put(&mut **wtxn, &schema_key, &schema_v1)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let second = allocate_and_block(&store, tracking_locator, generation).await;
+        assert_ne!(first, second);
+        assert_eq!(
+            store.native_effect(&first).await.unwrap().unwrap().status,
+            NativeEffectStatus::Completed
+        );
+        assert_eq!(
+            store.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+        let counts = store.native_effect_counts().await.unwrap();
+        assert_eq!(counts.completed, 1);
+        assert_eq!(counts.blocked, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_blocked_effect_without_cursor_is_discovered_by_recovery_lookup() {
+        let (store, _dir) = make_test_store().await;
+        let tracking_locator = Fingerprint::from_bytes(b"legacy-active-provider-obligation");
+        let generation = 19;
+        let first = blocked_cleanup_action_id(tracking_locator, generation);
+        let intent = provider_missing_intent(first.clone(), tracking_locator, generation);
+        let schema_key = key_native_schema_version().unwrap();
+        let schema_v1 = rmp_serde::to_vec_named(&NativeSchemaVersion(1)).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let intent = intent.clone();
+                let schema_key = schema_key.clone();
+                let schema_v1 = schema_v1.clone();
+                Box::pin(async move {
+                    store
+                        .upsert_blocked_native_effect_in_txn(
+                            wtxn,
+                            &intent,
+                            NativeEffectErrorCode::ProviderMissing,
+                        )
+                        .await?;
+                    store.db().put(&mut **wtxn, &schema_key, &schema_v1)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            active_blocker(&store, tracking_locator, generation)
+                .await
+                .as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(
+            store.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+        let rtxn = store.read_txn().await.unwrap();
+        assert!(
+            store
+                .db()
+                .get(
+                    &*rtxn,
+                    &key_native_effect_obligation(tracking_locator, generation).unwrap(),
+                )
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn future_native_schema_refuses_reads_and_writes() {
+        let (store, _dir) = make_test_store().await;
+        let schema_key = key_native_schema_version().unwrap();
+        let future_schema = rmp_serde::to_vec_named(&NativeSchemaVersion(4)).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let schema_key = schema_key.clone();
+                let future_schema = future_schema.clone();
+                Box::pin(async move {
+                    store.db().put(&mut **wtxn, &schema_key, &future_schema)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        assert!(store.validate_native_schema().await.is_err());
+        let intent = effect_intent(
+            "delete:future-schema",
+            NativeVerificationPolicy::QueryVerified,
+        );
+        let store_for_txn = store.clone();
+        assert!(
+            store
+                .storage
+                .run_txn(move |wtxn| {
+                    let store = store_for_txn.clone();
+                    let intent = intent.clone();
+                    Box::pin(async move {
+                        store
+                            .upsert_native_effect_intent_in_txn(wtxn, &intent)
+                            .await
+                    })
+                })
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_schema_v1_is_readable_and_upgrades_before_write() {
+        let (store, _dir) = make_test_store().await;
+        let schema_key = key_native_schema_version().unwrap();
+        let schema_v1 = rmp_serde::to_vec_named(&NativeSchemaVersion(1)).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let schema_key = schema_key.clone();
+                let schema_v1 = schema_v1.clone();
+                Box::pin(async move {
+                    store.db().put(&mut **wtxn, &schema_key, &schema_v1)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion(1))
+        );
+
+        let intent = effect_intent(
+            "delete:schema-upgrade",
+            NativeVerificationPolicy::QueryVerified,
+        );
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let intent = intent.clone();
+                Box::pin(async move {
+                    store
+                        .upsert_native_effect_intent_in_txn(wtxn, &intent)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_child_with_tombstone_uses_persisted_generation_over_fallback() {
+        let (store, _dir) = make_test_store().await;
+        let parent = comp_path("owner");
+        let child_key = StableKey::Str(Arc::from("child"));
+        let relative = comp_path("child");
+        let store_for_txn = store.clone();
+        let parent_for_txn = parent.clone();
+        let child_key_for_txn = child_key.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let child_key = child_key_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .write_child_existence(
+                            wtxn,
+                            &parent,
+                            &child_key,
+                            &ChildExistenceInfo {
+                                node_type: StablePathNodeType::Component,
+                                generation: Some(41),
+                            },
+                        )
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let store_for_txn = store.clone();
+        let parent_for_txn = parent.clone();
+        let child_key_for_txn = child_key.clone();
+        let relative_for_txn = relative.clone();
+        let tombstone = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let child_key = child_key_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .remove_child_with_tombstone(
+                            wtxn,
+                            &parent,
+                            &child_key,
+                            &parent,
+                            &relative,
+                            ChildTombstoneCause::LiveDelete,
+                            None,
+                            Some(7),
+                            NativeVerificationPolicy::QueryVerified,
+                        )
+                        .await
+                })
+            })
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(tombstone.generation, Some(41));
+        let rtxn = store.read_txn().await.unwrap();
+        assert!(
+            store
+                .db()
+                .get(&*rtxn, &key_child_existence(&parent, &child_key).unwrap(),)
+                .unwrap()
+                .is_none()
+        );
+        drop(rtxn);
+        let persisted = store.list_tombstones(&parent).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].1.generation, Some(41));
+    }
+
+    #[tokio::test]
+    async fn newer_tombstone_rejects_older_delete_without_removing_existence() {
+        let (store, _dir) = make_test_store().await;
+        let parent = comp_path("owner");
+        let child_key = StableKey::Str(Arc::from("child"));
+        let relative = comp_path("child");
+        let newer_tombstone = ChildTombstoneInfo::new(
+            ChildTombstoneCause::LiveDelete,
+            None,
+            Some(13),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap();
+        let store_for_txn = store.clone();
+        let parent_for_txn = parent.clone();
+        let child_key_for_txn = child_key.clone();
+        let relative_for_txn = relative.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let child_key = child_key_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                let newer_tombstone = newer_tombstone.clone();
+                Box::pin(async move {
+                    store
+                        .write_child_existence(
+                            wtxn,
+                            &parent,
+                            &child_key,
+                            &ChildExistenceInfo {
+                                node_type: StablePathNodeType::Component,
+                                generation: Some(12),
+                            },
+                        )
+                        .await?;
+                    store
+                        .write_tombstone(wtxn, &parent, &relative, &newer_tombstone)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let store_for_txn = store.clone();
+        let parent_for_txn = parent.clone();
+        let child_key_for_txn = child_key.clone();
+        let relative_for_txn = relative.clone();
+        let result = store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let child_key = child_key_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .remove_child_with_tombstone(
+                            wtxn,
+                            &parent,
+                            &child_key,
+                            &parent,
+                            &relative,
+                            ChildTombstoneCause::LiveDelete,
+                            None,
+                            Some(5),
+                            NativeVerificationPolicy::QueryVerified,
+                        )
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(result.is_none());
+
+        let rtxn = store.read_txn().await.unwrap();
+        let existence_bytes = store
+            .db()
+            .get(&*rtxn, &key_child_existence(&parent, &child_key).unwrap())
+            .unwrap()
+            .unwrap();
+        let existence: ChildExistenceInfo =
+            synor_utils::deser::from_msgpack_slice(existence_bytes).unwrap();
+        assert_eq!(existence.generation, Some(12));
+        drop(rtxn);
+        let persisted = store.list_tombstones(&parent).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].1.generation, Some(13));
+        assert_eq!(persisted[0].1.attempt_count, 1);
+    }
+
+    #[tokio::test]
+    async fn legacy_tombstone_decodes_and_newer_generation_survives_stale_cleanup() {
+        let (store, _dir) = make_test_store().await;
+        let parent = comp_path("owner");
+        let relative = comp_path("child");
+        let raw_key = key_tombstone(&parent, &relative).unwrap();
+        let store_for_txn = store.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let raw_key = raw_key.clone();
+                Box::pin(async move {
+                    store.db().put(&mut **wtxn, &raw_key, &[])?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let legacy = store.list_tombstones(&parent).await.unwrap();
+        assert_eq!(legacy[0].1, ChildTombstoneInfo::default());
+
+        let tombstone = ChildTombstoneInfo::new(
+            ChildTombstoneCause::LiveDelete,
+            Some("c".repeat(64)),
+            Some(2),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap();
+        let retry_tombstone = tombstone.clone();
+        let store_for_txn = store.clone();
+        let parent_for_txn = parent.clone();
+        let relative_for_txn = relative.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                let tombstone = tombstone.clone();
+                Box::pin(async move {
+                    store
+                        .write_tombstone(wtxn, &parent, &relative, &tombstone)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let written_tombstones = store.list_tombstones(&parent).await.unwrap();
+        let written = &written_tombstones[0].1;
+        assert_eq!(written.attempt_count, 1);
+        assert_eq!(written.last_error_code, None);
+        assert!(
+            !store
+                .mark_tombstone_failed(
+                    &parent,
+                    &relative,
+                    Some(1),
+                    NativeEffectErrorCode::CleanupFailed,
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .mark_tombstone_failed(
+                    &parent,
+                    &relative,
+                    Some(2),
+                    NativeEffectErrorCode::CleanupFailed,
+                )
+                .await
+                .unwrap()
+        );
+        let failed_tombstones = store.list_tombstones(&parent).await.unwrap();
+        let failed = &failed_tombstones[0].1;
+        assert_eq!(
+            failed.last_error_code,
+            Some(NativeEffectErrorCode::CleanupFailed)
+        );
+
+        store
+            .retry_tombstone(&parent, &relative, &retry_tombstone)
+            .await
+            .unwrap();
+        let retried_tombstones = store.list_tombstones(&parent).await.unwrap();
+        let retried = &retried_tombstones[0].1;
+        assert_eq!(retried.attempt_count, 2);
+        assert_eq!(retried.last_error_code, None);
+
+        assert!(
+            !store
+                .cleanup_tombstone(&parent, &relative, Some(1))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.list_tombstones(&parent).await.unwrap()[0]
+                .1
+                .generation,
+            Some(2)
+        );
+        assert!(
+            store
+                .cleanup_tombstone(&parent, &relative, Some(2))
+                .await
+                .unwrap()
+        );
+        assert!(store.list_tombstones(&parent).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn eager_existence_records_generation_on_leaf_only() {
+        let (store, _dir) = make_test_store().await;
+        let owner_key = StableKey::Str(Arc::from("owner"));
+        let child_key = StableKey::Str(Arc::from("child"));
+        let owner = StablePath(Arc::from(vec![owner_key.clone()]));
+        let child = StablePath(Arc::from(vec![owner_key.clone(), child_key.clone()]));
+
+        store
+            .ensure_existence_chain_standalone(&child, Some(9))
+            .await
+            .unwrap();
+        let rtxn = store.read_txn().await.unwrap();
+        let ancestor_bytes = store
+            .db()
+            .get(
+                &*rtxn,
+                &key_child_existence(&StablePath::root(), &owner_key).unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        let ancestor: crate::state::db_schema::ChildExistenceInfo =
+            synor_utils::deser::from_msgpack_slice(ancestor_bytes).unwrap();
+        let leaf_bytes = store
+            .db()
+            .get(&*rtxn, &key_child_existence(&owner, &child_key).unwrap())
+            .unwrap()
+            .unwrap();
+        let leaf: crate::state::db_schema::ChildExistenceInfo =
+            synor_utils::deser::from_msgpack_slice(leaf_bytes).unwrap();
+
+        assert_eq!(ancestor.generation, None);
+        assert_eq!(leaf.generation, Some(9));
+    }
 }
 
 // --- Submit lifecycle (engine-facing shapes) ----------------------------
@@ -1375,8 +4435,9 @@ impl AppStore {
         &self,
         parent_path: &StablePath,
         relative_path: &StablePath,
-    ) -> Result<()> {
-        self.cleanup_tombstone_standalone(parent_path, relative_path)
+        expected_generation: Option<u64>,
+    ) -> Result<bool> {
+        self.cleanup_tombstone_standalone(parent_path, relative_path, expected_generation)
             .await
     }
 
@@ -1399,8 +4460,10 @@ impl AppStore {
         &self,
         path: &StablePath,
         _known_parent_path: &StablePath,
+        generation: Option<u64>,
     ) -> Result<()> {
-        self.ensure_existence_chain_standalone(path).await
+        self.ensure_existence_chain_standalone(path, generation)
+            .await
     }
 
     /// Spawn a background task that streams every `(StablePath,

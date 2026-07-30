@@ -25,15 +25,14 @@ from .function import (
     fn_ret_deserializer,
 )
 from .update_stats import (
+    _TERMINATED_VERSION,
     UpdateSnapshot,
     UpdateStats,
     UpdateStatus,
-    _StatsView,
     _decode_update_stats,
     _resolve_report_to_stdout,
-    _TERMINATED_VERSION,
+    _StatsView,
 )
-
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -137,7 +136,12 @@ class UpdateHandle(Generic[R]):
         handle = await self._ensure_started()
         if self._preview:
             await handle.result()
-            return handle.take_preview_actions()  # type: ignore[return-value]
+            from .target_state import _unwrap_target_action
+
+            return [  # type: ignore[return-value]
+                _unwrap_target_action(action)
+                for action in handle.take_preview_actions()
+            ]
         pyvalue: Any = await handle.result()
         return pyvalue.get(fn_ret_deserializer(self._main_fn))  # type: ignore[no-any-return]
 
@@ -295,6 +299,25 @@ class App(Generic[P, R]):
         Returns:
             An UpdateHandle that provides access to stats(), watch(), and result().
         """
+        return self._update_controlled(
+            full_reprocess=full_reprocess,
+            live=live,
+            preview=preview,
+            _strict_effects=False,
+        )
+
+    def _update_controlled(
+        self,
+        *,
+        full_reprocess: bool = False,
+        live: bool = False,
+        preview: bool = False,
+        _strict_effects: bool,
+    ) -> UpdateHandle[R]:
+        """Start an update with the runtime's internal target-effect policy."""
+
+        if type(_strict_effects) is not bool:
+            raise TypeError("_strict_effects must be a bool")
         deadline_context = _deadline_for_engine()
 
         async def _init() -> core.UpdateHandle:
@@ -313,6 +336,7 @@ class App(Generic[P, R]):
                 full_reprocess=full_reprocess,
                 live=live,
                 preview=preview,
+                strict_effects=_strict_effects,
                 host_ctx=env._context_provider,
                 deadline=deadline_context,
             )
@@ -370,7 +394,9 @@ class App(Generic[P, R]):
             deadline=deadline_context,
         )
         if preview:
-            return pyvalue  # type: ignore[no-any-return]
+            from .target_state import _unwrap_target_action
+
+            return [_unwrap_target_action(action) for action in pyvalue]
         return pyvalue.get(fn_ret_deserializer(self._main_fn))  # type: ignore[no-any-return]
 
     async def drop(self) -> None:

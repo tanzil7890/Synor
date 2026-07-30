@@ -5,11 +5,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
-
 import synor as syn
+import synor.inspect as synor_inspect
 
 from tests import common
-from tests.common.target_states import GlobalDictTarget, DictDataWithPrev
+from tests.common.target_states import DictDataWithPrev, GlobalDictTarget
 
 synor_env = common.create_test_env(__file__)
 
@@ -286,6 +286,37 @@ class _IncrementalUpdateLiveComponent:
         await operator.mark_ready()
 
 
+@pytest.mark.asyncio
+async def test_preview_rejects_live_component_without_mutation() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app_name = "test_preview_rejects_live_component_without_mutation"
+    env = common.create_test_env(__file__, suffix=app_name)
+
+    async def _main() -> None:
+        await syn.mount(syn.component_subpath("live"), _IncrementalUpdateLiveComponent)
+
+    app = syn.App(
+        syn.AppConfig(name=app_name, environment=env),
+        _main,
+    )
+
+    with pytest.raises(
+        ValueError, match="LiveComponent mounts are not supported during preview"
+    ):
+        await app.update(preview=True)
+
+    assert GlobalDictTarget.store.data == {}
+    assert GlobalDictTarget.store.metrics.collect() == {}
+    assert [
+        item async for item in synor_inspect.iter_stable_paths_by_name(env, app_name)
+    ] == []
+    assert [
+        item async for item in synor_inspect.iter_target_states_by_name(env, app_name)
+    ] == []
+
+
 # Slice F: nested LiveCompClass via operator.update
 class _InnerLiveComponent:
     """Inner live component mounted via operator.update(LiveCompClass)."""
@@ -316,6 +347,71 @@ class _OuterLiveComponentWithInner:
             syn.component_subpath("inner"), _InnerLiveComponent
         )
         await handle.ready()
+        await operator.mark_ready()
+
+
+_live_transition_events: list[str] = []
+_LIVE_TRANSITION_KEY = "live_transition"
+
+
+class _PersistentInnerLiveComponent:
+    async def process(self) -> None:
+        _declare_item(_LIVE_TRANSITION_KEY, 1)
+
+    async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+        await operator.update_full()
+        _live_transition_events.append("inner_ready")
+        try:
+            await operator.mark_ready()
+            await asyncio.Event().wait()
+        finally:
+            _live_transition_events.append("inner_cancelled")
+
+
+class _FiniteInnerLiveComponent:
+    async def process(self) -> None:
+        _declare_item(_LIVE_TRANSITION_KEY, 3)
+
+    async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+        await operator.update_full()
+        await operator.mark_ready()
+
+
+class _LiveThenPlainOuterComponent:
+    async def process(self) -> None:
+        pass
+
+    async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+        await operator.update_full()
+        child_path = syn.component_subpath("child")
+
+        live_handle = await operator.update(child_path, _PersistentInnerLiveComponent)
+        await live_handle.ready()
+        assert _live_transition_events == ["inner_ready"]
+
+        plain_handle = await operator.update(
+            child_path, _declare_item, _LIVE_TRANSITION_KEY, 2
+        )
+        await plain_handle.ready()
+        assert _live_transition_events == ["inner_ready", "inner_cancelled"]
+        await operator.mark_ready()
+
+
+class _PlainThenLiveOuterComponent:
+    async def process(self) -> None:
+        pass
+
+    async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+        await operator.update_full()
+        child_path = syn.component_subpath("child")
+
+        plain_handle = await operator.update(
+            child_path, _declare_item, _LIVE_TRANSITION_KEY, 2
+        )
+        await plain_handle.ready()
+
+        live_handle = await operator.update(child_path, _FiniteInnerLiveComponent)
+        await live_handle.ready()
         await operator.mark_ready()
 
 
@@ -428,6 +524,42 @@ def test_live_component_operator_update_with_live_class() -> None:
     assert GlobalDictTarget.store.data["outer_marker"].data == 1
     assert "inner_marker" in GlobalDictTarget.store.data
     assert GlobalDictTarget.store.data["inner_marker"].data == 7
+
+
+def test_nested_live_to_plain_cancels_old_task_and_latest_value_wins() -> None:
+    GlobalDictTarget.store.clear()
+    _live_transition_events.clear()
+
+    async def _main() -> None:
+        await syn.mount(syn.component_subpath("outer"), _LiveThenPlainOuterComponent)
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_nested_live_to_plain_latest_wins", environment=synor_env
+        ),
+        _main,
+    )
+    app.update_blocking(live=True)
+
+    assert _live_transition_events == ["inner_ready", "inner_cancelled"]
+    assert GlobalDictTarget.store.data[_LIVE_TRANSITION_KEY].data == 2
+
+
+def test_nested_plain_to_live_latest_value_wins() -> None:
+    GlobalDictTarget.store.clear()
+
+    async def _main() -> None:
+        await syn.mount(syn.component_subpath("outer"), _PlainThenLiveOuterComponent)
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_nested_plain_to_live_latest_wins", environment=synor_env
+        ),
+        _main,
+    )
+    app.update_blocking(live=True)
+
+    assert GlobalDictTarget.store.data[_LIVE_TRANSITION_KEY].data == 3
 
 
 def test_live_component_incremental_update() -> None:

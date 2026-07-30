@@ -1,14 +1,15 @@
 use crate::prelude::*;
 
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::types::PyDict;
+use pyo3_async_runtimes::tokio::future_into_py;
 use synor_core::engine::{
     app::{App, AppOpHandle, AppUpdateOptions},
     progress_display::{ProgressDisplayOptions, show_progress as rust_show_progress},
     runtime::get_runtime,
     stats::{ProcessingStats, VersionedProcessingStats},
+    target_state::EffectMode,
 };
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::PyDict;
-use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::watch;
 
 use crate::{
@@ -248,7 +249,7 @@ impl PyApp {
         Ok(Self(Arc::new(app)))
     }
 
-    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, live=false, preview=false, *, deadline))]
+    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, live=false, preview=false, strict_effects=false, *, deadline))]
     pub fn update_async(
         &self,
         root_processor: PyComponentProcessor,
@@ -256,6 +257,7 @@ impl PyApp {
         host_ctx: Py<PyAny>,
         live: bool,
         preview: bool,
+        strict_effects: bool,
         deadline: PyDeadlineContext,
     ) -> PyResult<PyUpdateHandle> {
         let app = self.0.clone();
@@ -264,6 +266,11 @@ impl PyApp {
             live,
             deadline: deadline.0,
         };
+        let effect_mode = if strict_effects {
+            EffectMode::Strict
+        } else {
+            EffectMode::Compatibility
+        };
         let host_ctx = Arc::new(host_ctx);
         let preview_collector = if preview {
             Some(Arc::new(std::sync::Mutex::new(Vec::new())))
@@ -271,7 +278,13 @@ impl PyApp {
             None
         };
         let (handle, preview_collector) = app
-            .update(root_processor, options, host_ctx, preview_collector)
+            .update_controlled(
+                root_processor,
+                options,
+                host_ctx,
+                preview_collector,
+                effect_mode,
+            )
             .context("failed to start app update")
             .into_py_result()?;
         let mut uh = PyUpdateHandle::new(handle);
@@ -279,7 +292,7 @@ impl PyApp {
         Ok(uh)
     }
 
-    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, report_to_stdout=false, refresh_interval_secs=None, live=false, preview=false, *, deadline))]
+    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, report_to_stdout=false, refresh_interval_secs=None, live=false, preview=false, strict_effects=false, *, deadline))]
     pub fn update(
         &self,
         py: Python<'_>,
@@ -290,6 +303,7 @@ impl PyApp {
         refresh_interval_secs: Option<f64>,
         live: bool,
         preview: bool,
+        strict_effects: bool,
         deadline: PyDeadlineContext,
     ) -> PyResult<Py<PyAny>> {
         let app = self.0.clone();
@@ -297,6 +311,11 @@ impl PyApp {
             full_reprocess,
             live,
             deadline: deadline.0,
+        };
+        let effect_mode = if strict_effects {
+            EffectMode::Strict
+        } else {
+            EffectMode::Compatibility
         };
         let host_ctx = Arc::new(host_ctx);
         let preview_collector = if preview {
@@ -307,7 +326,13 @@ impl PyApp {
         py.detach(|| {
             get_runtime().block_on(async move {
                 let (handle, preview_collector) = app
-                    .update(root_processor, options, host_ctx, preview_collector)
+                    .update_controlled(
+                        root_processor,
+                        options,
+                        host_ctx,
+                        preview_collector,
+                        effect_mode,
+                    )
                     .context("failed to start app update")
                     .into_py_result()?;
                 if preview {

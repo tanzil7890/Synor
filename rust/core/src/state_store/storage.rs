@@ -13,13 +13,13 @@ use crate::state::stable_path::{StablePath, StablePathPrefix, StablePathRef};
 use crate::state_store::app_store::{AppStore, Database};
 use crate::state_store::txn::WriteTxn;
 
-use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
-use synor_utils::deser::from_msgpack_slice;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
+use synor_utils::deser::from_msgpack_slice;
 
 const DEFAULT_MAX_DBS: u32 = 1024;
 const DEFAULT_MAP_SIZE: usize = 0x1_0000_0000; // 4GiB
@@ -404,10 +404,14 @@ impl Storage {
         Ok(db.map(|db| AppStore::new(db, env, storage.clone())))
     }
 
-    /// Drop an app's data from this LMDB environment. heed 0.22 doesn't
-    /// expose `mdb_drop`, so the sub-database stays registered in the
-    /// env's catalog but is emptied. `list_app_names` filters out
-    /// empty sub-databases, so the app is effectively gone.
+    /// Drop an app's operational data while retaining native effect evidence.
+    ///
+    /// Any non-completed native effect or query-verified child tombstone
+    /// aborts the drop before mutation, preserving all tracking needed for
+    /// retry or final commit. Otherwise this retains native schema/effect
+    /// evidence, obligation cursors, and the live-generation sequencer. The
+    /// sub-database remains registered because heed 0.22 does not expose
+    /// `mdb_drop`.
     /// Idempotent: dropping a non-existent app is a no-op.
     pub async fn drop_app(&self, app_name: &str) -> Result<()> {
         let db = {
@@ -425,10 +429,18 @@ impl Storage {
         let Some(db) = db else {
             return Ok(());
         };
-        let _guard = self.inner.coord.read().await;
-        let mut wtxn = self.inner.db_env.write_txn()?;
-        db.clear(&mut wtxn)?;
-        wtxn.commit()?;
+        let app_store = AppStore::new(db, self.inner.db_env.clone(), self.clone());
+        let dropped = self
+            .run_txn(move |wtxn| {
+                let app_store = app_store.clone();
+                Box::pin(async move { app_store.clear_operational_state_in_txn(wtxn).await })
+            })
+            .await?;
+        if !dropped {
+            client_bail!(
+                "app drop blocked by unresolved native effects or query-verified tombstones"
+            );
+        }
         Ok(())
     }
 
@@ -589,7 +601,49 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::db_schema::{
+        ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo, StablePathNodeType,
+    };
+    use crate::state::native_effect::{
+        NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent, NativeEffectOperation,
+        NativeEffectStatus, NativeVerificationPolicy,
+    };
+    use crate::state::stable_path::{StableKey, StablePath};
+    use std::sync::Arc;
+    use synor_utils::fingerprint::Fingerprint;
     use tempfile::TempDir;
+
+    fn component_path(name: &str) -> StablePath {
+        StablePath(Arc::from(vec![StableKey::Str(Arc::from(name))]))
+    }
+
+    async fn raw_app_entries(app_store: &AppStore) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let rtxn = app_store.read_txn().await.unwrap();
+        app_store
+            .db()
+            .iter(&*rtxn)
+            .unwrap()
+            .map(|entry| {
+                let (key, value) = entry.unwrap();
+                (key.to_vec(), value.to_vec())
+            })
+            .collect()
+    }
+
+    fn effect_intent(action_id: &str) -> NativeEffectIntent {
+        NativeEffectIntent::new(
+            NativeEffectDescriptor {
+                action_id: action_id.to_owned(),
+                operation: NativeEffectOperation::Cleanup,
+                source_digest: "a".repeat(64),
+                source_generation: 1,
+                target_locator_digest: "b".repeat(64),
+            },
+            Fingerprint::from_bytes(action_id.as_bytes()),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn align_map_size_rounds_up_to_page_multiple() {
@@ -626,6 +680,221 @@ mod tests {
             lmdb_map_size: 4 * 1024 * 1024 + 1,
         };
         Storage::new(&settings).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn drop_retains_evidence_and_unresolved_drop_is_non_mutating() {
+        let dir = TempDir::new().unwrap();
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let app_store = storage.create_app_store("drop_evidence").await.unwrap();
+        let intent = effect_intent("cleanup:completed");
+        let action_id = intent.descriptor.action_id.clone();
+        let app_for_txn = app_store.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = app_for_txn.clone();
+                let intent = intent.clone();
+                Box::pin(async move {
+                    app_store.db().put(&mut **wtxn, b"operational", b"value")?;
+                    app_store
+                        .upsert_native_effect_intent_in_txn(wtxn, &intent)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        app_store
+            .mark_native_effects_verified(std::slice::from_ref(&action_id))
+            .await
+            .unwrap();
+        let app_for_txn = app_store.clone();
+        let action_for_txn = action_id.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = app_for_txn.clone();
+                let action_id = action_for_txn.clone();
+                Box::pin(async move {
+                    app_store
+                        .finalize_native_effects_in_txn(wtxn, &[action_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        storage.drop_app("drop_evidence").await.unwrap();
+        let rtxn = app_store.read_txn().await.unwrap();
+        assert!(
+            app_store
+                .db()
+                .get(&*rtxn, b"operational")
+                .unwrap()
+                .is_none()
+        );
+        drop(rtxn);
+        assert_eq!(
+            app_store
+                .native_effect(&action_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Completed
+        );
+
+        let verified_store = storage
+            .create_app_store("drop_verified_uncommitted")
+            .await
+            .unwrap();
+        let verified = effect_intent("cleanup:verified-uncommitted");
+        let verified_id = verified.descriptor.action_id.clone();
+        let verified_for_txn = verified_store.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = verified_for_txn.clone();
+                let verified = verified.clone();
+                Box::pin(async move {
+                    app_store.db().put(&mut **wtxn, b"operational", b"value")?;
+                    app_store
+                        .upsert_native_effect_intent_in_txn(wtxn, &verified)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        verified_store
+            .mark_native_effects_verified(std::slice::from_ref(&verified_id))
+            .await
+            .unwrap();
+        assert!(storage.drop_app("drop_verified_uncommitted").await.is_err());
+        let rtxn = verified_store.read_txn().await.unwrap();
+        assert_eq!(
+            verified_store
+                .db()
+                .get(&*rtxn, b"operational")
+                .unwrap()
+                .unwrap(),
+            b"value"
+        );
+        drop(rtxn);
+        assert_eq!(
+            verified_store
+                .native_effect(&verified_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Verified
+        );
+
+        let blocked_store = storage.create_app_store("drop_blocked").await.unwrap();
+        let blocked = effect_intent("cleanup:blocked");
+        let blocked_for_txn = blocked_store.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = blocked_for_txn.clone();
+                let blocked = blocked.clone();
+                Box::pin(async move {
+                    app_store.db().put(&mut **wtxn, b"operational", b"value")?;
+                    app_store
+                        .upsert_blocked_native_effect_in_txn(
+                            wtxn,
+                            &blocked,
+                            NativeEffectErrorCode::ProviderMissing,
+                        )
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(storage.drop_app("drop_blocked").await.is_err());
+        let rtxn = blocked_store.read_txn().await.unwrap();
+        assert_eq!(
+            blocked_store
+                .db()
+                .get(&*rtxn, b"operational")
+                .unwrap()
+                .unwrap(),
+            b"value"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_verified_tombstone_makes_drop_byte_for_byte_non_mutating() {
+        let dir = TempDir::new().unwrap();
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let app_store = storage
+            .create_app_store("drop_query_verified_tombstone")
+            .await
+            .unwrap();
+        let parent = component_path("owner");
+        let relative = component_path("removed-child");
+        let child_key = StableKey::Str(Arc::from("live-child"));
+        let tombstone = ChildTombstoneInfo::new(
+            ChildTombstoneCause::ComponentOrphan,
+            None,
+            Some(8),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap();
+        let store_for_txn = app_store.clone();
+        let parent_for_txn = parent.clone();
+        let relative_for_txn = relative.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                let child_key = child_key.clone();
+                let tombstone = tombstone.clone();
+                Box::pin(async move {
+                    app_store
+                        .write_child_existence(
+                            wtxn,
+                            &StablePath::root(),
+                            &child_key,
+                            &ChildExistenceInfo {
+                                node_type: StablePathNodeType::Component,
+                                generation: Some(9),
+                            },
+                        )
+                        .await?;
+                    app_store
+                        .write_id_sequence(
+                            wtxn,
+                            &StableKey::Symbol("operational-sequence".into()),
+                            44,
+                        )
+                        .await?;
+                    app_store
+                        .write_tombstone(wtxn, &parent, &relative, &tombstone)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let before = raw_app_entries(&app_store).await;
+        assert!(before.len() >= 3);
+        assert!(
+            storage
+                .drop_app("drop_query_verified_tombstone")
+                .await
+                .is_err()
+        );
+        assert_eq!(raw_app_entries(&app_store).await, before);
+        assert!(app_store.has_query_verified_tombstones().await.unwrap());
     }
 
     /// Integration test for `MDB_MAP_FULL` auto-resize on the `Storage::run_txn`

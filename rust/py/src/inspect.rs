@@ -8,13 +8,14 @@ use crate::{
     stable_path::{PyStableKey, PyStablePath},
 };
 
-use synor_core::engine::runtime::get_runtime;
-use synor_core::inspect::db_inspect;
-use synor_core::inspect::db_inspect::StablePathNodeType;
-use synor_core::state::stable_path::StableKey;
 use futures::stream::Stream;
 use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3_async_runtimes::tokio::future_into_py;
+use synor_core::engine::runtime::get_runtime;
+use synor_core::inspect::db_inspect;
+use synor_core::inspect::db_inspect::StablePathNodeType;
+use synor_core::state::native_effect::NativeEffectCounts;
+use synor_core::state::stable_path::StableKey;
 
 #[pyclass(name = "StablePathNodeType", skip_from_py_object)]
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +150,63 @@ pub fn list_app_names(py: Python<'_>, env: &PyEnvironment) -> PyResult<Vec<Strin
         get_runtime().block_on(async move { db_inspect::list_app_names(&env_clone).await })
     })
     .into_py_result()
+}
+
+/// Privacy-safe aggregate native effect statuses.
+#[pyclass(name = "NativeEffectCounts", frozen, skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub struct PyNativeEffectCounts {
+    #[pyo3(get)]
+    pub pending: u64,
+    #[pyo3(get)]
+    pub verified: u64,
+    #[pyo3(get)]
+    pub failed: u64,
+    #[pyo3(get)]
+    pub blocked: u64,
+    #[pyo3(get)]
+    pub completed: u64,
+}
+
+impl From<NativeEffectCounts> for PyNativeEffectCounts {
+    fn from(counts: NativeEffectCounts) -> Self {
+        Self {
+            pending: counts.pending,
+            verified: counts.verified,
+            failed: counts.failed,
+            blocked: counts.blocked,
+            completed: counts.completed,
+        }
+    }
+}
+
+#[pyfunction]
+pub fn native_effect_counts(py: Python<'_>, app: &PyApp) -> PyResult<PyNativeEffectCounts> {
+    let app = app.0.clone();
+    let counts = py
+        .detach(|| {
+            get_runtime().block_on(async move { db_inspect::native_effect_counts(&app).await })
+        })
+        .into_py_result()?;
+    Ok(counts.into())
+}
+
+#[pyfunction]
+pub fn native_effect_counts_by_name(
+    py: Python<'_>,
+    env: &PyEnvironment,
+    app_name: &str,
+) -> PyResult<Option<PyNativeEffectCounts>> {
+    let env = env.0.clone();
+    let app_name = app_name.to_string();
+    let counts = py
+        .detach(|| {
+            get_runtime().block_on(async move {
+                db_inspect::native_effect_counts_by_name(&env, &app_name).await
+            })
+        })
+        .into_py_result()?;
+    Ok(counts.map(Into::into))
 }
 
 #[pyclass(name = "TargetStateVersion", skip_from_py_object)]
@@ -524,4 +582,26 @@ pub fn query_stable_path_details_by_name(
         })
         .into_py_result()?;
     details.into_iter().map(|d| convert_detail(py, d)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_effect_counts_preserve_each_status_total() {
+        let counts = PyNativeEffectCounts::from(NativeEffectCounts {
+            pending: 1,
+            verified: 2,
+            failed: 3,
+            blocked: 4,
+            completed: 5,
+        });
+
+        assert_eq!(counts.pending, 1);
+        assert_eq!(counts.verified, 2);
+        assert_eq!(counts.failed, 3);
+        assert_eq!(counts.blocked, 4);
+        assert_eq!(counts.completed, 5);
+    }
 }

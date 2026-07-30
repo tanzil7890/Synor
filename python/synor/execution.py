@@ -10,6 +10,7 @@ import pathlib as _pathlib
 import typing as _typing
 
 from . import audit as _audit
+from . import inspect as _inspect
 from . import pii as _pii
 from . import policy as _policy
 from . import provenance as _provenance
@@ -18,7 +19,6 @@ from . import replay as _replay
 from . import revocation as _revocation
 from . import state as _state
 from ._internal import app as _app
-from . import inspect as _inspect
 
 __all__ = [
     "AppExplanation",
@@ -416,9 +416,10 @@ class SynorRuntime:
                     _pii.PIIAction.DENY,
                     _pii.PIIAction.QUARANTINE,
                 }:
-                    preview_handle = app.update(
+                    preview_handle = app._update_controlled(
                         full_reprocess=full_reprocess,
                         preview=True,
+                        _strict_effects=self.revocation_policy.is_strict,
                     )
                     preview_actions = await preview_handle.result()
                     _planned_changes(
@@ -429,9 +430,10 @@ class SynorRuntime:
                         "pii_preflight_passed",
                         action_count=len(preview_actions),
                     )
-                handle = app.update(
+                handle = app._update_controlled(
                     full_reprocess=full_reprocess,
                     live=live,
+                    _strict_effects=self.revocation_policy.is_strict,
                 )
                 output = await handle.result()
                 stats = handle.stats()
@@ -518,7 +520,11 @@ class SynorRuntime:
                 ),
                 _pii.pii_scope(self.pii_policy),
             ):
-                handle = app.update(full_reprocess=full_reprocess, preview=True)
+                handle = app._update_controlled(
+                    full_reprocess=full_reprocess,
+                    preview=True,
+                    _strict_effects=self.revocation_policy.is_strict,
+                )
                 actions = await handle.result()
                 stats = handle.stats()
             changes = _planned_changes(

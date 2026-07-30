@@ -28,6 +28,22 @@ index commonly retains chunk payloads. That target is untrusted after
 revocation; the retrieval guard is the serving boundary while deletion
 converges.
 
+The fake adapter invokes its in-memory target and controller from inside two
+controlled Synor runs; it does not declare the fake index through the native
+target-state reconciler. The example therefore validates the governance,
+suppression, evidence, and guarded-retrieval workflow. Native Phase 6 effect
+ordering, immutable evidence lineage, preview parity, provider recovery, and
+local live fencing are covered by focused core/verified-sink/live tests, not
+inferred from this fake target. The current native format is schema v3 with
+effect record v2: connector action IDs remain receipt-correlation input while
+the engine owns separate locator/epoch evidence IDs.
+
+This scenario performs real controlled updates, not preview or live-component
+execution. Strict preview is write-free and invokes no target callbacks; live
+incremental update, nested-live mount, and delete share a generation-fenced
+per-subpath queue. Those properties are repository-test claims only. They are
+not `SIGKILL`, power-loss, remote-CAS, or multi-process certification.
+
 An unmanaged direct target query bypasses that boundary and is unsupported:
 
 ```python
@@ -48,11 +64,16 @@ automatic cleanup of externally restored data.
 
 ## Run the local scenario
 
-From this directory:
+From the repository root, build the editable native extension and run the
+example in the repository environment:
 
 ```bash
-python main.py
+uv run maturin develop
+uv run python examples/provable_index_revocation/main.py
 ```
+
+When a released `synor>=0.1.0a1` is installed in the active environment,
+running `python main.py` from this directory is also supported.
 
 The program performs two real `SynorRuntime.run()` engine commits in one async
 event loop:

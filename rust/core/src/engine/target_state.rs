@@ -3,24 +3,59 @@ use crate::prelude::*;
 use crate::{
     engine::{context::ComponentProcessorContext, profile::EngineProfile},
     state::{
+        native_effect::{NativeEffectDescriptor, NativeVerificationPolicy},
         stable_path::StableKey,
         target_state_path::{TargetStatePath, TargetStateProviderGeneration},
     },
 };
 
-use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
 };
+use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 
 pub struct ChildTargetDef<Prof: EngineProfile> {
     pub handler: Prof::TargetHdl,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SinkAssurance {
+    Legacy,
+    Verified(NativeVerificationPolicy),
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EffectMode {
+    #[default]
+    Compatibility,
+    Strict,
+}
+
 #[async_trait]
 pub trait TargetActionSink<Prof: EngineProfile>: Send + Sync + 'static {
     // TODO: Add method to expose function info and arguments, for tracing purpose & no-change detection.
+
+    /// Describe the assurance established when [`Self::apply`] returns.
+    ///
+    /// Existing sinks are acknowledgement-only. Verified wrappers opt in and
+    /// must return normally only after every action's required postcondition
+    /// and evidence write have completed.
+    fn assurance(&self) -> SinkAssurance {
+        SinkAssurance::Legacy
+    }
+
+    /// Extract the privacy-safe descriptor for one governed action.
+    ///
+    /// The default keeps every existing sink compatible. Verified sinks
+    /// override this hook and must reject malformed descriptors without
+    /// including the action or host exception in the returned error.
+    fn describe_effect(
+        &self,
+        _action: &Prof::TargetAction,
+    ) -> Result<Option<NativeEffectDescriptor>> {
+        Ok(None)
+    }
 
     /// Run the logic to apply the action.
     ///
@@ -40,6 +75,7 @@ pub struct TargetActionSinkKeeper<Prof: EngineProfile> {
 }
 
 struct TargetActionSinkKeeperInner<Prof: EngineProfile> {
+    sink: Arc<Prof::TargetActionSink>,
     batcher: Batcher<TargetActionRunner<Prof>>,
 }
 
@@ -48,6 +84,7 @@ impl<Prof: EngineProfile> TargetActionSinkKeeper<Prof> {
         let sink = Arc::new(sink);
         Self {
             inner: Arc::new(TargetActionSinkKeeperInner {
+                sink: sink.clone(),
                 batcher: Batcher::new(
                     TargetActionRunner { sink },
                     Arc::new(BatchQueue::new()),
@@ -55,6 +92,17 @@ impl<Prof: EngineProfile> TargetActionSinkKeeper<Prof> {
                 ),
             }),
         }
+    }
+
+    pub fn assurance(&self) -> SinkAssurance {
+        self.inner.sink.assurance()
+    }
+
+    pub fn describe_effect(
+        &self,
+        action: &Prof::TargetAction,
+    ) -> Result<Option<NativeEffectDescriptor>> {
+        self.inner.sink.describe_effect(action)
     }
 
     pub async fn apply(

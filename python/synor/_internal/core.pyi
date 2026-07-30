@@ -4,6 +4,7 @@ Type stubs for the synor._internal.core Rust extension module (PyO3).
 
 from __future__ import annotations
 
+import asyncio
 from typing import (
     Any,
     Awaitable,
@@ -12,7 +13,6 @@ from typing import (
     Generic,
     TypeVar,
 )
-import asyncio
 
 from synor._internal.typing import Fingerprintable as Fingerprintable
 from synor._internal.typing import StableKey as StableKey
@@ -186,6 +186,23 @@ class Environment:
 
 # --- Inspect helpers ---
 def list_app_names(env: Environment) -> list[str]: ...
+
+class NativeEffectCounts:
+    @property
+    def pending(self) -> int: ...
+    @property
+    def verified(self) -> int: ...
+    @property
+    def failed(self) -> int: ...
+    @property
+    def blocked(self) -> int: ...
+    @property
+    def completed(self) -> int: ...
+
+def native_effect_counts(app: App) -> NativeEffectCounts: ...
+def native_effect_counts_by_name(
+    env: Environment, app_name: str
+) -> NativeEffectCounts | None: ...
 def iter_stable_paths(app: App) -> StablePathInfoAsyncIterator: ...
 def iter_stable_paths_by_name(
     env: Environment, app_name: str
@@ -320,6 +337,7 @@ class App:
         refresh_interval_secs: float | None = None,
         live: bool = False,
         preview: bool = False,
+        strict_effects: bool = False,
         *,
         deadline: DeadlineContext,
     ) -> StoredValue | list[Any]: ...
@@ -330,6 +348,7 @@ class App:
         live: bool = False,
         preview: bool = False,
         host_ctx: Any = None,
+        strict_effects: bool = False,
         *,
         deadline: DeadlineContext,
     ) -> UpdateHandle: ...
@@ -388,6 +407,12 @@ class TargetActionSink:
     def new_async(
         callback: Callable[..., Coroutine[Any, Any, Any]],
     ) -> TargetActionSink: ...
+    @staticmethod
+    def _new_verified_wrapper(
+        callback: Any,
+    ) -> TargetActionSink: ...
+
+def _unwrap_target_action(action: Any) -> Any: ...
 
 # --- TargetHandler (marker class, used for typing) ---
 class TargetHandler: ...
@@ -410,6 +435,7 @@ def init_runtime(
     handler_wrapper_fn: Callable[[Any], Any],
     non_existence: Any,
     not_set: Any,
+    verified_sink_type: type[Any],
 ) -> None: ...
 def shutdown_tokio_runtime() -> None: ...
 def cancel_all() -> None: ...

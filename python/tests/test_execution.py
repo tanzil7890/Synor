@@ -3,13 +3,12 @@ from __future__ import annotations
 import datetime
 import hashlib
 import pathlib
+from collections.abc import Collection, Sequence
 
 import pytest
-
 import synor as syn
-from synor import audit
-from synor import governance
-from synor import revocation
+from synor import audit, governance, revocation
+from synor._internal.context_keys import ContextProvider
 from synor.connectors import localfs
 
 
@@ -203,6 +202,90 @@ async def test_runtime_records_failed_policy_run(tmp_path: pathlib.Path) -> None
 def test_strict_runtime_requires_control_state() -> None:
     with pytest.raises(ValueError, match="state_store"):
         syn.SynorRuntime(revocation_policy=syn.RevocationPolicy.strict_query_verified())
+
+
+@pytest.mark.asyncio
+async def test_strict_runtime_and_plan_reject_legacy_cleanup_before_apply(
+    tmp_path: pathlib.Path,
+) -> None:
+    should_declare = True
+    applied_batches: list[tuple[str, ...]] = []
+
+    async def apply(
+        context_provider: ContextProvider,
+        actions: Sequence[str],
+        /,
+    ) -> None:
+        del context_provider
+        applied_batches.append(tuple(actions))
+
+    sink: syn.TargetActionSink[str, None] = syn.TargetActionSink.from_async_fn(apply)
+
+    class Handler:
+        def reconcile(
+            self,
+            key: syn.StableKey,
+            desired_state: str | syn.NonExistenceType,
+            prev_possible_records: Collection[str],
+            prev_may_be_missing: bool,
+            /,
+        ) -> syn.TargetReconcileOutput[str, str] | None:
+            del key
+            if syn.is_non_existence(desired_state):
+                return syn.TargetReconcileOutput(
+                    action="delete",
+                    sink=sink,
+                    tracking_record=syn.NON_EXISTENCE,
+                )
+            if desired_state in prev_possible_records and not prev_may_be_missing:
+                return None
+            return syn.TargetReconcileOutput(
+                action="upsert",
+                sink=sink,
+                tracking_record=desired_state,
+            )
+
+    provider = syn.register_root_target_states_provider(
+        "test/execution/strict_legacy_cleanup",
+        Handler(),
+    )
+
+    @syn.fn
+    def build() -> None:
+        if should_declare:
+            syn.declare_target_state(provider.target_state("artifact", "owned"))
+
+    app = syn.App(
+        syn.AppConfig(
+            name="StrictLegacyCleanup",
+            environment=syn.Environment(
+                syn.Settings(db_path=tmp_path / "strict-legacy-state")
+            ),
+        ),
+        build,
+    )
+    runtime = syn.SynorRuntime(
+        state_store=syn.MemoryStateStore(),
+        revocation_policy=syn.RevocationPolicy.strict_query_verified(),
+        audit_dir=tmp_path / "runs",
+    )
+
+    await runtime.run(app)
+    assert applied_batches == [("upsert",)]
+    should_declare = False
+
+    with pytest.raises(
+        ValueError,
+        match="strict target cleanup requires a verified target action sink",
+    ):
+        await runtime.plan(app)
+    with pytest.raises(
+        ValueError,
+        match="strict target cleanup requires a verified target action sink",
+    ):
+        await runtime.run(app)
+
+    assert applied_batches == [("upsert",)]
 
 
 @pytest.mark.asyncio
