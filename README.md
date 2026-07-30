@@ -153,7 +153,3 @@ Start with the [local note catalog](examples/local_note_catalog/), then read the
 [documentation source](docs/src/content/docs/) or the
 [identity system](docs/DESIGN_SYSTEM.md).
 
-
-See [ORIGIN.md](ORIGIN.md), [NOTICE](NOTICE),
-[CHANGES_FROM_UPSTREAM.md](CHANGES_FROM_UPSTREAM.md), and
-[BRAND_CLEARANCE.md](BRAND_CLEARANCE.md) for the complete record.
