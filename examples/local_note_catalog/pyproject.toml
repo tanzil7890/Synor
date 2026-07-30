@@ -1,0 +1,9 @@
+[project]
+name = "local-note-catalog"
+version = "0.1.0"
+description = "A local-only Synor example that catalogs Markdown notes as JSON."
+requires-python = ">=3.11"
+dependencies = ["synor>=0.1.0a1"]
+
+[tool.setuptools]
+packages = []

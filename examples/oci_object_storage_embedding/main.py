@@ -1,0 +1,256 @@
+"""
+OCI Object Storage Text Embedding (v1) - Synor pipeline example.
+
+Index (use `-L` for live mode, omit for one-shot catch-up):
+    synor update main
+    synor update -L main
+
+Query the index:
+    python main.py "your query"
+
+Pipeline: list markdown objects from an OCI Object Storage bucket -> chunk -> embed -> store in Postgres pgvector.
+
+Live mode is opt-in via the ``OCI_STREAMING_BOOTSTRAP_SERVERS`` env var
+(plus ``OCI_STREAMING_TOPIC`` and credentials). When set, the example
+constructs a Kafka consumer pointed at OCI Streaming and feeds its byte
+payloads into ``oci_object_storage.list_objects(..., live_stream=...)``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from dataclasses import dataclass
+from dotenv import load_dotenv
+from typing import Annotated, AsyncIterator
+
+import asyncpg
+import oci  # type: ignore[import-not-found]
+from confluent_kafka.aio import AIOConsumer  # type: ignore[import-not-found]
+from numpy.typing import NDArray
+from oci.object_storage import ObjectStorageClient  # type: ignore[import-not-found]
+from pgvector.asyncpg import register_vector
+
+import synor as syn
+from synor.connectors import kafka, oci_object_storage, postgres
+from synor.ops.sentence_transformers import SentenceTransformerEmbedder
+from synor.ops.text import RecursiveSplitter
+from synor.resources.chunk import Chunk
+from synor.resources.file import PatternFilePathMatcher
+from synor.resources.id import IdGenerator
+
+
+DATABASE_URL = os.getenv("POSTGRES_URL", "postgres://synor:synor@localhost/synor")
+TABLE_NAME = "oci_object_storage_doc_embeddings"
+PG_SCHEMA_NAME = "synor_examples"
+TOP_K = 5
+
+# OCI Object Storage configuration
+OCI_NAMESPACE = os.environ["OCI_NAMESPACE"]
+OCI_BUCKET = os.environ["OCI_BUCKET"]
+OCI_PREFIX = os.getenv("OCI_PREFIX", "")
+OCI_CONFIG_FILE = os.getenv("OCI_CONFIG_FILE", "~/.oci/config")
+OCI_PROFILE = os.getenv("OCI_PROFILE", "DEFAULT")
+
+# OCI Streaming (Kafka-compatible) configuration — optional, enables live mode
+OCI_STREAMING_BOOTSTRAP_SERVERS = os.getenv("OCI_STREAMING_BOOTSTRAP_SERVERS")
+OCI_STREAMING_TOPIC = os.getenv("OCI_STREAMING_TOPIC")
+OCI_STREAMING_USERNAME = os.getenv("OCI_STREAMING_USERNAME")  # tenancy/user/streampool
+OCI_STREAMING_AUTH_TOKEN = os.getenv("OCI_STREAMING_AUTH_TOKEN")
+OCI_STREAMING_GROUP_ID = os.getenv(
+    "OCI_STREAMING_GROUP_ID", "synor-oci-object-storage-example"
+)
+
+EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+PG_DB = syn.ContextKey[asyncpg.Pool]("oci_embedding_db")
+OCI_CLIENT = syn.ContextKey[ObjectStorageClient]("oci_object_storage_client")
+EMBEDDER = syn.ContextKey[SentenceTransformerEmbedder]("embedder", detect_change=True)
+
+_splitter = RecursiveSplitter()
+
+
+def _build_oci_client() -> ObjectStorageClient:
+    """Construct an OCI ObjectStorageClient from a config file profile.
+
+    The native ``oci`` SDK is sync-only; the synor connector wraps calls
+    with ``asyncio.to_thread``, so passing the sync client through is fine.
+    """
+    config = oci.config.from_file(
+        file_location=os.path.expanduser(OCI_CONFIG_FILE),
+        profile_name=OCI_PROFILE,
+    )
+    return ObjectStorageClient(config)
+
+
+def _build_streaming_consumer() -> AIOConsumer | None:
+    """If OCI Streaming env vars are set, build an unsubscribed AIOConsumer
+    pointed at the OCI Streaming endpoint. Returns None for catch-up-only mode.
+    """
+    if not (
+        OCI_STREAMING_BOOTSTRAP_SERVERS
+        and OCI_STREAMING_TOPIC
+        and OCI_STREAMING_USERNAME
+        and OCI_STREAMING_AUTH_TOKEN
+    ):
+        return None
+
+    return AIOConsumer(
+        {
+            "bootstrap.servers": OCI_STREAMING_BOOTSTRAP_SERVERS,
+            "security.protocol": "SASL_SSL",
+            "sasl.mechanism": "PLAIN",
+            "sasl.username": OCI_STREAMING_USERNAME,
+            "sasl.password": OCI_STREAMING_AUTH_TOKEN,
+            "group.id": OCI_STREAMING_GROUP_ID,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
+
+
+@syn.lifespan
+async def synor_lifespan(
+    builder: syn.EnvironmentBuilder,
+) -> AsyncIterator[None]:
+    async with asyncpg.create_pool(DATABASE_URL) as pool:
+        builder.provide(PG_DB, pool)
+        builder.provide(EMBEDDER, SentenceTransformerEmbedder(EMBED_MODEL))
+        builder.provide(OCI_CLIENT, _build_oci_client())
+        yield
+
+
+@dataclass
+class DocEmbedding:
+    id: int
+    filename: str
+    chunk_start: int
+    chunk_end: int
+    text: str
+    embedding: Annotated[NDArray, EMBEDDER]
+
+
+@syn.fn
+async def process_chunk(
+    chunk: Chunk,
+    filename: str,
+    id_gen: IdGenerator,
+    table: postgres.TableTarget[DocEmbedding],
+) -> None:
+    table.declare_row(
+        row=DocEmbedding(
+            id=await id_gen.next_id(chunk.text),
+            filename=filename,
+            chunk_start=chunk.start.char_offset,
+            chunk_end=chunk.end.char_offset,
+            text=chunk.text,
+            embedding=await syn.use_context(EMBEDDER).embed(chunk.text),
+        ),
+    )
+
+
+@syn.fn(memo=True)
+async def process_file(
+    file: oci_object_storage.OCIFile,
+    table: postgres.TableTarget[DocEmbedding],
+) -> None:
+    text = await file.read_text()
+    chunks = _splitter.split(
+        text, chunk_size=2000, chunk_overlap=500, language="markdown"
+    )
+    id_gen = IdGenerator()
+    await syn.map(process_chunk, chunks, file.file_path.path.as_posix(), id_gen, table)
+
+
+@syn.fn
+async def app_main() -> None:
+    target_table = await postgres.mount_table_target(
+        PG_DB,
+        table_name=TABLE_NAME,
+        table_schema=await postgres.TableSchema.from_class(
+            DocEmbedding,
+            primary_key=["id"],
+        ),
+        pg_schema_name=PG_SCHEMA_NAME,
+    )
+
+    client = syn.use_context(OCI_CLIENT)
+
+    # If OCI Streaming is configured, build a LiveStream[bytes] from the topic
+    # and pass it to list_objects to enable live updates. Otherwise the
+    # walker yields a plain async iterable for catch-up scans only.
+    consumer = _build_streaming_consumer()
+    live_stream = None
+    if consumer is not None and OCI_STREAMING_TOPIC is not None:
+        live_stream = kafka.topic_as_stream(consumer, [OCI_STREAMING_TOPIC]).payloads()
+
+    files = oci_object_storage.list_objects(
+        client,
+        OCI_NAMESPACE,
+        OCI_BUCKET,
+        prefix=OCI_PREFIX,
+        path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
+        live_stream=live_stream,
+    )
+    await syn.mount_each(process_file, files.items(), target_table)
+
+
+app = syn.App(
+    syn.AppConfig(name="OCIObjectStorageEmbeddingV1"),
+    app_main,
+)
+
+
+# ============================================================================
+# Query demo (no vector index)
+# ============================================================================
+
+
+async def query_once(
+    pool: asyncpg.Pool,
+    embedder: SentenceTransformerEmbedder,
+    query: str,
+    *,
+    top_k: int = TOP_K,
+) -> None:
+    query_vec = await embedder.embed(query)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                filename,
+                text,
+                embedding <=> $1 AS distance
+            FROM "{PG_SCHEMA_NAME}"."{TABLE_NAME}"
+            ORDER BY distance ASC
+            LIMIT $2
+            """,
+            query_vec,
+            top_k,
+        )
+
+    for r in rows:
+        score = 1.0 - float(r["distance"])
+        print(f"[{score:.3f}] {r['filename']}")
+        print(f"    {r['text']}")
+        print("---")
+
+
+async def query(initial_query: str | None = None) -> None:
+    embedder = SentenceTransformerEmbedder(EMBED_MODEL)
+    async with asyncpg.create_pool(DATABASE_URL, init=register_vector) as pool:
+        if initial_query is not None:
+            await query_once(pool, embedder, initial_query)
+            return
+
+        while True:
+            q = input("Enter search query (or Enter to quit): ").strip()
+            if not q:
+                break
+            await query_once(pool, embedder, q)
+
+
+if __name__ == "__main__":
+    load_dotenv()
+    initial = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else None
+    asyncio.run(query(initial))

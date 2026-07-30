@@ -1,0 +1,35 @@
+:root {
+  /* Core palette */
+  --ink: #19151f;
+  --ink-soft: #3f3845;
+  --ink-muted: #6f6674;
+  --canvas: #f7f3ea;
+  --canvas-raised: #eee8de;
+  --surface: #fffdf8;
+  --rule: #d8d0c5;
+
+  /* Identity colors */
+  --spark: #ed5a3a;
+  --spark-deep: #bd3d26;
+  --signal: #6f45e8;
+  --signal-deep: #5630bd;
+  --lilac-wash: #eee5ff;
+  --sprout: #c6e85b;
+  --sprout-deep: #657d16;
+  --blush: #ffd1c7;
+  --amber: #f5c451;
+
+  /* Typography */
+  --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua",
+    Georgia, serif;
+  --font-body: "Avenir Next", Avenir, "Segoe UI", Helvetica, Arial,
+    sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  /* Shape and rhythm */
+  --radius-sm: 7px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --shadow-float: 0 22px 70px rgb(25 21 31 / 0.14);
+  --measure: 72ch;
+}

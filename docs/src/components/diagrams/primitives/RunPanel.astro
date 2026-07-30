@@ -1,0 +1,30 @@
+---
+import ShapeGroup from './ShapeGroup.astro';
+
+interface Props {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  label: string;
+  note?: string;
+  class?: string;
+}
+
+const {
+  x,
+  y,
+  w,
+  h,
+  label,
+  note,
+  class: extraClass = '',
+} = Astro.props;
+---
+
+<ShapeGroup x={x} y={y} baseClass="dg-run-panel" class={extraClass}>
+  <rect class="dg-box dg-box--run" x="0" y="0" width={w} height={h} rx="18" />
+  <text class="dg-label dg-label--caps dg-label--left" x="22" y="25">{label}</text>
+  {note && <text class="dg-label dg-label--small dg-label--right" x={w - 22} y="25">{note}</text>}
+  <slot />
+</ShapeGroup>

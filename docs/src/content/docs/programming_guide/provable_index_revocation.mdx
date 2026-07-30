@@ -1,0 +1,297 @@
+---
+title: Prove index revocation
+description: >
+  Suppress access immediately, verify removal from governed AI indexes, retain
+  metadata-only evidence, and operate unresolved cases without weakening the
+  compatibility path.
+---
+
+Provable Index Revocation is Synor's opt-in path for a specific failure mode:
+a source document is deleted or loses permission, but a derived chunk remains
+searchable in an AI index.
+
+The strict path turns that event into a durable case, denies the old derivative
+through a guarded query boundary, applies a generation-fenced target action,
+checks the target postcondition, and retains a metadata-only receipt. A timeout,
+unsupported capability, missing provider, incomplete source snapshot, or
+failed read-back remains visible as an open case. It is never reported as
+ordinary success.
+
+## Exact guarantee
+
+For a governed source observation and a registered certified target, Synor can
+establish that:
+
+1. the source uses an opaque, stable identity;
+2. content and access revisions both participate in change detection;
+3. a revocation intent and fail-closed serving fence exist before destructive
+   target work;
+4. the supported retrieval path checks tenant, current policy and group
+   revision, source generation, and suppression before scoring;
+5. the target action is bound to a deterministic obligation and generation;
+6. success requires the connector's documented negative query/read-back
+   postcondition; and
+7. the case and receipt contain digests, counts, timestamps, capability facts,
+   and controlled error codes—not source text, vectors, credentials, raw
+   principals, or provider-native locators.
+
+This guarantee applies only when all three governed boundaries are used:
+
+```text
+governed source → strict revocation controller + certified target
+                → guarded retrieval
+```
+
+Calling `App.update()` directly remains compatible, but is outside this
+evidence guarantee. Querying Qdrant directly also bypasses Synor's suppression
+and current-policy checks.
+
+Phase 5 does not infer those three boundaries from arbitrary application code.
+Controlled reports therefore record `strict_revocation_control_v1` when strict
+policy, state health, and controller ordering are active. The stronger
+`provable_index_revocation_v1` report value is reserved until a future
+declarative Drive/target/query integration can attest all three registrations;
+selecting a strict policy by itself is not a security attestation.
+
+## Enable the controlled runtime
+
+Use one policy object and one durable control-plane store:
+
+```python
+import synor as syn
+
+store = syn.FileStateStore(".synor/control")
+runtime = syn.SynorRuntime(
+    state_store=store,
+    revocation_policy=syn.RevocationPolicy.strict_query_verified(),
+)
+
+health = await runtime.revocation_health()
+if not health.ready:
+    raise RuntimeError(health.safe_error_code)
+
+report = await runtime.run(app, app_target="main.py")
+print(report.status.value)
+print(report.revocations)
+print(report.execution_guarantee.value)  # strict_revocation_control_v1
+```
+
+Strict mode requires a `StateStore`. The current filesystem and encrypted
+adapters are designed for one writer process and one event loop. They are not a
+distributed transaction protocol. Keep repeated strict runs in one async
+process; cross-process coordination and sudden-power-loss certification remain
+later durability work.
+
+`SynorRuntime.revocation_controller` exposes the governed lifecycle used by
+certified connector code. Its `begin_case()` path validates the request,
+snapshot authority, operation, and registered factual target/query
+capabilities before the external destructive action can run. Unsupported
+requirements become a durable blocked case rather than silently falling back
+to acknowledgement-only deletion.
+
+## Model source identity and access
+
+Use stable provider IDs, never filenames or display names:
+
+```python
+import hashlib
+from synor import governance
+
+identity = governance.SourceIdentity(
+    connector_instance_id="drive-prod-v1",
+    source_scope_id="shared-drive-42",
+    item_id="immutable-provider-file-id",
+)
+
+access = governance.AccessSnapshot(
+    tenant_id="tenant-a",
+    policy_id="drive-acl",
+    policy_revision="permission-change-104",
+    policy_digest=hashlib.sha256(b"canonical policy").hexdigest(),
+    group_graph_revision="groups-28",
+)
+```
+
+A governed source yields `GovernedSourceItem`. Its memo state contains both the
+content fingerprint and the access revisions, so a permission-only change with
+identical document bytes still invalidates governed work.
+
+Only a complete, correctly scoped `SnapshotResult` authorizes cleanup based on
+an item being absent from a listing. A partial scan can report uncertainty or
+an independent revocation signal, but it cannot turn unseen items into mass
+deletion.
+
+## Guard every supported query
+
+The public retrieval guard requires a trusted authentication context, a
+monotonic suppression lookup, and a current access-policy lookup:
+
+```python
+from synor import retrieval
+
+guard = retrieval.RetrievalGuard(
+    suppression_lookup=suppression_index,
+    policy_lookup=current_policy_lookup,
+)
+
+allowed = await guard.filter_candidates(
+    retrieval.RetrievalContext(
+        tenant_id="tenant-a",
+        principal_id=authenticated_principal_id,
+        group_graph_revision="groups-28",
+    ),
+    candidates,
+)
+```
+
+Construct `RetrievalContext` after authentication and trusted group
+resolution—never from caller-supplied group IDs. The guard rejects another
+tenant before external lookups, checks suppression before policy, and denies
+missing, malformed, stale, or unavailable authorization state. The reference
+retriever also revalidates after asynchronous scoring so a revocation that
+lands during scoring cannot release a stale result.
+
+## Interpret controlled-run status
+
+`ExecutionReport.status` and the run manifest use four outcomes:
+
+| Status | Meaning |
+|---|---|
+| `succeeded` | The app completed and no unresolved governed revocation remains. |
+| `succeeded_with_open_revocations` | The app completed; one or more cases remain suppressed and within their deadlines. |
+| `degraded` | The app completed, but a case is failed, blocked, or overdue. This is not plain success. |
+| `failed` | The controlled operation raised or its strict health/evidence boundary could not be established. |
+
+The optional revocation summary classifies cases as `observed`, `suppressed`,
+`verified`, `retained`, `failed`, or `blocked`; `overdue` is a subset based on
+the suppression and verification deadlines. In-progress deletion stages are
+counted as suppressed because they must remain unavailable to guarded queries.
+A legal-hold case is retained only after isolation is verified; it is not
+described as erased.
+
+Older version-1 manifests remain readable because the new fields are optional.
+The immutable `revocation/v1/` event and receipt schemas are unchanged.
+
+## Inspect and operate cases
+
+Repository inspection needs only `SYNOR_STATE_STORE`:
+
+```bash
+export SYNOR_STATE_STORE="file://.synor/control"
+
+synor revocations list --status open
+synor revocations show <case-id>
+```
+
+Use `--json` for a versioned JSON envelope. List and show expose case IDs,
+digests, counts, deadlines, assurance, and controlled error codes. They omit
+raw source revisions, principals, provider operation IDs, and reversible
+target locators.
+
+Ledger repair is an explicit control-plane mutation: it rebuilds derived case
+and receipt-head projections from immutable evidence, but does not touch the
+destination or lift serving suppression:
+
+```bash
+synor revocations repair-ledger
+```
+
+Destination work requires an explicit operator adapter because the general
+receipt intentionally stores a locator digest rather than a reusable
+credential or provider-native locator:
+
+```bash
+synor revocations verify <case-id> --operator my_ops:operator
+synor revocations retry <case-id> --operator my_ops:operator
+synor revocations scan --target qdrant-prod --operator my_ops:operator
+```
+
+The same explicit reference may be set in `SYNOR_REVOCATION_OPERATOR`.
+
+- `verify` is an operator contract. Use a provider identity that has read-only
+  credentials; Synor verifies that its own revocation control bytes did not
+  change, but a generic CLI cannot prove what arbitrary provider code did.
+- `retry` is an explicit external mutation. Before calling the adapter, Synor
+  requires the case's exact serving suppression. The adapter must reconstruct
+  the protected operation, revalidate capabilities, and append a new attempt
+  receipt without changing the serving fence.
+- `scan` reports destination drift and must use read-only provider credentials;
+  it does not delete or repair through the Synor command.
+- `repair-ledger` rebuilds derived summaries and receipt heads from immutable
+  evidence. It never removes suppression.
+
+There is intentionally no operator command that marks a ticket closed or lifts
+suppression. Access returns only through a newer, independently verified source
+authorization and derivative generation.
+
+## Google Drive and Qdrant boundary
+
+`GovernedGoogleDriveSource` supplies stable file identity, access-sensitive
+observations, complete/partial snapshot results, checkpoint ordering, durable
+Changes replay, permission expiry, and bounded descendant invalidation.
+Provider visibility limits and unresolved group membership remain explicit
+limitation codes.
+
+`CertifiedQdrantTarget` binds every point to stable source/chunk identity,
+tenant and policy metadata, source generation, and principal digests. Its
+strict profile checks supported client/server versions, collection health,
+payload indexes, topology, full write-consistency acknowledgement, strong
+write ordering, and `consistency=all` guarded read-back. Live single-node and
+replicated-cluster acceptance still requires an operator-approved deployment;
+local tests do not certify a production topology.
+
+For a real deployment, retain the metadata-only factual report returned by:
+
+```python
+capabilities = await certified_target.capability_report()
+print(capabilities.to_dict())
+```
+
+It includes the detected client/server versions, topology and collection
+facts, read/write consistency settings, every boolean capability, and the
+contract digest bound into receipts. A static configuration probe is not a
+live capability report.
+
+`CertifiedQueryContext` must be derived by trusted upstream authentication and
+policy code; constructing it does not authenticate the principal. Remote
+deployments must also configure a finite `QdrantClient` transport timeout—the
+adapter's Qdrant operation-timeout parameter is not a universal transport
+deadline.
+
+Use the fully local `examples/provable_index_revocation/` example to see the
+complete lifecycle without credentials, then opt into the real Drive/Qdrant
+configuration only after reviewing its environment template.
+
+## Evidence and recovery
+
+Cases and receipts live outside ordinary target snapshots under
+`revocation/v1/`. Writes are event first and summary second, so
+`repair-ledger` can rebuild an interrupted projection. Receipt chains have a
+durable count/tip head and are validated when read. Corrupt, divergent, lost,
+or unsupported evidence fails closed.
+
+Rollback may stop creating new strict cases or temporarily withdraw public
+constructors, but readers and suppression enforcement must remain. Never
+delete the revocation directory to recover a run, and never downgrade a build
+that writes an unreadable schema without an explicit downgrade tool.
+
+## Non-claims
+
+The current public/reference milestone does not claim:
+
+- physical storage-media erasure or per-replica destruction;
+- safety for direct database queries, unmanaged copies, model caches, prompt
+  logs, backups, or downstream exports;
+- multi-process or multi-host transactions, power-loss durability, or native
+  live-incarnation fencing;
+- that one scalar source generation authorizes an unrelated corpus;
+- automatic cleanup of externally restored or drifted points; suppression
+  prevents their return through the guarded path, while later drift work owns
+  enumeration and repair; or
+- legal compliance by itself. Retention and hold decisions remain an
+  application policy responsibility.
+
+These limits are part of the guarantee, not footnotes. A security reviewer
+should be able to identify the supported source, target, query boundary,
+assurance level, deadlines, and unresolved cases before approving a
+deployment.

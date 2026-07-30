@@ -1,0 +1,4 @@
+.env
+synor.db
+.venv-test/
+__pycache__/

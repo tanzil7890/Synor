@@ -1,0 +1,69 @@
+---
+import DiagramFrame from '../primitives/DiagramFrame.astro';
+import AppContainer from '../primitives/AppContainer.astro';
+import ProcessingComponent from '../primitives/ProcessingComponent.astro';
+import DataBox from '../primitives/DataBox.astro';
+import LogicBox from '../primitives/LogicBox.astro';
+import TargetBullet from '../primitives/TargetBullet.astro';
+import FlowArrow from '../primitives/FlowArrow.astro';
+
+const APP = { x: 20, y: 22, w: 720, h: 286 };
+const INPUT = { x: 30, w: 108, h: 32 };
+const PC = { x: 180, w: 500, h: 96 };
+const WORK = { x: 28, w: 150, h: 46 };
+const OUT = { x: 316, w: 142, h: 32 };
+const ROWS = [
+  { cy: 94, input: 'notes/garden.md', path: 'work/notes/garden.md', output: 'catalog/garden.json', state: 'idle' as const },
+  { cy: 218, input: 'notes/retired.md', path: 'work/notes/retired.md', output: 'catalog/retired.json', state: 'removed' as const },
+];
+---
+
+<DiagramFrame
+  viewBox="0 0 760 330"
+  maxWidth={820}
+  title="Stable work paths own their outcomes"
+  desc="Each note has a stable work path and owns its JSON outcome. When the retired note disappears, Synor removes the outcome owned by that path."
+>
+  <AppContainer {...APP} label="App · local note catalog">
+    {ROWS.map((row) => (
+      <g>
+        <DataBox
+          x={INPUT.x}
+          y={row.cy - INPUT.h / 2}
+          w={INPUT.w}
+          h={INPUT.h}
+          label={row.input}
+          state={row.state}
+        />
+        <FlowArrow d={`M ${INPUT.x + INPUT.w} ${row.cy} L ${PC.x} ${row.cy}`} />
+        <ProcessingComponent
+          x={PC.x}
+          y={row.cy - PC.h / 2}
+          w={PC.w}
+          h={PC.h}
+          label={row.path}
+          state={row.state}
+        >
+          <LogicBox
+            x={WORK.x}
+            y={PC.h / 2 - WORK.h / 2 + 8}
+            w={WORK.w}
+            h={WORK.h}
+            label="catalog_note"
+            memoized={true}
+            state={row.state}
+          />
+          <FlowArrow d={`M ${WORK.x + WORK.w} ${PC.h / 2 + 8} L ${OUT.x} ${PC.h / 2 + 8}`} />
+          <TargetBullet
+            x={OUT.x}
+            y={PC.h / 2 - OUT.h / 2 + 8}
+            w={OUT.w}
+            h={OUT.h}
+            label={row.output}
+            state={row.state}
+          />
+        </ProcessingComponent>
+      </g>
+    ))}
+  </AppContainer>
+</DiagramFrame>

@@ -1,0 +1,18 @@
+[package]
+name = "synor_code_match"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+synor_utils = { path = "../utils" }
+regex = { workspace = true }
+regex-syntax = { workspace = true }
+aho-corasick = { workspace = true }
+
+# Grammars come from the `synor_code_ast` registry (the single place in the
+# workspace that links grammar crates); `tree-sitter` itself is needed only for
+# node/tree types.
+synor_code_ast = { path = "../code_ast" }
+tree-sitter = "0.25.10"

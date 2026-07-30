@@ -1,0 +1,46 @@
+---
+// CSS-only tabs. Radios are direct children of .synor-tabs so they can
+// be general siblings of the bar + panels; labels reference them by
+// `for=`. No JS required. Each instance gets a unique radio-group name.
+interface Props {
+  labels: string[];
+  initial?: number;
+}
+const { labels, initial = 0 } = Astro.props;
+const id = `synor-tabs-${crypto.randomUUID().slice(0, 8)}`;
+---
+<div class="synor-tabs">
+  {labels.map((_, i) => (
+    <input
+      type="radio"
+      class="synor-tabs-radio"
+      name={id}
+      id={`${id}-${i}`}
+      checked={i === initial}
+    />
+  ))}
+  <div class="synor-tabs-bar" role="tablist">
+    {labels.map((label, i) => (
+      <label for={`${id}-${i}`} class="synor-tabs-label" role="tab">
+        <span>{label}</span>
+      </label>
+    ))}
+  </div>
+  <div class="synor-tabs-panels">
+    {labels[0] && (
+      <section class="synor-tabs-panel" data-tab-index="0" role="tabpanel"><slot name="tab-0" /></section>
+    )}
+    {labels[1] && (
+      <section class="synor-tabs-panel" data-tab-index="1" role="tabpanel"><slot name="tab-1" /></section>
+    )}
+    {labels[2] && (
+      <section class="synor-tabs-panel" data-tab-index="2" role="tabpanel"><slot name="tab-2" /></section>
+    )}
+    {labels[3] && (
+      <section class="synor-tabs-panel" data-tab-index="3" role="tabpanel"><slot name="tab-3" /></section>
+    )}
+    {labels[4] && (
+      <section class="synor-tabs-panel" data-tab-index="4" role="tabpanel"><slot name="tab-4" /></section>
+    )}
+  </div>
+</div>

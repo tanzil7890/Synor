@@ -1,0 +1,8 @@
+<svg width="64" height="64" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="synor-mark-title synor-mark-desc">
+  <title id="synor-mark-title">Synor Alignment Weave</title>
+  <desc id="synor-mark-desc">Three paths settle into a shared alignment.</desc>
+  <rect x="2" y="2" width="60" height="60" rx="18" fill="#19151F"/>
+  <path d="M13 17H27C35 17 35 26 43 26H51" fill="none" stroke="#ED5A3A" stroke-width="6" stroke-linecap="round"/>
+  <path d="M13 32H51" fill="none" stroke="#C6E85B" stroke-width="6" stroke-linecap="round"/>
+  <path d="M13 47H27C35 47 35 38 43 38H51" fill="none" stroke="#9B7CFA" stroke-width="6" stroke-linecap="round"/>
+</svg>

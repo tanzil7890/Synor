@@ -1,0 +1,106 @@
+"""Module with v1 function bodies for logic change detection testing.
+
+Functions that differ between v1 and v2: transform_memo, declare_entry_memo,
+bar_memo, bar_plain, bar_comp_memo, bar_comp_plain.
+
+Functions that are IDENTICAL in v1 and v2 (same source text): foo_calls_bar_memo,
+foo_calls_bar_plain, foo_comp_calls_bar_memo, foo_comp_mounts_bar_comp_plain,
+foo_comp_mounts_bar_comp_memo.
+"""
+
+import synor as syn
+from tests.common.target_states import GlobalDictTarget, Metrics
+
+_metrics: Metrics | None = None
+
+
+def set_metrics(metrics: Metrics) -> None:
+    global _metrics
+    _metrics = metrics
+
+
+# --- Direct functions (DIFFER between v1 and v2) ---
+
+
+@syn.fn(memo=True)
+def transform_memo(key: str, value: str) -> str:
+    assert _metrics is not None
+    _metrics.increment("transform_memo")
+    return "v1: " + value
+
+
+@syn.fn(memo=True)
+def declare_entry_memo(key: str, value: str) -> None:
+    assert _metrics is not None
+    _metrics.increment("declare_entry_memo")
+    syn.declare_target_state(GlobalDictTarget.target_state(key, "v1: " + value))
+
+
+# --- Bar functions (DIFFER between v1 and v2) ---
+
+
+@syn.fn(memo=True)
+def bar_memo(s: str) -> str:
+    assert _metrics is not None
+    _metrics.increment("bar_memo")
+    return "bar_v1: " + s
+
+
+@syn.fn
+def bar_plain(s: str) -> str:
+    assert _metrics is not None
+    _metrics.increment("bar_plain")
+    return "bar_v1: " + s
+
+
+@syn.fn(memo=True)
+def bar_comp_memo(key: str, value: str) -> None:
+    assert _metrics is not None
+    _metrics.increment("bar_comp_memo")
+    syn.declare_target_state(GlobalDictTarget.target_state(key, "bar_v1: " + value))
+
+
+@syn.fn
+def bar_comp_plain(key: str, value: str) -> None:
+    assert _metrics is not None
+    _metrics.increment("bar_comp_plain")
+    syn.declare_target_state(GlobalDictTarget.target_state(key, "bar_v1: " + value))
+
+
+# --- Foo functions (IDENTICAL in v1 and v2) ---
+
+
+@syn.fn(memo=True)
+def foo_calls_bar_memo(key: str, value: str) -> str:
+    assert _metrics is not None
+    _metrics.increment("foo_calls_bar_memo")
+    return bar_memo(value)
+
+
+@syn.fn(memo=True)
+def foo_calls_bar_plain(key: str, value: str) -> str:
+    assert _metrics is not None
+    _metrics.increment("foo_calls_bar_plain")
+    return bar_plain(value)
+
+
+@syn.fn
+def foo_comp_calls_bar_memo(key: str, value: str) -> None:
+    assert _metrics is not None
+    _metrics.increment("foo_comp_calls_bar_memo")
+    result = bar_memo(value)
+    syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+
+
+@syn.fn
+async def foo_comp_mounts_bar_comp_plain(key: str, value: str) -> None:
+    assert _metrics is not None
+    _metrics.increment("foo_comp_mounts_bar_comp_plain")
+    await syn.mount(syn.component_subpath(key), bar_comp_plain, key, value)
+
+
+@syn.fn
+async def foo_comp_mounts_bar_comp_memo(key: str, value: str) -> None:
+    assert _metrics is not None
+    _metrics.increment("foo_comp_mounts_bar_comp_memo")
+    await syn.mount(syn.component_subpath(key), bar_comp_memo, key, value)

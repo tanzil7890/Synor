@@ -1,0 +1,62 @@
+---
+title: What *Synor does*
+description: >
+  Synor keeps derived files, rows, and indexes aligned with changing inputs
+  while avoiding work that already settled.
+---
+Synor is built for the second run.
+
+You write Python functions that read current inputs and declare the outcomes
+their work units own. Synor keeps a local change ledger, finds the work affected
+by an input or code change, and reconciles the corresponding outcomes.
+
+## The promise
+
+**Synor keeps every derived file, row, and index aligned with the inputs that
+produced it.**
+
+That promise has three parts:
+
+1. **Alignment:** an external file, row, or index entry should match the current
+   input and code.
+2. **Ownership:** each processing component has a stable path and owns a precise
+   set of target states.
+3. **Reuse:** work with unchanged inputs and code can remain settled.
+
+## What runs locally
+
+The Python package, Rust engine, native extension, and LMDB change ledger run on
+your machine. Synor does not send usage telemetry.
+
+Connectors determine where pipeline data lives. A local-files pipeline can run
+without any network service. A Postgres, Qdrant, model, or cloud-storage
+connector naturally requires the service it connects to.
+
+## What pipeline code looks like
+
+Synor uses ordinary Python instead of a separate graph or configuration
+language:
+
+```python
+@syn.fn(memo=True)
+async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
+    record = summarize(await file.read_text())
+    localfs.declare_file(
+        catalog_dir / f"{file.file_path.path.stem}.json",
+        json.dumps(record),
+        create_parent_dirs=True,
+    )
+```
+
+The function is reusable work. `declare_file` records the outcome it owns.
+Mounting one function per keyed input gives every work unit a durable identity.
+
+## Where to begin
+
+- [Build the local note catalog](./quickstart) to observe a first and second
+  run without external services.
+- Read [The second-run model](../programming_guide/core_concepts) for the
+  ownership and reconciliation vocabulary.
+- Browse [Connect systems](../connectors) after the local behavior is clear.
+- Read [Operate the run](../advanced_topics) for failure handling,
+  concurrency, progress, and storage.

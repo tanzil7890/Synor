@@ -1,0 +1,278 @@
+from typing import Any
+
+import pytest
+
+import synor as syn
+
+from tests import common
+from tests.common.target_states import (
+    AtMost,
+    GlobalDictTarget,
+    AsyncGlobalDictTarget,
+    DictDataWithPrev,
+)
+
+synor_env = common.create_test_env(__file__)
+
+_source_data: dict[str, Any] = {}
+
+
+def declare_global_dict_entries() -> None:
+    for key, value in _source_data.items():
+        syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+
+
+def test_global_dict_target_state_insert() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_global_dict_target_state_insert", environment=synor_env
+        ),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 1}
+
+    _source_data["b"] = 2
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 1}
+
+
+def test_global_dict_target_state_upsert() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_global_dict_target_state_upsert", environment=synor_env
+        ),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    _source_data["b"] = 2
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 2}
+
+    _source_data["a"] = 3
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=3, prev=[1], prev_may_be_missing=False),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 1}
+
+
+def test_global_dict_target_state_delete() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_global_dict_target_state_delete", environment=synor_env
+        ),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    _source_data["b"] = 2
+    app.update_blocking()
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 2}
+
+    del _source_data["a"]
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "delete": 1}
+
+
+def test_global_dict_target_state_no_change() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_global_dict_target_state_no_change", environment=synor_env
+        ),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    _source_data["b"] = 2
+
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 2}
+
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {}
+
+    _source_data["a"] = 3
+
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=3, prev=[1], prev_may_be_missing=False),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 1}
+
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=3, prev=[1], prev_may_be_missing=False),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {}
+
+
+def declare_async_global_dict_entries() -> None:
+    for key, value in _source_data.items():
+        syn.declare_target_state(AsyncGlobalDictTarget.target_state(key, value))
+
+
+def test_async_global_dict_target_state_insert() -> None:
+    AsyncGlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_async_global_dict_target_state_insert", environment=synor_env
+        ),
+        declare_async_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    app.update_blocking()
+    assert AsyncGlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+    }
+    assert AsyncGlobalDictTarget.store.metrics.collect() == {
+        "sink": AtMost(1),
+        "upsert": 1,
+    }
+
+    _source_data["b"] = 2
+    app.update_blocking()
+    assert AsyncGlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert AsyncGlobalDictTarget.store.metrics.collect() == {
+        "sink": AtMost(1),
+        "upsert": 1,
+    }
+
+
+def test_global_dict_preview_returns_actions_without_writing() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_global_dict_preview_returns_actions", environment=synor_env
+        ),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    _source_data["b"] = 2
+    actions = app.update_blocking(preview=True)
+
+    assert isinstance(actions, list)
+    assert len(actions) == 2
+    assert GlobalDictTarget.store.data == {}
+    assert GlobalDictTarget.store.metrics.collect() == {}
+
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=1, prev=[], prev_may_be_missing=True),
+        "b": DictDataWithPrev(data=2, prev=[], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 2}
+
+
+@pytest.mark.asyncio
+async def test_global_dict_preview_async() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(name="test_global_dict_preview_async", environment=synor_env),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    actions = await app.update(preview=True)
+
+    assert isinstance(actions, list)
+    assert len(actions) > 0
+    assert GlobalDictTarget.store.data == {}
+
+
+def test_global_dict_target_state_proceed_with_exception() -> None:
+    GlobalDictTarget.store.clear()
+    _source_data.clear()
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_global_dict_target_state_proceed_with_exception",
+            environment=synor_env,
+        ),
+        declare_global_dict_entries,
+    )
+
+    _source_data["a"] = 1
+    try:
+        GlobalDictTarget.store.sink_exception = True
+        with pytest.raises(Exception):
+            app.update_blocking()
+    finally:
+        GlobalDictTarget.store.sink_exception = False
+    assert GlobalDictTarget.store.data == {}
+
+    _source_data["a"] = 2
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=2, prev=[1], prev_may_be_missing=True),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 1}
+
+    _source_data["a"] = 3
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {
+        "a": DictDataWithPrev(data=3, prev=[2], prev_may_be_missing=False),
+    }
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "upsert": 1}
+
+    del _source_data["a"]
+    try:
+        GlobalDictTarget.store.sink_exception = True
+        with pytest.raises(Exception):
+            app.update_blocking()
+    finally:
+        GlobalDictTarget.store.sink_exception = False
+    app.update_blocking()
+    assert GlobalDictTarget.store.data == {}
+    assert GlobalDictTarget.store.metrics.collect() == {"sink": AtMost(1), "delete": 1}

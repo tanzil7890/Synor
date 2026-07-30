@@ -1,0 +1,14 @@
+[project]
+name = "meeting-notes-graph-neo4j"
+version = "0.1.0"
+description = "Synor example: build a knowledge graph from meeting notes in Google Drive, stored in Neo4j."
+requires-python = ">=3.11"
+dependencies = [
+    "synor[neo4j,google_drive,sentence_transformers,entity_resolution_llm]>=0.1.0a1",
+    "instructor",
+    "litellm",
+    "pydantic",
+]
+
+[tool.setuptools]
+py-modules = ["main"]

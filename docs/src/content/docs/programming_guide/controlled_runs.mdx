@@ -1,0 +1,196 @@
+---
+title: Review a run *before it applies*
+description: >
+  Diagnose a local app, preview its target actions, deny network egress, inspect
+  ownership, and retain metadata-only evidence for every controlled run.
+---
+
+Synor's control layer answers four operational questions without replacing the
+existing `App` runtime:
+
+1. Is this machine ready?
+2. What would this app try to change?
+3. What network and data egress is permitted?
+4. What local evidence remains after the command finishes?
+
+The established `App.update()` API remains supported. Use the CLI or
+`SynorRuntime` when a run also needs policy, a typed report, and an audit
+manifest.
+
+## Diagnose the local setup
+
+Run `doctor` before the first update:
+
+```bash
+synor doctor main.py --offline
+```
+
+It checks the Python runtime, native Synor extension, audit directory, app
+loading, environment database path, and active egress policy. Add `--json` for
+machine-readable output. A local GGUF file can be checked without loading it:
+
+```bash
+synor doctor main.py --model ./models/example.gguf --offline --json
+```
+
+`doctor` reports readiness. It does not download a compiler, Python package, or
+model.
+
+## Plan, compare, then apply
+
+Use the same app target for each command:
+
+```bash
+synor plan main.py --offline
+synor diff main.py --offline
+synor update main.py --offline
+synor explain main.py --offline
+```
+
+`plan` and `diff` both execute the native preview path. Pipeline code runs so it
+can declare target states, but connector actions are returned instead of being
+applied. `plan` groups the result as a proposed run; `diff` prints the individual
+redacted actions in a compact comparison-oriented form. Connector action types
+do not share one universal create/update/delete schema, so an operation may be
+reported conservatively as `change`.
+
+Preview is not a general-purpose sandbox. Pipeline code outside target
+connectors can still have side effects. Keep ordinary file writes, subprocesses,
+and service calls behind targets or explicit policy-aware boundaries.
+
+`explain` is read-only with respect to pipeline targets. It reports the app's
+environment, local state database, stable-path count, target-state count,
+effective policy, and most recent run evidence.
+
+## Deny network and control egress
+
+`--offline` installs a process-wide guard for standard Python socket
+connections, datagram sends, connection helpers, and DNS resolution. It also
+forces the sentence-transformers adapter to use cached model files only and
+blocks Synor's LiteLLM operations before their request is sent.
+
+The equivalent environment setting is:
+
+```bash
+export SYNOR_OFFLINE=1
+```
+
+When networking is allowed, restrict destinations and classifications with:
+
+```bash
+export SYNOR_ALLOWED_HOSTS="models.internal.example,*.storage.example"
+export SYNOR_MAX_EGRESS_CLASSIFICATION="internal"
+```
+
+The classification order is `public`, `internal`, `confidential`, then
+`restricted`. An allow-list entry is an exact hostname, IP address, or wildcard
+subdomain such as `*.storage.example`.
+
+The socket guard covers Python networking used inside the controlled process.
+It cannot intercept a subprocess, native extension, or foreign runtime that
+opens its own sockets. Do not treat it as an operating-system firewall.
+
+For a custom connector or operation, authorize a transfer before sending data:
+
+```python
+import synor as syn
+
+syn.authorize_egress(
+    syn.EgressRequest(
+        destination="warehouse.internal.example",
+        purpose="write derived rows",
+        classification=syn.DataClassification.INTERNAL,
+        byte_count=encoded_size,
+    )
+)
+```
+
+Only destination metadata, purpose, classification, byte count, rule, and
+decision are eligible for the audit event. Never put credentials, query
+strings, prompts, or record content in `destination` or `purpose`.
+
+## Inspect local run evidence
+
+Controlled `plan`, `diff`, `update`, `drop`, `explain`, and `SynorRuntime`
+operations create:
+
+```text
+.synor/runs/<run-id>/
+├── manifest.json
+├── audit.jsonl
+├── provenance.jsonl  # successful controlled applies
+└── replay.json       # plans with an APP_TARGET
+```
+
+Set `SYNOR_AUDIT_DIR` to choose another local root. The manifest records command,
+status, timing, Synor and Python versions, app identity, options, policy, action
+count, and redacted statistics. The JSONL stream records lifecycle and egress
+decisions.
+
+Secret-like fields are replaced, byte values become length and SHA-256
+metadata, unknown objects are recorded by type, and exception messages are
+omitted. These controls reduce accidental disclosure; review your own custom
+metadata before publishing a manifest.
+
+For encrypted control-plane stores, artifact provenance, replay verification,
+PII enforcement, quarantine, packages, and the local dashboard, continue to
+[Keep local runs inspectable](/docs/programming_guide/trustworthy_execution/).
+
+## Use the Python control layer
+
+Existing code remains valid:
+
+```python
+app.update_blocking()
+```
+
+The opt-in facade returns typed reports and keeps the established engine
+internals authoritative:
+
+```python
+import synor as syn
+
+runtime = syn.SynorRuntime(
+    policy=syn.EgressPolicy.offline(),
+    audit_dir=".synor/runs",
+)
+
+plan = runtime.plan_blocking(app, app_target="main.py")
+for change in plan.planned_changes:
+    print(change.operation, change.action_type)
+
+result = runtime.run_blocking(app, app_target="main.py")
+print(result.run_id, result.manifest_path)
+```
+
+Async applications can call `await runtime.plan(app)` and
+`await runtime.run(app)`. The facade delegates execution to `App.update()`;
+there is no second incremental engine or incompatible state format.
+
+## Run a model without a model service
+
+Adapt an in-process function:
+
+```python
+from synor.models import CallableLocalModel
+
+model = CallableLocalModel(lambda prompt: prompt.upper(), name="uppercase")
+response = await model.generate("summarize locally")
+```
+
+Or load an existing GGUF file through the optional llama.cpp adapter:
+
+```bash
+uv sync --extra local_models
+```
+
+```python
+from synor.models import LlamaCppLocalModel
+
+model = LlamaCppLocalModel("./models/example.gguf")
+response = await model.generate("Summarize this note")
+```
+
+`LlamaCppLocalModel` requires a file that already exists and never downloads a
+model. Other local runtimes can implement the small `LocalModel` protocol,
+whose only required method is `async generate(prompt)`.

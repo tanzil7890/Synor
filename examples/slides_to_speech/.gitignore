@@ -1,0 +1,10 @@
+.env
+synor.db
+.mypy_cache
+.venv-test/
+__pycache__/
+lancedb_data/
+
+# Local
+scratch
+slides_to_speech.egg-info

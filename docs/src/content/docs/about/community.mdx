@@ -1,0 +1,39 @@
+---
+title: Contributing *locally*
+description: >
+  Build, test, and improve the alpha-stage Synor workspace without relying on
+  unverified project accounts or community endpoints.
+---
+
+Synor is currently an alpha-stage local project. Public community accounts,
+support email addresses, and social channels have not been verified and are
+therefore not advertised here.
+
+## Start contributing
+
+Read the repository-level `CONTRIBUTING.md` and `AGENTS.md`, then build the
+native extension:
+
+```sh
+uv sync --group dev
+uv run maturin develop
+```
+
+Run the relevant checks before sharing a change:
+
+```sh
+cargo test
+uv run mypy
+uv run pytest python/
+uv run ruff check .
+```
+
+## Support status
+
+There is no public support or security mailbox for this pre-release working
+tree. If you received the project directly from a maintainer, use the same
+verified channel to request help. Do not send sensitive information to an
+address inferred from the project name.
+
+The project must not be publicly released until the provenance and name checks
+described in `ORIGIN.md` and `BRAND_CLEARANCE.md` are complete.

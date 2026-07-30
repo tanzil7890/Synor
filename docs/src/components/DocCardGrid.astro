@@ -1,0 +1,49 @@
+---
+import DocCard from './DocCard.astro';
+
+export type Accent = 'spark' | 'lilac' | 'sprout' | 'signal' | 'amber';
+export interface Card {
+  href: string;
+  title: string;
+  body?: string;
+  glyph?: string;
+  accent?: Accent;
+  meta?: string;
+}
+export interface Group {
+  label: string;
+  blurb?: string;
+  accent?: Accent;
+  cards: Card[];
+}
+export interface Props {
+  groups: Group[];
+  ariaLabel: string;
+}
+
+const { groups, ariaLabel } = Astro.props;
+const glyph = '<path d="M5 12h14M13 6l6 6-6 6"/>';
+---
+
+<div class="synor-grid" role="navigation" aria-label={ariaLabel}>
+  {groups.map((group) => (
+    <section class="synor-grid__group" data-accent={group.accent ?? 'spark'}>
+      <header class="synor-grid__head">
+        <h2 class="synor-grid__label">{group.label}</h2>
+        {group.blurb && <p class="synor-grid__blurb">{group.blurb}</p>}
+      </header>
+      <div class="synor-grid__cards">
+        {group.cards.map((card) => (
+          <DocCard
+            href={card.href}
+            title={card.title}
+            body={card.body}
+            meta={card.meta}
+            accent={card.accent ?? group.accent ?? 'spark'}
+            icon={glyph}
+          />
+        ))}
+      </div>
+    </section>
+  ))}
+</div>

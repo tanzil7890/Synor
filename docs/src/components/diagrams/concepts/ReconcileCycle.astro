@@ -1,0 +1,45 @@
+---
+import DiagramFrame from '../primitives/DiagramFrame.astro';
+import LogicBox from '../primitives/LogicBox.astro';
+import FlowArrow from '../primitives/FlowArrow.astro';
+
+const OBSERVE = { x: 36, y: 48, w: 170, h: 72 };
+const WORK = { x: 514, y: 48, w: 170, h: 72 };
+const REPAIR = { x: 275, y: 252, w: 170, h: 72 };
+const LEDGER = { x: 270, y: 124, w: 180, h: 90 };
+---
+
+<DiagramFrame
+  viewBox="0 0 720 350"
+  maxWidth={760}
+  title="Synor reconciliation cycle"
+  desc="Synor observes inputs, runs owned work, and repairs outcomes while a local change ledger preserves what settled on previous runs."
+>
+  <LogicBox {...OBSERVE} label="Observe current inputs" />
+  <LogicBox {...WORK} label="Run owned work units" />
+  <LogicBox {...REPAIR} label="Repair declared outcomes" />
+  <LogicBox {...LEDGER} label="Local change ledger" highlight={true} />
+
+  <FlowArrow
+    d={`M ${OBSERVE.x + OBSERVE.w} ${OBSERVE.y + OBSERVE.h / 2} C 320 42, 400 42, ${WORK.x} ${WORK.y + WORK.h / 2}`}
+    label="what moved?"
+    labelX={360}
+    labelY={42}
+  />
+  <FlowArrow
+    d={`M ${WORK.x + WORK.w / 2} ${WORK.y + WORK.h} C 640 205, 555 272, ${REPAIR.x + REPAIR.w} ${REPAIR.y + REPAIR.h / 2}`}
+    label="what belongs?"
+    labelX={600}
+    labelY={220}
+  />
+  <FlowArrow
+    d={`M ${REPAIR.x} ${REPAIR.y + REPAIR.h / 2} C 160 310, 84 220, ${OBSERVE.x + OBSERVE.w / 2} ${OBSERVE.y + OBSERVE.h}`}
+    label="settle"
+    labelX={120}
+    labelY={258}
+  />
+
+  <FlowArrow d={`M ${LEDGER.x} ${LEDGER.y + 34} L ${OBSERVE.x + OBSERVE.w} ${OBSERVE.y + OBSERVE.h}`} variant="quiet" />
+  <FlowArrow d={`M ${LEDGER.x + LEDGER.w} ${LEDGER.y + 34} L ${WORK.x} ${WORK.y + WORK.h}`} variant="quiet" />
+  <FlowArrow d={`M ${LEDGER.x + LEDGER.w / 2} ${LEDGER.y + LEDGER.h} L ${REPAIR.x + REPAIR.w / 2} ${REPAIR.y}`} variant="quiet" />
+</DiagramFrame>

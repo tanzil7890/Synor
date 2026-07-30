@@ -1,0 +1,18 @@
+[package]
+name = "synor_ops_text"
+version = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+anyhow = { workspace = true }
+globset = { workspace = true }
+regex = { workspace = true }
+unicase = { workspace = true }
+
+# Language registry, `CodeSource`, and position machinery. Grammar crates are
+# linked there (and only there); this crate needs `tree-sitter` itself only for
+# node/tree types.
+synor_code_ast = { path = "../code_ast" }
+tree-sitter = "0.25.10"

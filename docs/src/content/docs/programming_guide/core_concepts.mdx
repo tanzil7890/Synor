@@ -1,0 +1,150 @@
+---
+title: The *second-run model*
+description: >
+  Understand how Synor observes change, assigns outcome ownership, reuses
+  settled work, and reconciles external systems.
+---
+import ReconcileCycle from '/src/components/diagrams/concepts/ReconcileCycle.astro';
+import OwnershipLedger from '/src/components/diagrams/concepts/OwnershipLedger.astro';
+import SecondRun from '/src/components/diagrams/concepts/SecondRun.astro';
+
+Synor keeps every derived file, row, and index aligned with the inputs that
+produced it.
+
+The framework does this by keeping three responsibilities separate:
+
+1. **Observe:** determine what input or code changed.
+2. **Own:** run affected work under stable component paths.
+3. **Reconcile:** make the declared outcomes true in their external systems.
+
+<ReconcileCycle />
+
+The local change ledger connects one run to the next. It stores fingerprints,
+memoized values, component ownership, and the target states declared by
+previous work. It does not send usage data to Synor.
+
+## The App sets the run boundary
+
+An **App** combines a main function with the concrete arguments and lifespan
+resources needed to run it. Calling `app.update()` starts a catch-up run. The
+App discovers current inputs and mounts the work that should exist now.
+
+An App is not a graph definition and does not require a separate configuration
+language. Its structure comes from normal Python calls.
+
+```python
+app = syn.App(
+    syn.AppConfig(name="LocalNoteCatalog"),
+    app_main,
+    notes_dir=pathlib.Path("./notes"),
+    catalog_dir=pathlib.Path("./catalog"),
+)
+```
+
+See [Set the run boundary](./app) for updates, lifespan resources, environment
+settings, and dropping an App.
+
+## A processing component owns a work unit
+
+A **processing component** is the unit Synor can run, reuse, fail, or remove
+independently. Every component has a stable path.
+
+Good paths name durable things in your domain:
+
+- `notes/garden.md`
+- `customers/4582`
+- `invoices/2026/0017`
+
+Avoid positions such as `item/7` when ordering can change. If the same thing
+receives a different path, Synor correctly treats it as different work.
+
+<OwnershipLedger />
+
+In the diagram, each note path owns one JSON outcome. When
+`notes/retired.md` disappears, that component path is absent from the next run.
+Synor removes the outcome that path previously owned.
+
+See [Choose work units](./processing_component) for `mount`, `use_mount`,
+`mount_each`, and explicit component subpaths.
+
+## Target states describe outcomes
+
+A **target state** is an exact technical concept in the API. It records
+something a component says should exist in an external system.
+
+Examples include:
+
+- one file with a path and byte content;
+- one database row with a primary key;
+- one vector point with an ID and payload;
+- one relationship in a graph.
+
+The component declares the complete set it owns during a run. Synor compares
+that set with the same component’s previous declarations:
+
+| Current declaration | Previous declaration | Reconciliation |
+|---|---|---|
+| Present | Missing | Create |
+| Present and changed | Present | Update |
+| Present and equal | Present | Leave alone |
+| Missing | Present | Remove |
+
+This is why deletion does not need a separate branch in the pipeline. An
+outcome disappears from the declaration set or loses its owning component.
+
+See [Declare outcomes](./target_state) for target containers, child targets,
+keys, and synchronization behavior.
+
+## Memoization preserves settled work
+
+`@syn.fn(memo=True)` allows a function result to be reused when its serialized
+arguments and implementation fingerprint are unchanged. Memoization can sit at
+more than one level.
+
+- Memoize a component-sized function to skip the whole work unit.
+- Memoize an expensive inner function to reuse embeddings, parsing, or model
+  output even when the surrounding component runs again.
+
+<SecondRun />
+
+The second run is smaller because the garden note is settled. The deploy note
+has a different fingerprint, so its function executes and its JSON outcome is
+reconciled.
+
+Memoization is a performance decision. Ownership and reconciliation still
+define correctness. See [Make work reusable](./function) and
+[Control reuse keys](../advanced_topics/memoization_keys).
+
+## Sync happens at the component boundary
+
+When a component finishes, Synor submits its target-state changes as one batch
+to each handler. A transactional backend can apply the batch atomically.
+Independent components can finish and sync without waiting for unrelated work.
+
+This makes work-unit size a practical design choice:
+
+- Smaller components isolate failures and publish outcomes sooner.
+- Larger components group more outcomes into one synchronization boundary.
+
+Start with the stable identity already present in the data. A file, row, event,
+or document is usually a better boundary than an arbitrary batch number.
+
+## Vocabulary
+
+The documentation uses plain terms first and exact API terms when needed.
+
+| Plain term | Synor term | Meaning |
+|---|---|---|
+| run boundary | App | Top-level runnable configuration |
+| work unit | Processing component | Independently owned execution path |
+| outcome | Target state | Declared external state owned by a component |
+| settled work | Memoized function result | Work safe to reuse |
+| local change ledger | Environment state database | Persistent history used between runs |
+
+## Continue from here
+
+1. [Set the run boundary](./app).
+2. [Choose work units](./processing_component).
+3. [Make work reusable](./function).
+4. [Declare outcomes](./target_state).
+5. [Operate the run](../advanced_topics).

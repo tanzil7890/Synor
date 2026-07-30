@@ -1,0 +1,36 @@
+---
+import DiagramFrame from '../primitives/DiagramFrame.astro';
+import RunPanel from '../primitives/RunPanel.astro';
+import ProcessingComponent from '../primitives/ProcessingComponent.astro';
+import FlowArrow from '../primitives/FlowArrow.astro';
+
+const PANEL = { y: 20, w: 280, h: 224 };
+const LEFT = 10;
+const RIGHT = 330;
+const BOX = { x: 60, w: 160, h: 52 };
+const PARENT_Y = 54;
+const CHILD_Y = 146;
+---
+
+<DiagramFrame
+  viewBox="0 0 620 264"
+  maxWidth={680}
+  title="Choosing mount or use_mount"
+  desc="Mount starts independently owned child work. Use mount also returns a value to the parent, coupling the parent to the child result."
+>
+  <RunPanel x={LEFT} y={PANEL.y} w={PANEL.w} h={PANEL.h} label="mount()" note="ownership only">
+    <ProcessingComponent x={BOX.x} y={PARENT_Y} w={BOX.w} h={BOX.h} label="parent" />
+    <FlowArrow d={`M ${BOX.x + BOX.w / 2} ${PARENT_Y + BOX.h} L ${BOX.x + BOX.w / 2} ${CHILD_Y}`} />
+    <ProcessingComponent x={BOX.x} y={CHILD_Y} w={BOX.w} h={BOX.h} label="child · independent result" />
+  </RunPanel>
+
+  <RunPanel x={RIGHT} y={PANEL.y} w={PANEL.w} h={PANEL.h} label="use_mount()" note="ownership + value">
+    <ProcessingComponent x={BOX.x} y={PARENT_Y} w={BOX.w} h={BOX.h} label="parent consumes value" />
+    <FlowArrow d={`M ${BOX.x + BOX.w / 2} ${PARENT_Y + BOX.h} L ${BOX.x + BOX.w / 2} ${CHILD_Y}`} />
+    <ProcessingComponent x={BOX.x} y={CHILD_Y} w={BOX.w} h={BOX.h} label="child returns value" />
+    <FlowArrow
+      d={`M ${BOX.x + BOX.w} ${CHILD_Y + BOX.h / 2} C ${PANEL.w - 18} ${CHILD_Y + BOX.h / 2}, ${PANEL.w - 18} ${PARENT_Y + BOX.h / 2}, ${BOX.x + BOX.w} ${PARENT_Y + BOX.h / 2}`}
+      variant="success"
+    />
+  </RunPanel>
+</DiagramFrame>

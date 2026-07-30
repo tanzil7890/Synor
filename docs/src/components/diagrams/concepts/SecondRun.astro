@@ -1,0 +1,81 @@
+---
+import DiagramFrame from '../primitives/DiagramFrame.astro';
+import RunPanel from '../primitives/RunPanel.astro';
+import DataBox from '../primitives/DataBox.astro';
+import LogicBox from '../primitives/LogicBox.astro';
+import TargetBullet from '../primitives/TargetBullet.astro';
+import FlowArrow from '../primitives/FlowArrow.astro';
+
+const PANEL = { y: 20, w: 350, h: 250 };
+const LEFT_X = 10;
+const RIGHT_X = 400;
+const ROW_CENTERS = [96, 190];
+
+const INPUT = { x: 18, w: 76, h: 30 };
+const WORK = { x: 128, w: 94, h: 46 };
+const OUT = { x: 256, w: 78, h: 30 };
+
+const firstRows = [
+  { input: 'garden.md', output: 'garden.json' },
+  { input: 'deploy.md', output: 'deploy.json' },
+];
+const nextRows = [
+  { input: 'garden.md', output: 'garden.json', status: 'cache-ready' as const, state: 'idle' as const },
+  { input: 'deploy.md', output: 'deploy.json', status: 'refreshing' as const, state: 'updated' as const },
+];
+---
+
+<DiagramFrame
+  viewBox="0 0 760 290"
+  maxWidth={820}
+  title="The first run and the second run"
+  desc="The first run catalogs both notes. On the second run, the settled garden note is reused and only the changed deploy note is refreshed."
+>
+  <RunPanel x={LEFT_X} y={PANEL.y} w={PANEL.w} h={PANEL.h} label="First run" note="2 refreshed">
+    {firstRows.map((row, index) => {
+      const cy = ROW_CENTERS[index];
+      return (
+        <g>
+          <DataBox x={INPUT.x} y={cy - INPUT.h / 2} w={INPUT.w} h={INPUT.h} label={row.input} state="new" />
+          <FlowArrow d={`M ${INPUT.x + INPUT.w} ${cy} L ${WORK.x} ${cy}`} />
+          <LogicBox
+            x={WORK.x}
+            y={cy - WORK.h / 2}
+            w={WORK.w}
+            h={WORK.h}
+            label="catalog_note"
+            memoized={true}
+            status="refreshing"
+            state="new"
+          />
+          <FlowArrow d={`M ${WORK.x + WORK.w} ${cy} L ${OUT.x} ${cy}`} />
+          <TargetBullet x={OUT.x} y={cy - OUT.h / 2} w={OUT.w} h={OUT.h} label={row.output} state="new" />
+        </g>
+      );
+    })}
+  </RunPanel>
+
+  <RunPanel x={RIGHT_X} y={PANEL.y} w={PANEL.w} h={PANEL.h} label="Second run" note="1 reused · 1 refreshed">
+    {nextRows.map((row, index) => {
+      const cy = ROW_CENTERS[index];
+      return (
+        <g>
+          <DataBox x={INPUT.x} y={cy - INPUT.h / 2} w={INPUT.w} h={INPUT.h} label={row.input} state={row.state} />
+          <FlowArrow d={`M ${INPUT.x + INPUT.w} ${cy} L ${WORK.x} ${cy}`} variant={index === 0 ? 'success' : 'spark'} />
+          <LogicBox
+            x={WORK.x}
+            y={cy - WORK.h / 2}
+            w={WORK.w}
+            h={WORK.h}
+            label={index === 0 ? 'reuse result' : 'catalog_note'}
+            memoized={true}
+            status={row.status}
+            state={row.state}
+          />
+          <FlowArrow d={`M ${WORK.x + WORK.w} ${cy} L ${OUT.x} ${cy}`} variant={index === 0 ? 'success' : 'spark'} />
+          <TargetBullet x={OUT.x} y={cy - OUT.h / 2} w={OUT.w} h={OUT.h} label={row.output} state={row.state} />
+        </g>
+      );
+    })}
+  </RunPanel>
+</DiagramFrame>

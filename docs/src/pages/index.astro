@@ -1,0 +1,226 @@
+---
+import '../styles/globals.css';
+import DocCard from '../components/DocCard.astro';
+import Topbar from '../components/Topbar.astro';
+import Sidebar from '../components/Sidebar.astro';
+import MobileSheet from '../components/MobileSheet.astro';
+import Foot from '../components/Foot.astro';
+import SecondRun from '../components/diagrams/concepts/SecondRun.astro';
+import { SITE_URL, THEME_COLOR } from '../consts';
+import { sidebar } from '../data/docs-sidebar';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '') || '';
+const doc = (slug: string) => `${base}/${slug}/`;
+const fullTitle = 'Synor Docs · Built for the second run';
+const description =
+  'Synor keeps every derived file, row, and index aligned with the inputs that produced it.';
+const canonical = new URL(`${base}/`, SITE_URL).toString();
+
+const paths = [
+  {
+    href: doc('getting_started/quickstart'),
+    title: 'I want to see it run',
+    body: 'Build a local Markdown note catalog, run it twice, then change one note and inspect exactly what moves.',
+    meta: 'Local · 5 minutes',
+    accent: 'spark' as const,
+  },
+  {
+    href: doc('programming_guide/core_concepts'),
+    title: 'I need the work model',
+    body: 'Learn how stable work units, local history, and declared outcomes make the second run smaller.',
+    meta: 'Mental model',
+    accent: 'signal' as const,
+  },
+  {
+    href: doc('connectors'),
+    title: 'I need to connect a system',
+    body: 'Choose files, object stores, databases, vector stores, graphs, warehouses, or event streams.',
+    meta: 'Integrations',
+    accent: 'sprout' as const,
+  },
+  {
+    href: doc('advanced_topics/exception_handlers'),
+    title: 'I need to operate it',
+    body: 'Set concurrency, deadlines, progress reporting, recovery behavior, and local storage boundaries.',
+    meta: 'Runtime',
+    accent: 'amber' as const,
+  },
+] as const;
+
+const arrowIcon = '<path d="M5 12h14M13 6l6 6-6 6"/>';
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content={THEME_COLOR} />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Synor Docs" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <link rel="icon" type="image/svg+xml" href={`${base}/images/synor-mark.svg`} />
+  </head>
+  <body>
+    <Topbar mobileSheetId="mobileSheet" />
+    <MobileSheet currentSlug="" headings={[]} sidebarItems={sidebar} />
+
+    <div class="layout identity-layout">
+      <Sidebar currentSlug="" />
+
+      <main class="content identity-home">
+        <section class="identity-hero">
+          <p class="identity-kicker"><span>0.1 alpha</span> Local-first incremental execution</p>
+          <h1>Built for the <em>second run.</em></h1>
+          <p class="identity-promise">{description}</p>
+          <p class="identity-intro">
+            Write the outcome once. Synor records what settled, follows each
+            change to the work it affects, and repairs only the files, rows,
+            or index entries that no longer match.
+          </p>
+          <div class="hero-cta">
+            <a class="btn btn-primary btn-lg" href={doc('getting_started/quickstart')}>Run the local example</a>
+            <a class="btn btn-lg" href={doc('programming_guide/core_concepts')}>Understand the second run</a>
+          </div>
+          <div class="identity-proof" aria-label="Project properties">
+            <span>Python-native</span>
+            <span>Rust engine</span>
+            <span>Local change ledger</span>
+            <span>No Synor telemetry</span>
+          </div>
+        </section>
+
+        <section class="identity-visual" aria-labelledby="second-run-heading">
+          <div class="identity-section-head">
+            <p class="identity-kicker">The useful moment</p>
+            <h2 id="second-run-heading">Change one note. Refresh one outcome.</h2>
+            <p>
+              The first pass establishes the catalog. On the next pass,
+              settled work stays settled while the changed note moves through
+              its work unit.
+            </p>
+          </div>
+          <SecondRun />
+        </section>
+
+        <section class="identity-section" aria-labelledby="choose-path-heading">
+          <div class="identity-section-head">
+            <p class="identity-kicker">Choose your path</p>
+            <h2 id="choose-path-heading">Start with the job in front of you.</h2>
+          </div>
+          <div class="card-grid">
+            {paths.map((path) => (
+              <DocCard
+                href={path.href}
+                title={path.title}
+                body={path.body}
+                meta={path.meta}
+                accent={path.accent}
+                icon={arrowIcon}
+              />
+            ))}
+          </div>
+        </section>
+
+        <section class="identity-section" aria-labelledby="method-heading">
+          <div class="identity-section-head">
+            <p class="identity-kicker">The Synor method</p>
+            <h2 id="method-heading">Observe. Own. Reconcile.</h2>
+            <p>Three responsibilities replace a hand-built web of delta branches.</p>
+          </div>
+          <ol class="method-grid">
+            <li>
+              <span class="method-number">01</span>
+              <h3>Observe the current input</h3>
+              <p>Files, rows, events, and code fingerprints establish what moved since the last settled run.</p>
+            </li>
+            <li>
+              <span class="method-number">02</span>
+              <h3>Own work by a stable path</h3>
+              <p>Each processing component is a work unit with a durable identity and a precise set of outcomes.</p>
+            </li>
+            <li>
+              <span class="method-number">03</span>
+              <h3>Reconcile what belongs</h3>
+              <p>Synor creates, updates, or removes outcomes so the external system matches the declarations.</p>
+            </li>
+          </ol>
+        </section>
+
+        <section class="identity-section identity-code" aria-labelledby="local-proof-heading">
+          <div class="identity-section-head">
+            <p class="identity-kicker">Local proof</p>
+            <h2 id="local-proof-heading">No service required.</h2>
+            <p>
+              The introductory note catalog uses local Markdown, local JSON,
+              the native Synor extension, and Python’s standard library.
+            </p>
+          </div>
+          <div
+            class="codeblk"
+            data-copy={`cd examples/local_note_catalog\n../../.venv/bin/synor update main.py`}
+          >
+            <div class="bar">
+              <span class="fname">terminal</span>
+              <button class="copy" type="button" aria-label="Copy command">Copy</button>
+            </div>
+            <pre><code>cd examples/local_note_catalog
+../../.venv/bin/synor update main.py</code></pre>
+          </div>
+          <p class="identity-code-note">
+            Run it twice, edit <code>notes/deploy.md</code>, then run it again.
+            The report tells you which work was reused and which work refreshed.
+          </p>
+        </section>
+
+        <section class="identity-section identity-map" aria-labelledby="map-heading">
+          <div class="identity-section-head">
+            <p class="identity-kicker">Documentation map</p>
+            <h2 id="map-heading">Organized around decisions, not packages.</h2>
+          </div>
+          <div class="identity-map-grid">
+            <a href={doc('programming_guide/core_concepts')}>
+              <strong>Design the work</strong>
+              <span>Boundaries, ownership, reuse, and outcomes</span>
+            </a>
+            <a href={doc('advanced_topics/concurrency_control')}>
+              <strong>Operate the run</strong>
+              <span>Budgets, deadlines, progress, and recovery</span>
+            </a>
+            <a href={doc('common_resources')}>
+              <strong>Shape the data</strong>
+              <span>Files, chunks, vectors, IDs, and live maps</span>
+            </a>
+            <a href={doc('connectors')}>
+              <strong>Connect systems</strong>
+              <span>Storage, databases, search, graphs, and streams</span>
+            </a>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script is:inline>
+      (() => {
+        document.querySelectorAll('.identity-home [data-copy]').forEach((wrap) => {
+          const button = wrap.querySelector('.copy');
+          if (!button) return;
+          button.addEventListener('click', async () => {
+            const text = wrap.getAttribute('data-copy') || '';
+            await navigator.clipboard.writeText(text);
+            button.textContent = 'Copied';
+            window.setTimeout(() => { button.textContent = 'Copy'; }, 1400);
+          });
+        });
+      })();
+    </script>
+
+    <Foot />
+  </body>
+</html>

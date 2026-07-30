@@ -1,0 +1,181 @@
+---
+// Phone-only off-canvas drawer. The shell (scrim + sliding panel + close
+// header) and the open/close behavior come from the shared
+// MobileSheetShell; this component fills its slot with the docs
+// content: a search box + two segmented tabs —
+//   - Pages        : the full sidebar tree (mirrors Sidebar.astro)
+//   - On this page : the current doc's H2/H3 headings (numbered like Toc)
+// and adds the tab-switch script (open/close, scrim, Esc, scroll-lock, and
+// close-on-link-tap all live in the shared controller). The tab/pane/group/
+// search styling stays in globals.css; the shell styling is brand nav.css.
+import type { MarkdownHeading } from 'astro';
+import { sidebar, type SidebarItem } from '../data/docs-sidebar';
+import Search from './Search.astro';
+import MobileSheet from './MobileSheetShell.astro';
+
+export interface Props {
+  /** Slug of the currently-rendered doc. Drives the `aria-current` row in the Pages tab. */
+  currentSlug?: string;
+  /** Page headings (already filtered to H2/H3 by the layout, or raw — we re-filter here). */
+  headings?: MarkdownHeading[];
+  /** Sidebar tree to surface in the Pages pane below the Site links. Pass
+   *  `null` to render no docs sidebar (e.g. on examples listing or 404).
+   *  Defaults to the docs-sidebar tree (regular doc pages). */
+  sidebarItems?: SidebarItem[] | null;
+}
+
+const {
+  currentSlug = '',
+  headings = [],
+  sidebarItems: sidebarItemsRaw,
+} = Astro.props;
+const sidebarItems: SidebarItem[] | null =
+  sidebarItemsRaw === undefined ? sidebar : sidebarItemsRaw;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+
+// Site-level nav mirrors the locally owned links in Topbar.astro.
+const SITE_LINKS: Array<{ href: string; label: string }> = [
+  { href: base || '/', label: 'Orientation' },
+  { href: `${base}/getting_started/quickstart/`, label: 'Make a first run' },
+  { href: `${base}/programming_guide/core_concepts/`, label: 'Design the work' },
+  { href: `${base}/examples/`, label: 'Field notes' },
+];
+
+// Same H2/H3 filter + numbering as Toc.astro so the phone "On this page"
+// list matches the desktop rail one-for-one.
+const tocItems = headings.filter((h) => h.depth >= 2 && h.depth <= 3);
+let h2Count = 0;
+const tocRows = tocItems.map((h) => {
+  if (h.depth === 2) h2Count++;
+  return { ...h, n: h.depth === 2 ? h2Count : null };
+});
+
+function href(slug: string): string {
+  // Trailing slash matches the canonical URL Astro emits under
+  // `build.format: 'directory'` — saves a 301 round-trip per click.
+  return `${base}/${slug}/`;
+}
+---
+
+<MobileSheet id="mobileSheet" title="Menu" closeAbove={820}>
+  <div class="mobile-search">
+    <Search />
+  </div>
+
+  {tocRows.length > 0 && (
+    <div class="mobile-tabs" role="tablist" aria-label="Menu sections">
+      <button id="tabPages" type="button" role="tab" aria-selected="true" aria-controls="panePages">
+        Pages
+      </button>
+      <button id="tabToc" type="button" role="tab" aria-selected="false" aria-controls="paneToc">
+        On this page
+      </button>
+    </div>
+  )}
+
+  {tocRows.length > 0 && (
+    <div class="mobile-pane" id="paneToc" role="tabpanel" aria-labelledby="tabToc" hidden>
+      <nav class="mobile-list" aria-label="On this page">
+        {tocRows.map((h) => (
+          <a
+            href={`#${h.slug}`}
+            data-mobile-toc-link={h.slug}
+            class={h.depth === 3 ? 'sub' : ''}
+          >
+            {h.n != null && <span class="num">{h.n}</span>}
+            <span class="lbl">{h.text}</span>
+          </a>
+        ))}
+      </nav>
+    </div>
+  )}
+
+  <div class="mobile-pane" id="panePages" role="tabpanel" aria-labelledby="tabPages">
+    <div class="mobile-group">
+      <h6><span>Site</span></h6>
+      <nav class="mobile-list" aria-label="Site">
+        {SITE_LINKS.map((l) => (
+          <a href={l.href}><span class="lbl">{l.label}</span></a>
+        ))}
+      </nav>
+    </div>
+
+    {sidebarItems && sidebarItems.length > 0 && (
+      <hr class="mobile-divider" />
+    )}
+
+    {sidebarItems?.map((item) => (
+      item.type === 'doc' ? (
+        <div class="mobile-group">
+          <nav class="mobile-list" aria-label={item.label ?? item.slug}>
+            <a
+              href={href(item.slug)}
+              aria-current={currentSlug === item.slug ? 'page' : undefined}
+            >
+              <span class="lbl">{item.label ?? item.slug}</span>
+            </a>
+          </nav>
+        </div>
+      ) : (
+        <div class="mobile-group">
+          <h6>
+            {item.slug ? (
+              <a href={href(item.slug)}>{item.label}</a>
+            ) : (
+              <span>{item.label}</span>
+            )}
+          </h6>
+          <nav class="mobile-list" aria-label={item.label}>
+            {item.items.map((child) => (
+              child.type === 'doc' ? (
+                <a
+                  href={href(child.slug)}
+                  aria-current={currentSlug === child.slug ? 'page' : undefined}
+                >
+                  <span class="lbl">{child.label ?? child.slug}</span>
+                </a>
+              ) : null
+            ))}
+          </nav>
+        </div>
+      )
+    ))}
+  </div>
+</MobileSheet>
+
+<script>
+  // Tab switch only — open/close, scrim, Esc, scroll-lock, and close-on-link-tap
+  // are all handled by the local MobileSheetShell controller.
+  // Tabs render only when the page has headings; bail cleanly otherwise.
+  (() => {
+    const tabToc   = document.getElementById('tabToc')   as HTMLButtonElement | null;
+    const tabPages = document.getElementById('tabPages') as HTMLButtonElement | null;
+    const paneToc   = document.getElementById('paneToc')   as HTMLElement | null;
+    const panePages = document.getElementById('panePages') as HTMLElement | null;
+    if (!tabToc || !tabPages || !paneToc || !panePages) return;
+
+    const setTab = (which: 'toc' | 'pages') => {
+      const onToc = which === 'toc';
+      tabToc.setAttribute('aria-selected', onToc ? 'true' : 'false');
+      tabPages.setAttribute('aria-selected', onToc ? 'false' : 'true');
+      paneToc.hidden = !onToc;
+      panePages.hidden = onToc;
+    };
+
+    tabToc  .addEventListener('click', () => setTab('toc'));
+    tabPages.addEventListener('click', () => setTab('pages'));
+
+    // Arrow-key tab navigation (a11y).
+    const tabsArr = [tabToc, tabPages];
+    tabsArr.forEach((t, i, arr) => {
+      t.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+          e.preventDefault();
+          const target = arr[(i + (e.key === 'ArrowRight' ? 1 : -1) + arr.length) % arr.length];
+          target.focus();
+          setTab(target === tabToc ? 'toc' : 'pages');
+        }
+      });
+    });
+  })();
+</script>

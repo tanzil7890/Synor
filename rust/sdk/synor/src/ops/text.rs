@@ -1,0 +1,171 @@
+//! Text splitting and language detection facade.
+//!
+//! Mirrors Python's `synor.ops.text`. This is a thin, ergonomic wrapper
+//! over the `synor_ops_text` crate that returns SDK [`Chunk`] objects
+//! (with [`Chunk::text`] access) instead of the lower-level
+//! `synor_ops_text::split::Chunk`, so examples and user code do not have to
+//! re-slice the source by raw byte offsets.
+
+use synor_code_ast::prog_langs;
+use synor_ops_text::split;
+
+use crate::error::{Error, Result};
+use crate::resources::chunk::{Chunk, TextPosition};
+
+// Re-export the lightweight config types so callers configure the splitters
+// without depending on `synor_ops_text` directly, and the shared
+// `CodeSource` handle so one parse can be reused across consumers.
+pub use synor_code_ast::CodeSource;
+pub use synor_ops_text::split::{CustomLanguageConfig, KeepSeparator, SeparatorSplitConfig};
+
+/// Configuration for a single [`RecursiveSplitter`] operation.
+#[derive(Debug, Clone)]
+pub struct RecursiveChunkConfig {
+    /// Target chunk size in bytes.
+    pub chunk_size: usize,
+    /// Minimum chunk size in bytes. Defaults to `chunk_size / 2`.
+    pub min_chunk_size: Option<usize>,
+    /// Overlap between consecutive chunks in bytes.
+    pub chunk_overlap: Option<usize>,
+    /// Language name or file extension for syntax-aware splitting. Used by
+    /// [`RecursiveSplitter::split_with`]; ignored by
+    /// [`RecursiveSplitter::split_source`], where the source carries its own.
+    pub language: Option<String>,
+}
+
+/// Detect the programming language for a filename from its extension.
+///
+/// Returns the canonical language name (e.g. `"python"`, `"rust"`) or `None`
+/// when the extension is not recognized.
+///
+/// ```
+/// # use synor::ops::text::detect_code_language;
+/// assert_eq!(detect_code_language("main.py").as_deref(), Some("python"));
+/// assert_eq!(detect_code_language("file.xyz"), None);
+/// ```
+pub fn detect_code_language(filename: &str) -> Option<String> {
+    prog_langs::detect_language(filename).map(str::to_string)
+}
+
+fn convert_chunk(c: split::Chunk) -> Chunk {
+    Chunk::new(
+        c.range.start..c.range.end,
+        TextPosition {
+            byte_offset: c.range.start,
+            char_offset: c.start.char_offset,
+            line: c.start.line,
+            column: c.start.column,
+        },
+        TextPosition {
+            byte_offset: c.range.end,
+            char_offset: c.end.char_offset,
+            line: c.end.line,
+            column: c.end.column,
+        },
+    )
+}
+
+/// A text splitter that splits by regex separators.
+///
+/// Construct once and reuse to split many texts. Mirrors Python's
+/// `SeparatorSplitter`.
+pub struct SeparatorSplitter {
+    inner: split::SeparatorSplitter,
+}
+
+impl SeparatorSplitter {
+    /// Create a splitter that discards separators and trims whitespace (the
+    /// common case). `separators_regex` patterns are OR-joined.
+    pub fn new(separators_regex: impl IntoIterator<Item = impl Into<String>>) -> Result<Self> {
+        Self::with_config(split::SeparatorSplitConfig {
+            separators_regex: separators_regex.into_iter().map(Into::into).collect(),
+            ..Default::default()
+        })
+    }
+
+    /// Create a splitter with full control over separator handling, empty
+    /// chunks, and trimming.
+    pub fn with_config(config: split::SeparatorSplitConfig) -> Result<Self> {
+        let inner = split::SeparatorSplitter::new(config)
+            .map_err(|e| Error::engine(format!("invalid separator regex: {e}")))?;
+        Ok(Self { inner })
+    }
+
+    /// Split `text` into chunks with position information.
+    pub fn split(&self, text: &str) -> Vec<Chunk> {
+        self.inner
+            .split(text)
+            .into_iter()
+            .map(convert_chunk)
+            .collect()
+    }
+}
+
+/// A recursive, syntax-aware text splitter.
+///
+/// Splits text along syntax boundaries (paragraphs, sentences, and — when a
+/// `language` is given — tree-sitter nodes). Construct once and reuse. Mirrors
+/// Python's `RecursiveSplitter`.
+pub struct RecursiveSplitter {
+    inner: split::RecursiveChunker,
+}
+
+impl RecursiveSplitter {
+    /// Create a splitter with the built-in language support only.
+    pub fn new() -> Result<Self> {
+        Self::with_custom_languages(Vec::new())
+    }
+
+    /// Create a splitter with additional [`CustomLanguageConfig`]s that
+    /// supplement (and may override by name/alias) the built-in languages.
+    pub fn with_custom_languages(custom_languages: Vec<CustomLanguageConfig>) -> Result<Self> {
+        let inner = split::RecursiveChunker::new(split::RecursiveSplitConfig { custom_languages })
+            .map_err(Error::engine)?;
+        Ok(Self { inner })
+    }
+
+    /// Split `text` into chunks targeting `chunk_size` bytes, using defaults
+    /// for `min_chunk_size`/`chunk_overlap` and no language hint.
+    pub fn split(&self, text: &str, chunk_size: usize) -> Vec<Chunk> {
+        self.split_with(
+            text,
+            RecursiveChunkConfig {
+                chunk_size,
+                min_chunk_size: None,
+                chunk_overlap: None,
+                language: None,
+            },
+        )
+    }
+
+    /// Split `text` with full control over chunk size, overlap, and language.
+    pub fn split_with(&self, text: &str, config: RecursiveChunkConfig) -> Vec<Chunk> {
+        let source = match config.language.clone() {
+            Some(language) => CodeSource::with_language(text, language),
+            None => CodeSource::new(text),
+        };
+        self.split_source(&source, config)
+    }
+
+    /// Split an existing [`CodeSource`], reusing its cached parse (and
+    /// populating it for later consumers — e.g. structural matching over the
+    /// same file). The source's language wins: `config.language` is ignored.
+    pub fn split_source(
+        &self,
+        source: &CodeSource<'_>,
+        config: RecursiveChunkConfig,
+    ) -> Vec<Chunk> {
+        self.inner
+            .split(
+                source,
+                split::RecursiveChunkConfig {
+                    chunk_size: config.chunk_size,
+                    min_chunk_size: config.min_chunk_size,
+                    chunk_overlap: config.chunk_overlap,
+                },
+            )
+            .into_iter()
+            .map(convert_chunk)
+            .collect()
+    }
+}

@@ -1,0 +1,13 @@
+[project]
+name = "text-embedding-turbopuffer-v1"
+version = "0.1.0"
+description = "Synor v1 example: embed markdown files and store in Turbopuffer."
+requires-python = ">=3.11"
+dependencies = [
+    "synor[sentence_transformers,turbopuffer]>=0.1.0a1",
+    "numpy",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.setuptools]
+packages = []

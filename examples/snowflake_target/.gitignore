@@ -1,0 +1,4 @@
+.env
+synor.db
+__pycache__/
+.pytest_cache/

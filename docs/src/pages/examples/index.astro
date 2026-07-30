@@ -1,0 +1,310 @@
+---
+// Field notes at /docs/examples. Cards come from src/data/examples.ts so the
+// visible catalog and machine-readable catalog share one source.
+import '../../styles/globals.css';
+import Topbar from '../../components/Topbar.astro';
+import MobileSheet from '../../components/MobileSheet.astro';
+import Foot from '../../components/Foot.astro';
+import ExampleCard from '../../components/examples/ExampleCard.astro';
+import { SITE_URL, titleMarkup } from '../../consts';
+import {
+  examples,
+  byCategory,
+  CATEGORY_META,
+  SIDEBAR_TARGETS,
+  SIDEBAR_SOURCES,
+  SIDEBAR_LLMS,
+  POPULAR,
+  type Category,
+} from '../../data/examples';
+import { THEME_COLOR, titleText } from '../../consts';
+import type { SidebarItem } from '../../data/docs-sidebar';
+
+const base = import.meta.env.BASE_URL.replace(/\/$/, '') || '';
+const exampleHref = (slug: string) => `${base}/examples/${slug}/`;
+
+// Category order and counts, computed from the data.
+// Ordered by outcome: the two search categories first, then the LLM-output
+// categories, then the data-movement plumbing last.
+const CAT_ORDER: Category[] = ['search', 'image', 'llm', 'agents', 'ingest'];
+const catCount = (c: Category) => examples.filter((e) => e.category === c).length;
+// Categories with no examples yet (e.g. 'image') stay out of the chips and
+// side-nav — their grid sections already render nothing, so a chip or anchor
+// would point nowhere.
+const activeCats = CAT_ORDER.filter((c) => catCount(c) > 0);
+
+// Phone drawer mirror of the inline `.side-nav` browse aside. The aside
+// becomes a horizontal flex pill row at ≤1180px which is fine on tablet,
+// but on phones we hide it entirely and surface the same tree inside
+// MobileSheet — that's where the user already goes for navigation.
+const examplesSidebar: SidebarItem[] = CAT_ORDER
+  .map((c) => ({
+    cat: c,
+    items: examples.filter((e) => e.category === c),
+  }))
+  .filter((g) => g.items.length > 0)
+  .map((g) => ({
+    type: 'category',
+    label: `${titleText(CATEGORY_META[g.cat].label)}${CATEGORY_META[g.cat].em ?? ''}`,
+    items: g.items.map((it) => ({
+      type: 'doc',
+      slug: `examples/${it.slug}`,
+      label: titleText(it.title),
+    })),
+  }));
+
+const total = examples.length;
+const fullTitle = `Field notes · Synor Docs`;
+const description = 'Runnable Synor studies organized by the change they observe, the work they own, and the outcome they reconcile.';
+// trailingSlash: 'always' — canonical must carry the slash to match the served URL.
+const canonical = new URL(`${base}/examples/`, SITE_URL).toString();
+
+// Structured data: a CollectionPage wrapping an ItemList of the examples (so
+// search engines and agents can read the catalog), plus a Docs › Examples
+// breadcrumb.
+const collectionLd = {
+  '@context': 'https://schema.org',
+  '@type': 'CollectionPage',
+  name: 'Synor Examples',
+  description,
+  url: canonical,
+  inLanguage: 'en',
+  isPartOf: { '@type': 'WebSite', name: 'Synor Docs', url: new URL(`${base}/`, SITE_URL).toString() },
+  mainEntity: {
+    '@type': 'ItemList',
+    numberOfItems: examples.length,
+    itemListElement: examples.map((e, i) => ({
+      '@type': 'ListItem',
+      position: i + 1,
+      name: titleText(e.title),
+      description: e.description,
+      url: new URL(`${base}/examples/${e.slug}/`, SITE_URL).toString(),
+    })),
+  },
+};
+const breadcrumbLd = {
+  '@context': 'https://schema.org',
+  '@type': 'BreadcrumbList',
+  itemListElement: [
+    { '@type': 'ListItem', position: 1, name: 'Docs', item: new URL(`${base}/`, SITE_URL).toString() },
+    { '@type': 'ListItem', position: 2, name: 'Field notes', item: canonical },
+  ],
+};
+---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content={THEME_COLOR} />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph / Twitter — link previews on social, Slack, iMessage, etc. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Synor Docs" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+
+    <!-- Structured data for search engines and agents. -->
+    <script type="application/ld+json" set:html={JSON.stringify(collectionLd)} />
+    <script type="application/ld+json" set:html={JSON.stringify(breadcrumbLd)} />
+
+    <link rel="icon" type="image/svg+xml" href={`${base}/images/synor-mark.svg`} />
+    <!-- Fonts self-hosted via @fontsource in src/styles/globals.css (GUIDELINE §5.2). -->
+  </head>
+  <body class="ex-listing">
+    <Topbar mobileSheetId="mobileSheet" />
+    <MobileSheet sidebarItems={examplesSidebar} />
+
+    <div class="ex-wrap">
+      <!-- ═══════════ HERO ═══════════ -->
+      <section class="ex-hero">
+        <div class="hero-top">
+          <span class="t-eyebrow live"><span class="dt" aria-hidden="true"></span>{total} runnable studies</span>
+          <div class="stats">
+            <span><b>{total}</b> examples</span>
+            <span><b>{SIDEBAR_SOURCES.length}</b> sources</span>
+            <span><b>{SIDEBAR_TARGETS.length}</b> targets</span>
+            <span><b>{SIDEBAR_LLMS.length}</b> LLM providers</span>
+          </div>
+        </div>
+
+        <div class="hero-grid">
+          <div>
+            <h1 class="hero-h">Field notes</h1>
+            <p class="hero-sub">
+              Start with the local note catalog, then move outward to databases, models, graphs, and streams. Every study should make three facts visible: what changed, what work ran, and what outcome was repaired.
+            </p>
+
+            <div class="hero-filters" id="filters">
+              <button class="t-filter on" data-filter="all">All <span class="cnt">{total}</span></button>
+              {activeCats.map((c) => (
+                <button class="t-filter" data-filter={c}>
+                  {CATEGORY_META[c].label}{CATEGORY_META[c].em ?? ''} <span class="cnt">{catCount(c)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ═══════════ DOC LAYOUT ═══════════ -->
+      <div class="doc">
+        <aside class="side-nav" aria-label="Browse examples">
+          <div class="side-head">
+            <span>Browse</span>
+            <span class="ct">{total} examples</span>
+          </div>
+          <ol id="sideList">
+            {activeCats.map((c) => (
+              <li data-target={`#cat-${c}`}>
+                <a href={`#cat-${c}`} data-cat={c}>
+                  <span class="cat-dot"></span>
+                  {CATEGORY_META[c].label}{CATEGORY_META[c].em ?? ''}
+                  <span class="count">{catCount(c)}</span>
+                </a>
+              </li>
+            ))}
+          </ol>
+
+          <div class="side-group">
+            <h6>By target</h6>
+            <div class="tags-row">{SIDEBAR_TARGETS.map((t) => <button type="button" class="t-pill" data-facet="tgt" data-value={t}>{t}</button>)}</div>
+          </div>
+
+          <div class="side-group">
+            <h6>By source</h6>
+            <div class="tags-row">{SIDEBAR_SOURCES.map((t) => <button type="button" class="t-pill" data-facet="src" data-value={t}>{t}</button>)}</div>
+          </div>
+
+          <div class="side-group">
+            <h6>By LLM</h6>
+            <div class="tags-row">{SIDEBAR_LLMS.map((t) => <button type="button" class="t-pill" data-facet="llm" data-value={t}>{t}</button>)}</div>
+          </div>
+
+          <div class="side-group">
+            <h6>Popular</h6>
+            <div class="links">
+              {POPULAR.map((p) => (
+                <a href={exampleHref(p.slug)}>{p.label}<span class="c">{p.count}</span></a>
+              ))}
+            </div>
+          </div>
+
+          <div class="side-group">
+            <h6>Resources</h6>
+            <div class="links">
+              <a href={base || '/'}>↗ Documentation</a>
+              <a href={`${base}/getting_started/quickstart/`}>↗ Quickstart</a>
+            </div>
+          </div>
+        </aside>
+
+        <div class="col-main">
+          <!-- ═══════════ CATEGORY SECTIONS ═══════════ -->
+          {CAT_ORDER.map((cat, ci) => {
+            const items = byCategory(cat);
+            return items.length === 0 ? null : (
+              <section class="cat" id={`cat-${cat}`} data-cat={cat}>
+                <div class="sec-head">
+                  <h2>
+                    {CATEGORY_META[cat].label}
+                    {CATEGORY_META[cat].em ? <em>{CATEGORY_META[cat].em}</em> : null}
+                  </h2>
+                  <p class="lead">{CATEGORY_META[cat].lead}</p>
+                </div>
+
+                <div class="cat-grid">
+                  {items.map((ex) => <ExampleCard ex={ex} href={exampleHref(ex.slug)} />)}
+                </div>
+              </section>
+            );
+          })}
+
+          <!-- ═══════════ CTA ═══════════ -->
+          <section class="cta-end">
+            <div class="cta-copy">
+              <h3 set:html={titleMarkup("Can't find the *shape* you need?")} />
+              <p>Start from the nearest work shape, then replace its input, operation, or outcome one boundary at a time.</p>
+              <div class="btns">
+                <a class="btn btn-signal" href={`${base}/about/community/`}>Contribute locally</a>
+                <a class="btn btn-primary" href={base || '/'}>Build your own</a>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <script is:inline>
+      // Filters — category chips (top) toggle whole category sections; the side
+      // facet pills (By target / source / LLM) filter individual cards by tag and
+      // hide now-empty sections. Two modes; picking a facet resets category to All.
+      (function(){
+        const catChips = Array.from(document.querySelectorAll('#filters .t-filter'));
+        const facetPills = Array.from(document.querySelectorAll('.side-group .t-pill[data-facet]'));
+        const sections = Array.from(document.querySelectorAll('section.cat[data-cat]'));
+        const cards = Array.from(document.querySelectorAll('.ex-card'));
+        let cat = 'all';
+        let facet = null; // { facet: 'tgt'|'src'|'llm', value }
+
+        function render(){
+          if (facet){
+            cards.forEach((c) => {
+              const vals = (c.getAttribute('data-' + facet.facet) || '').split('|');
+              c.style.display = vals.indexOf(facet.value) > -1 ? '' : 'none';
+            });
+            sections.forEach((s) => {
+              const any = Array.from(s.querySelectorAll('.ex-card')).some((c) => c.style.display !== 'none');
+              s.style.display = any ? '' : 'none';
+            });
+          } else {
+            cards.forEach((c) => { c.style.display = ''; });
+            sections.forEach((s) => { s.style.display = (cat === 'all' || s.dataset.cat === cat) ? '' : 'none'; });
+          }
+          catChips.forEach((c) => c.classList.toggle('on', c.dataset.filter === cat));
+          facetPills.forEach((p) => p.classList.toggle('on', !!facet && p.dataset.facet === facet.facet && p.dataset.value === facet.value));
+        }
+
+        catChips.forEach((chip) => chip.addEventListener('click', () => { cat = chip.dataset.filter; facet = null; render(); }));
+        facetPills.forEach((pill) => pill.addEventListener('click', () => {
+          const same = facet && facet.facet === pill.dataset.facet && facet.value === pill.dataset.value;
+          facet = same ? null : { facet: pill.dataset.facet, value: pill.dataset.value };
+          if (facet) cat = 'all';
+          render();
+        }));
+        render();
+      })();
+
+      // Highlight the active category in the side nav based on scroll.
+      (function(){
+        const items = document.querySelectorAll('#sideList li[data-target]');
+        const map = new Map();
+        items.forEach((li) => {
+          const sel = li.getAttribute('data-target');
+          const el = document.querySelector(sel);
+          if (el) map.set(el, li);
+        });
+        if (!map.size) return;
+        const io = new IntersectionObserver((entries) => {
+          entries.forEach((e) => {
+            const li = map.get(e.target);
+            if (!li) return;
+            li.classList.toggle('active', e.isIntersecting);
+          });
+        }, { rootMargin: '-40% 0px -55% 0px', threshold: 0 });
+        map.forEach((_, el) => io.observe(el));
+      })();
+    </script>
+
+    <Foot />
+  </body>
+</html>

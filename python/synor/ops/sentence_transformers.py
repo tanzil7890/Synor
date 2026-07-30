@@ -1,0 +1,239 @@
+"""Sentence Transformers integration for text embeddings.
+
+This module provides a wrapper around the sentence-transformers library
+that implements VectorSchemaProvider for easy integration with Synor connectors.
+"""
+
+from __future__ import annotations
+
+__all__ = ["SentenceTransformerEmbedder"]
+
+import threading as _threading
+import typing as _typing
+from typing import Any as _Any
+
+import numpy as _np
+from numpy.typing import NDArray as _NDArray
+
+import synor as syn
+from synor import policy as _policy
+from synor.resources import schema as _schema
+
+if _typing.TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
+
+
+def _is_oom_error(error: BaseException) -> bool:
+    """Whether ``error`` is an accelerator/host out-of-memory failure.
+
+    Matches by message rather than type so it covers ``torch.OutOfMemoryError``
+    ("CUDA out of memory..."), MPS ("MPS backend out of memory..."), and older
+    torch versions that raise plain ``RuntimeError`` — without importing torch.
+    """
+    return isinstance(error, MemoryError) or "out of memory" in str(error).lower()
+
+
+def _empty_accelerator_cache() -> None:
+    """Best-effort release of cached accelerator memory after an OOM.
+
+    Without this, allocator fragmentation often makes the retried halves OOM
+    as well. Never raises — failure to release just means the retry is less
+    likely to succeed.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+class SentenceTransformerEmbedder(_schema.VectorSchemaProvider):
+    """Wrapper for SentenceTransformer models that implements VectorSchemaProvider.
+
+    This class provides a thread-safe interface to SentenceTransformer models
+    and automatically provides vector schema information for Synor connectors.
+
+    Args:
+        model_name_or_path: Name of a pre-trained model from HuggingFace or path
+            to a local model directory.
+        device: Device to load the model on (e.g., ``"cuda"``, ``"cpu"``).
+            Defaults to ``None`` to let SentenceTransformer auto-detect.
+        trust_remote_code: Whether to allow loading models with custom code
+            from the HuggingFace Hub (e.g., Jina models with custom pooling).
+        local_files_only: Whether model loading must use files already present
+            on this machine. Offline policy enables this automatically.
+
+    Example:
+        >>> from synor.ops.sentence_transformers import SentenceTransformerEmbedder
+        >>> embedder = SentenceTransformerEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+        >>>
+        >>> # Get vector schema for database column definitions
+        >>> schema = await embedder.__synor_vector_schema__()
+        >>> print(f"Embedding dimension: {schema.size}, dtype: {schema.dtype}")
+        >>>
+        >>> # Embed text
+        >>> embedding = await embedder.embed("Hello, world!")
+        >>> print(f"Shape: {embedding.shape}, dtype: {embedding.dtype}")
+    """
+
+    def __init__(
+        self,
+        model_name_or_path: str,
+        *,
+        device: str | None = None,
+        trust_remote_code: bool = False,
+        local_files_only: bool = False,
+    ) -> None:
+        """Initialize the SentenceTransformer embedder."""
+        self._model_name_or_path = model_name_or_path
+        self._device = device
+        self._trust_remote_code = trust_remote_code
+        self._local_files_only = local_files_only
+        self._model: SentenceTransformer | None = None
+        self._lock = _threading.Lock()
+
+    def __getstate__(self) -> dict[str, _Any]:
+        return {
+            "model_name_or_path": self._model_name_or_path,
+            "device": self._device,
+            "trust_remote_code": self._trust_remote_code,
+            "local_files_only": self._local_files_only,
+        }
+
+    def __setstate__(self, state: dict[str, _Any]) -> None:
+        self._model_name_or_path = state["model_name_or_path"]
+        self._device = state["device"]
+        self._trust_remote_code = state["trust_remote_code"]
+        self._local_files_only = state.get("local_files_only", False)
+        self._model = None
+        self._lock = _threading.Lock()
+
+    def _get_model(self) -> SentenceTransformer:
+        """Lazy-load the model (thread-safe)."""
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    from sentence_transformers import SentenceTransformer
+
+                    self._model = SentenceTransformer(
+                        self._model_name_or_path,
+                        device=self._device,
+                        trust_remote_code=self._trust_remote_code,
+                        local_files_only=(
+                            self._local_files_only or _policy.network_is_denied()
+                        ),
+                    )
+        return self._model
+
+    @syn.fn.as_async(batching=True, runner=syn.GPU, max_batch_size=64)
+    def _embed(
+        self,
+        texts: list[str],
+        prompt_name: str | None = None,
+        normalize_embeddings: bool = True,
+    ) -> list[_NDArray[_np.float32]]:
+        """Batched embedding. Concurrent single-text calls into :meth:`embed`
+        are grouped by the ``@syn.fn.as_async(batching=True)`` decorator;
+        this method is the per-batch body invoked by the decorator.
+
+        Args:
+            texts: Batch of text strings to embed (handled by the engine).
+            prompt_name: Prompt name for instruction following models that use
+                different prompts for queries vs documents.
+            normalize_embeddings: Whether to normalize embeddings to unit length.
+                Defaults to ``True`` for compatibility with cosine similarity.
+
+        Note:
+            Pass ``prompt_name`` and ``normalize_embeddings`` consistently across
+            calls — mixing explicit values with defaults creates separate batchers.
+        """
+        model = self._get_model()
+        try:
+            embeddings: _NDArray[_np.float32] = model.encode(
+                texts,
+                prompt_name=prompt_name,
+                convert_to_numpy=True,
+                normalize_embeddings=normalize_embeddings,
+                show_progress_bar=False,
+            )  # type: ignore[assignment]
+        except Exception as e:
+            # Out-of-memory scales with batch size × padded sequence length,
+            # so smaller batches may fit where this one didn't: ask the
+            # engine to halve and retry. Unlike remote providers, local
+            # failures are transparent — OOM is the one composition-dependent
+            # class, so everything else (config/model errors) propagates
+            # as-is. A single item that doesn't fit fails on its own: at
+            # size 1 the engine unwraps the signal and raises the OOM error.
+            if _is_oom_error(e):
+                _empty_accelerator_cache()
+                raise syn.RetryWithSmallerBatch() from e
+            raise
+        return list(embeddings)
+
+    @syn.fn(memo=True, version=1, logic_tracking="self")
+    async def embed(
+        self,
+        text: str,
+        prompt_name: str | None = None,
+        normalize_embeddings: bool = True,
+    ) -> _NDArray[_np.float32]:
+        """Embed a single text into a float32 vector.
+
+        Concurrent calls with the same ``prompt_name`` and ``normalize_embeddings``
+        are automatically batched by the underlying :meth:`_embed` decorator.
+
+        Args:
+            text: Text string to embed.
+            prompt_name: Prompt name for instruction following models that use
+                different prompts for queries vs documents.
+            normalize_embeddings: Whether to normalize embeddings to unit length.
+
+        Returns:
+            Numpy array of shape ``(dim,)`` containing the embedding vector.
+        """
+        result: _NDArray[_np.float32] = await self._embed(  # type: ignore[arg-type]
+            text, prompt_name, normalize_embeddings
+        )
+        return result
+
+    async def __synor_vector_schema__(self) -> _schema.VectorSchema:
+        """Return vector schema information for this model.
+
+        Returns:
+            VectorSchema with the embedding dimension and dtype.
+
+        Raises:
+            RuntimeError: If the model's embedding dimension cannot be determined.
+        """
+        dim = await self.dimension()
+        return _schema.VectorSchema(dtype=_np.dtype(_np.float32), size=dim)
+
+    @syn.fn.as_async(runner=syn.GPU, memo=True)
+    def dimension(self) -> int:
+        """Return the embedding dimension for this model.
+
+        Returns:
+            The embedding dimension as an integer.
+
+        Raises:
+            RuntimeError: If the model's embedding dimension cannot be determined.
+        """
+        model = self._get_model()
+        dim = model.get_sentence_embedding_dimension()
+        if dim is None:
+            raise RuntimeError(
+                f"Embedding dimension is unknown for model {self._model_name_or_path}."
+            )
+        return int(dim)
+
+    def __synor_memo_key__(self) -> object:
+        return (
+            self._model_name_or_path,
+            self._device,
+            self._trust_remote_code,
+            self._local_files_only,
+        )

@@ -1,0 +1,11 @@
+name: synor-postgres
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    restart: always
+    environment:
+      POSTGRES_PASSWORD: synor
+      POSTGRES_USER: synor
+      POSTGRES_DB: synor
+    ports:
+      - 5432:5432

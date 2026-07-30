@@ -1,0 +1,206 @@
+---
+title: Keep local runs inspectable
+description: >
+  Encrypt control-plane state, trace artifact ownership, verify replay,
+  enforce PII policy, review quarantined failures, package pipelines, and
+  inspect everything in a loopback dashboard.
+---
+
+Synor separates the incremental engine from its execution control plane. The
+engine's LMDB database remains authoritative for stable paths, memoization, and
+target reconciliation. The control plane stores run evidence, provenance,
+replay envelopes, and manual-review cases through a small pluggable interface.
+
+That separation keeps existing `App.update()` pipelines compatible.
+
+## Encrypt control-plane state
+
+Generate a 32-byte key:
+
+```bash
+synor state-key
+```
+
+Keep the result in a password manager or local secret store, then provide it at
+run time:
+
+```bash
+export SYNOR_STATE_KEY="<url-safe-base64-key>"
+export SYNOR_STATE_STORE="file://.synor/control"
+synor doctor main.py --offline
+```
+
+`EncryptedStateStore` encrypts each value with AES-256-GCM and a fresh nonce.
+Logical keys are replaced on disk by HMAC-SHA-256 identifiers, so filenames do
+not reveal app names or run identifiers. Synor never writes the encryption key
+to disk. Losing the key makes the state unrecoverable.
+
+This setting encrypts records written through the state-store mirror, including
+quarantine cases under `.synor/control`. The dashboard-compatible evidence
+under `.synor/runs` remains redacted, metadata-only JSON; place
+`SYNOR_AUDIT_DIR` on an encrypted disk or volume if those files also require
+encryption at rest.
+
+It does not encrypt the native LMDB pages under `synor.db`; use an encrypted
+disk or volume when native incremental state must also be encrypted at rest.
+
+## Inject another state store
+
+The control plane depends on the async `StateStore` protocol:
+
+```python
+import synor as syn
+
+store = syn.EncryptedStateStore(
+    syn.FileStateStore(".synor/control"),
+    syn.decode_state_key(key_from_secret_store),
+)
+
+runtime = syn.SynorRuntime(
+    policy=syn.EgressPolicy.offline(),
+    state_store=store,
+)
+```
+
+A store implements four async operations: `get`, `put`, `delete`, and `list`.
+`MemoryStateStore` is available for tests. A database or object-store adapter
+can implement the protocol directly; it does not need global registration.
+
+The pluggable store is for evidence and review state. The native incremental
+database is deliberately unchanged.
+
+## Trace owned artifacts
+
+After a successful controlled apply, Synor records every tracked target state:
+
+```text
+.synor/runs/<run-id>/
+├── manifest.json
+├── audit.jsonl
+└── provenance.jsonl
+```
+
+Each record identifies the artifact, target-state path, owning component, run,
+pipeline source digest, and package digest when supplied. Connectors do not all
+expose output bytes, so this is ownership-level provenance. Synor does not
+claim byte-level lineage for an artifact it cannot read.
+
+Use the Python report when a program needs the records:
+
+```python
+report = await runtime.run(app, app_target="main.py")
+for artifact in report.provenance:
+    print(artifact.artifact_id, artifact.owner_component_path)
+```
+
+## Capture and verify replay
+
+Every `plan` with an app target writes `replay.json` beside the manifest. It
+contains the source digest, canonical planned-action digest, versions, options,
+and redacted policies.
+
+Verify it later:
+
+```bash
+synor plan main.py --offline
+synor replay .synor/runs/<run-id>/replay.json --offline
+```
+
+Replay reruns native preview and compares source, installed direct dependency,
+action, policy, and runtime digests. The source digest covers the selected local
+project files recorded by the pipeline lock, not only the entry point. Replay
+never applies the plan. A mismatch exits unsuccessfully.
+
+This verifies deterministic local evidence; it cannot force clocks, random
+generators, subprocesses, native code, or remote services to behave
+deterministically. Preview also executes pipeline Python and is not a general
+side-effect sandbox.
+
+## Enforce a PII policy
+
+Choose what happens when policy-aware operations encounter a recognized email,
+phone number, US Social Security number, or checksum-valid payment card:
+
+```bash
+export SYNOR_PII_ACTION="quarantine"
+export SYNOR_PII_CATEGORIES="email,phone,us_ssn,payment_card"
+synor plan main.py --offline
+```
+
+Actions are `allow`, `redact`, `deny`, and `quarantine`. Synor's LiteLLM text
+embedding adapter enforces the active policy before egress. Controlled previews
+inspect target action values before they become audit metadata. Audit text
+always redacts recognized identifiers, even when the execution policy allows
+them.
+
+For `deny` and `quarantine`, controlled applies run a preview preflight and
+stop before target actions if a finding is present. As with every preview, that
+preflight can execute ordinary pipeline Python; keep side effects behind target
+connectors.
+
+Findings retain category, position, and a process-keyed evidence digest. They
+never retain the matched value.
+
+Structured detectors reduce common mistakes; they are not a complete
+data-loss-prevention system. Audio, images, arbitrary binary formats, names,
+addresses, and custom identifiers require application-specific detectors
+before egress.
+
+## Review quarantined failures
+
+Failed controlled runs and quarantine-policy violations create metadata-only
+cases in the configured state store:
+
+```bash
+synor quarantine list --status open
+synor quarantine show <case-id>
+synor quarantine review <case-id> --decision approve
+```
+
+A case stores the exception type, not its message. Approval or rejection
+changes review status only. Review never retries a run or applies a target
+action implicitly.
+
+## Lock and package a pipeline
+
+Create a source and environment lock without resolving or downloading
+dependencies:
+
+```bash
+synor lock main.py --output synor.lock.json
+synor package main.py --output dist/notes.synor
+synor package-verify dist/notes.synor
+```
+
+The lock captures SHA-256 and size for selected Python/project files plus the
+exact installed versions of direct Python distributions. Verification reports
+source or environment drift.
+
+The deterministic `.synor` ZIP contains:
+
+```text
+synor-package.json
+synor.lock.json
+src/<selected Python and project files>
+```
+
+Hidden directories, `.env`, data files, output directories, databases, and
+caches are excluded. Packaging is source transport, not code signing; publish
+the reported package SHA-256 through a trusted channel if recipients need
+authenticity.
+
+## Inspect runs in the local dashboard
+
+Start the read-only dashboard:
+
+```bash
+synor dashboard
+```
+
+Open `http://127.0.0.1:8765/`. It displays local manifests, artifact ownership,
+replay evidence, and quarantine status. It does not display raw pipeline
+payloads.
+
+The server binds to loopback by default and has no authentication. Binding to a
+non-loopback address requires `--allow-remote` and is not suitable for an
+untrusted network.

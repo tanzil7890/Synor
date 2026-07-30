@@ -1,0 +1,4 @@
+.synor/
+synor.db/
+__pycache__/
+.env

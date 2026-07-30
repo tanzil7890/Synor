@@ -1,0 +1,302 @@
+//! Sealed `RustProfile` implementing `EngineProfile`.
+//! All types here are `pub(crate)` — users never see this module.
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use synor_core::engine::component::{ComponentProcessor, ComponentProcessorInfo};
+use synor_core::engine::context::ComponentProcessorContext;
+use synor_core::engine::profile::{EngineProfile, Persist};
+use synor_core::engine::target_state::{
+    ChildTargetDef, TargetActionSink, TargetHandler, TargetReconcileOutput,
+};
+use synor_core::state::stable_path::StableKey;
+use synor_utils::fingerprint::Fingerprint;
+use serde::{Deserialize, Serialize};
+
+use crate::ctx::ContextStore;
+use crate::error::Result;
+
+// ---------------------------------------------------------------------------
+// RustProfile — the sealed EngineProfile implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub(crate) struct RustProfile;
+
+impl EngineProfile for RustProfile {
+    type HostRuntimeCtx = ();
+    /// The environment's context store, so target sinks can resolve provided
+    /// resources (pools/clients) by their stable key at apply time (§10/§11).
+    type HostCtx = ContextStore;
+    type ComponentProc = BoxedProcessor;
+    type FunctionData = Value;
+
+    type TargetHdl = BoxedHandler;
+    type TargetStateTrackingRecord = Value;
+    type TargetAction = Action;
+    type TargetActionSink = BoxedSink;
+    type TargetStateValue = Value;
+}
+
+// ---------------------------------------------------------------------------
+// Value — MessagePack-serialized bytes. Implements Persist.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+pub(crate) struct Value(pub(crate) bytes::Bytes);
+
+impl Value {
+    pub(crate) fn from_serializable<T: Serialize>(data: &T) -> Result<Self> {
+        let encoded = rmp_serde::to_vec(data)?;
+        Ok(Self(bytes::Bytes::from(encoded)))
+    }
+
+    pub(crate) fn deserialize<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
+        let val = rmp_serde::from_slice(&self.0)?;
+        Ok(val)
+    }
+
+    /// Create a "unit" value (empty tuple).
+    pub(crate) fn unit() -> Self {
+        Self::from_serializable(&()).expect("unit serialization cannot fail")
+    }
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Value({} bytes)", self.0.len())
+    }
+}
+
+impl Persist for Value {
+    fn to_bytes(&self) -> synor_utils::error::Result<bytes::Bytes> {
+        Ok(self.0.clone())
+    }
+
+    fn from_bytes(data: &[u8]) -> synor_utils::error::Result<Self> {
+        Ok(Self(bytes::Bytes::copy_from_slice(data)))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BoxedProcessor — Type-erased component processor wrapping user closures.
+// ---------------------------------------------------------------------------
+
+/// Closure that receives the engine-provided `ComponentProcessorContext` and
+/// returns a future producing a `Value`.
+type ProcessFn = Box<
+    dyn FnOnce(
+            ComponentProcessorContext<RustProfile>,
+        ) -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'static>>
+        + Send
+        + 'static,
+>;
+
+pub(crate) struct BoxedProcessor {
+    process_fn: std::sync::Mutex<Option<ProcessFn>>,
+    memo_fp: Option<Fingerprint>,
+    info: Arc<ComponentProcessorInfo>,
+}
+
+impl BoxedProcessor {
+    pub(crate) fn new(
+        process_fn: impl FnOnce(
+            ComponentProcessorContext<RustProfile>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<Value>> + Send + 'static>>
+        + Send
+        + 'static,
+        memo_fp: Option<Fingerprint>,
+        name: String,
+    ) -> Self {
+        Self {
+            process_fn: std::sync::Mutex::new(Some(Box::new(process_fn))),
+            memo_fp,
+            info: Arc::new(ComponentProcessorInfo::new(name)),
+        }
+    }
+}
+
+impl ComponentProcessor<RustProfile> for BoxedProcessor {
+    fn process(
+        &self,
+        _host_runtime_ctx: &(),
+        comp_ctx: &ComponentProcessorContext<RustProfile>,
+    ) -> synor_utils::error::Result<
+        impl Future<Output = synor_utils::error::Result<Value>> + Send + 'static,
+    > {
+        let process_fn = self
+            .process_fn
+            .lock()
+            .map_err(|_| synor_utils::error::Error::internal_msg("processor state poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                synor_utils::error::Error::internal_msg("processor already consumed")
+            })?;
+        let fut = process_fn(comp_ctx.clone());
+        Ok(async move { fut.await.map_err(crate::error::Error::into_core) })
+    }
+
+    fn memo_key_fingerprint(&self) -> Option<Fingerprint> {
+        self.memo_fp
+    }
+
+    fn processor_info(&self) -> &ComponentProcessorInfo {
+        &self.info
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Action — Reconciliation action.
+// ---------------------------------------------------------------------------
+
+pub(crate) enum Action {
+    Create(Value),
+    Update(Value),
+    Delete(Value),
+}
+
+// ---------------------------------------------------------------------------
+// BoxedHandler — Type-erased target handler for reconciliation.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct BoxedHandler {
+    reconcile_fn: Arc<ReconcileFn>,
+    attachments_fn: Arc<AttachmentsFn>,
+}
+
+type ReconcileFn = dyn Fn(
+        StableKey,
+        Option<&Value>,
+        &[Value],
+        bool,
+    ) -> synor_utils::error::Result<Option<TargetReconcileOutput<RustProfile>>>
+    + Send
+    + Sync;
+
+type AttachmentsFn =
+    dyn Fn() -> synor_utils::error::Result<Vec<(Arc<str>, BoxedHandler)>> + Send + Sync;
+
+impl BoxedHandler {
+    pub(crate) fn new(
+        f: impl Fn(
+            StableKey,
+            Option<&Value>,
+            &[Value],
+            bool,
+        )
+            -> synor_utils::error::Result<Option<TargetReconcileOutput<RustProfile>>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            reconcile_fn: Arc::new(f),
+            attachments_fn: Arc::new(|| Ok(vec![])),
+        }
+    }
+
+    pub(crate) fn with_attachments(
+        mut self,
+        f: impl Fn() -> synor_utils::error::Result<Vec<(Arc<str>, BoxedHandler)>>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.attachments_fn = Arc::new(f);
+        self
+    }
+}
+
+impl TargetHandler<RustProfile> for BoxedHandler {
+    fn reconcile(
+        &self,
+        key: StableKey,
+        desired_target_state: Option<&Value>,
+        prev_possible_states: &[Value],
+        prev_may_be_missing: bool,
+    ) -> synor_utils::error::Result<Option<TargetReconcileOutput<RustProfile>>> {
+        (self.reconcile_fn)(
+            key,
+            desired_target_state,
+            prev_possible_states,
+            prev_may_be_missing,
+        )
+    }
+
+    fn attachments(&self) -> synor_utils::error::Result<Vec<(Arc<str>, BoxedHandler)>> {
+        (self.attachments_fn)()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BoxedSink — Type-erased action sink for batched target state application.
+// ---------------------------------------------------------------------------
+
+type SinkFuture = Pin<
+    Box<
+        dyn Future<
+                Output = synor_utils::error::Result<
+                    Option<Vec<Option<ChildTargetDef<RustProfile>>>>,
+                >,
+            > + Send,
+    >,
+>;
+
+// The sink receives the host context (the environment's `ContextStore`) so it
+// can resolve provided resources (pools/clients) by their stable key at apply
+// time. `BoxedSink::new` adapts host-ctx-free closures (the common case);
+// `new_with_ctx` is for connectors that resolve a connection at apply.
+type SinkFn = Arc<dyn Fn(Arc<ContextStore>, Vec<Action>) -> SinkFuture + Send + Sync>;
+
+#[derive(Clone)]
+pub(crate) struct BoxedSink {
+    apply_fn: SinkFn,
+}
+
+impl BoxedSink {
+    pub(crate) fn new(f: impl Fn(Vec<Action>) -> SinkFuture + Send + Sync + 'static) -> Self {
+        Self::new_with_ctx(move |_host_ctx, actions| f(actions))
+    }
+
+    pub(crate) fn new_with_ctx(
+        f: impl Fn(Arc<ContextStore>, Vec<Action>) -> SinkFuture + Send + Sync + 'static,
+    ) -> Self {
+        let arc: SinkFn = Arc::new(f);
+        Self { apply_fn: arc }
+    }
+}
+
+#[async_trait]
+impl TargetActionSink<RustProfile> for BoxedSink {
+    async fn apply(
+        &self,
+        _host_runtime_ctx: &(),
+        host_ctx: Arc<ContextStore>,
+        actions: Vec<Action>,
+    ) -> synor_utils::error::Result<Option<Vec<Option<ChildTargetDef<RustProfile>>>>> {
+        (self.apply_fn)(host_ctx, actions).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn value_roundtrip() {
+        let original = vec![1u32, 2, 3];
+        let v = Value::from_serializable(&original).unwrap();
+        let restored: Vec<u32> = v.deserialize().unwrap();
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn value_unit() {
+        let v = Value::unit();
+        let _: () = v.deserialize().unwrap();
+    }
+}

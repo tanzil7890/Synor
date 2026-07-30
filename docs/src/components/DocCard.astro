@@ -1,0 +1,48 @@
+---
+export interface Props {
+  href: string;
+  title: string;
+  body?: string;
+  meta?: string;
+  icon?: string;
+  accent?: 'spark' | 'lilac' | 'sprout' | 'signal' | 'amber';
+  track?: string;
+}
+
+const {
+  href,
+  title,
+  body,
+  meta,
+  icon,
+  accent = 'spark',
+  track,
+} = Astro.props;
+const external = /^https?:\/\//.test(href);
+---
+
+<a
+  class="synor-card"
+  href={href}
+  data-accent={accent}
+  data-track={track}
+  target={external ? '_blank' : undefined}
+  rel={external ? 'noopener' : undefined}
+>
+  {icon && (
+    <span class="synor-card__ico" aria-hidden="true">
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        set:html={icon}
+      />
+    </span>
+  )}
+  <h3 class="synor-card__title">{title}<span aria-hidden="true"> →</span></h3>
+  {body && <p class="synor-card__body">{body}</p>}
+  {meta && <span class="synor-card__meta">{meta}</span>}
+</a>

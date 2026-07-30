@@ -1,0 +1,15 @@
+[project]
+name = "amazon-s3-embedding-v1"
+version = "0.1.0"
+description = "Synor v1 example: embed S3 text files into Postgres/pgvector."
+requires-python = ">=3.11"
+dependencies = [
+    "synor[amazon_s3,postgres,sentence_transformers]>=0.1.0a1",
+    "asyncpg>=0.29.0",
+    "pgvector>=0.4.1",
+    "numpy",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.setuptools]
+packages = []

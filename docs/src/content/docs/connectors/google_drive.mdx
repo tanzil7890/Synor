@@ -1,0 +1,637 @@
+---
+title: "*Google Drive* connector"
+toc_max_heading_level: 4
+description: >
+  Read files recursively from shared Google Drive folders via a service account.
+  Supports governed stable-ID and ACL-aware change processing, MIME-type
+  filtering, and Google Workspace document export.
+---
+The `google_drive` connector provides utilities for reading files from Google Drive using a service account.
+
+```python
+from synor.connectors import google_drive
+```
+
+:::note[Dependencies]
+This connector requires additional dependencies. Install with:
+
+```bash
+pip install synor[google_drive]
+```
+
+:::
+
+## As source
+
+The connector provides two ways to read from Google Drive:
+
+- `GoogleDriveSource` — high-level source class with async iteration
+- `list_files()` — lower-level function returning a sync iterator
+
+Both require a Google service account with access to the target Drive folders.
+
+### Setting up a service account
+
+1. Create a service account in the [Google Cloud Console](https://console.cloud.google.com/iam-admin/serviceaccounts)
+2. Download the JSON credential file
+3. Share the target Drive folders with the service account's email address
+
+:::note[Google Workspace CLI]
+[`gws`](https://github.com/googleworkspace/cli) is an optional, unofficial Google Workspace CLI. It is actively developed and subject to change, but can be useful for exploring or validating Drive API access before configuring Synor's service-account flow. For example:
+
+```bash
+gws auth setup
+gws auth login
+gws drive files list
+```
+
+In headless or agent workflows, `gws` can also read credentials from `GOOGLE_WORKSPACE_CLI_CREDENTIALS_FILE`. Synor still expects the service account JSON path in `service_account_credential_path`; use the `gws` credentials setting for `gws` commands themselves.
+:::
+
+## Governed source overview
+
+`GovernedGoogleDriveSource` is the access-sensitive API for provable index
+revocation. It is additive: the compatibility `GoogleDriveSource.items()` API
+still uses display paths, while the governed API always keys an item by its
+immutable Drive file ID.
+
+:::caution[Current product boundary]
+The connector produces governed source observations and crash-safe source
+checkpoints. It does not invent destination lineage, target deletion
+obligations, or proof receipts. The complete Google Drive → Qdrant product
+claim still depends on the certified target and controlled runtime planned in
+Phases 4–5. Direct, unguarded vector-store queries remain outside the
+revocation guarantee.
+:::
+
+The governed source:
+
+- reconstructs display paths from parent IDs without treating names as
+  identity;
+- includes content revision, normalized permissions, inheritance,
+  permission expiration, limited-access state, and group-graph revision in
+  memo state;
+- scans configured roots and shared drives with explicit complete, partial, or
+  failed authority;
+- stores a separate Changes API cursor for the user log and every configured
+  shared drive;
+- emits `ambiguous_removal` for an unqualified tombstone and `moved_scope` only
+  when current corpus evidence proves a move;
+- recomputes descendants after a parent ACL change using a bounded, persisted
+  work queue;
+- emits local `permission_expired` observations at the earliest known
+  permission deadline;
+- advances inventory/checkpoint state only after the caller explicitly reports
+  durable downstream readiness.
+
+### Configuration
+
+```python
+from synor import state
+from synor.connectors import google_drive
+
+source = google_drive.GovernedGoogleDriveSource(
+    service_account_credential_path="./credentials.json",
+    connector_instance_id="corp-drive-prod",
+    source_scope_id="security-approved-roots-v1",
+    tenant_id="tenant-42",
+    policy_id="workspace-drive-acl",
+    policy_revision="policy-v7",
+    group_graph_revision="directory-sync-2026-07-29",
+    root_folder_ids=["1abc...xyz"],
+    shared_drive_ids=["0Ashared...id"],
+    state_store=state.state_store_from_env(),
+)
+```
+
+Use a durable state store in production. Set `SYNOR_STATE_STORE` to a
+`file://` location and set `SYNOR_STATE_KEY` to enable authenticated encryption
+of the metadata-only inventory and cursor envelope. Do not use `memory://` for
+a watcher that must survive restart.
+
+### Snapshot/readiness protocol
+
+A prepared session is inert until `commit_after_downstream_ready()`:
+
+```python
+snapshot = await source.open_governed_snapshot()
+
+async for file_id, governed_item in snapshot.items():
+    # Persist/handle the observation through the governed downstream runtime.
+    # Use file_id as the component key.
+    await handle_durably(file_id, governed_item)
+
+if snapshot.result.status == "complete":
+    await snapshot.commit_after_downstream_ready()
+else:
+    # Do not infer deletion and do not advance the Drive checkpoint.
+    alert_on_incomplete_snapshot(snapshot.result)
+```
+
+Any failed page, `incompleteSearch`, unobservable root/subtree, missing
+permission page, or failed start-token read makes the snapshot
+non-authoritative. A partial snapshot may report observed updates, but it never
+turns unseen inventory into removal.
+
+### Change replay
+
+Run a committed full snapshot before consuming changes. Drive has a user
+change log and a separate log for every shared drive, so the source reads and
+checkpoints all configured corpora with `includeRemoved`,
+`includeCorpusRemovals`, `supportsAllDrives`, and
+`includeItemsFromAllDrives`.
+
+```python
+changes = await source.open_change_session()
+
+async for file_id, governed_item in changes.items():
+    await handle_durably(file_id, governed_item)
+
+if changes.result.full_snapshot_required:
+    # A missing or provider-rejected token cannot be skipped.
+    schedule_full_snapshot()
+else:
+    await changes.commit_after_downstream_ready()
+```
+
+The cursor remains unchanged until the explicit commit. Replaying an
+uncommitted batch is expected and must be safe downstream. Parent ACL changes
+enqueue descendants in bounded batches; `apply_changes()` continues those
+batches and publishes the final cursor only when the persisted queue is empty.
+Within one corpus, a later tombstone wins over an earlier live state. Across
+corpora, an accessible current state can prove a move and wins over the other
+corpus's tombstone. A folder-level revocation remains an inactive-ancestor
+scope fence for later child entries in the same batch unless the child proves
+another active parent path. When a folder enters scope, its subtree is
+enumerated even if a child event appeared earlier in the feed.
+An exhausted transient provider failure, server failure, or malformed change
+resource aborts replay without advancing the cursor. Only a provider status
+that proves the item is no longer readable is converted to `access_lost`.
+A Drive `404` is deliberately `ambiguous_removal`, because Google uses it for
+both a missing item and an item the caller can no longer read. Shared-drive
+authority events and a changed policy/group-graph revision require a complete
+snapshot before incremental checkpointing can resume.
+
+Google documents that a removed change can mean deletion, loss of access, or a
+move, and that changing a folder permission does not create a change record for
+every descendant. Synor therefore preserves ambiguity and performs descendant
+policy recomputation instead of claiming more certainty than the provider
+supplies. See [Track changes for users and shared
+drives](https://developers.google.com/workspace/drive/api/guides/about-changes)
+and [`changes.list`](https://developers.google.com/workspace/drive/api/reference/rest/v3/changes/list).
+
+### Permission expiry
+
+`next_permission_expiry()` returns the earliest unhandled local deadline.
+When it is due, consume and acknowledge a local expiry session using the same
+readiness rule:
+
+```python
+expiry = source.open_permission_expiry_session()
+async for file_id, governed_item in expiry.items():
+    await handle_durably(file_id, governed_item)
+await expiry.commit_after_downstream_ready()
+```
+
+Expiry observation identity is derived from the item, deadline, and policy
+state, so an uncommitted retry remains idempotent even when prepared later.
+
+### Permission authority and limitations
+
+Synor requests only the read-only Drive scope:
+`https://www.googleapis.com/auth/drive.readonly`. It never broadens OAuth
+scope automatically.
+
+Permission normalization retains opaque permission IDs and authorization
+semantics, but not email addresses or display names. Evidence contains digests,
+counts, authority, and controlled limitation codes. The provider may not expose
+enough information to derive an effective policy in every configuration:
+
+- group permission IDs do not provide group membership; supply a versioned
+  external directory/group graph, or use `group_graph_revision="unresolved"`
+  and treat the policy authority as partial;
+- My Drive may omit an inheritance origin even when a permission is inherited;
+- limited-access folders can disable inherited permissions and can make child
+  listing unavailable to the authenticated principal;
+- the source can report only permissions visible to the service account or
+  delegated user.
+
+These conditions are represented explicitly rather than guessed. See the
+official [Permission resource](https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions),
+[`permissions.list`](https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions/list),
+and [limited versus expansive
+access](https://developers.google.com/workspace/drive/api/guides/limited-expansive-access).
+
+### Least privilege and domain-wide delegation
+
+Prefer direct folder/shared-drive grants to the service account. Use domain-wide
+delegation only when a security administrator has approved impersonation and
+the service account must observe a specific user's Drive authority. Configure
+the Workspace Admin console for the exact read-only Drive scope, pass that user
+as `delegated_subject`, rotate credentials, and keep one connector/scope ID per
+authorization boundary. Do not reuse a checkpoint under a different delegated
+subject or root set.
+
+Domain-wide delegation does not make group membership appear in Drive
+permission responses and does not turn an incomplete scan into an authoritative
+one.
+
+### Manual acceptance against a dedicated test drive
+
+Use a disposable Drive containing no production data. The probe at
+`dev/manual_google_drive_governance.py` never downloads document bodies and
+prints only privacy-safe source/policy digests and controlled event metadata.
+
+```bash
+export GOOGLE_DRIVE_CREDENTIALS=/secure/test-service-account.json
+export GOOGLE_DRIVE_ROOT_IDS=folder_id
+export GOOGLE_DRIVE_SHARED_DRIVE_IDS=shared_drive_id
+export SYNOR_DRIVE_CONNECTOR_ID=manual-test-connector
+export SYNOR_DRIVE_SCOPE_ID=manual-test-scope-v1
+export SYNOR_TENANT_ID=manual-test-tenant
+export SYNOR_STATE_STORE=file://.synor/manual-drive-acceptance
+export SYNOR_STATE_KEY="$(uv run python -c 'from synor.state import generate_state_key; print(generate_state_key())')"
+
+uv run --extra google-drive python dev/manual_google_drive_governance.py snapshot
+uv run --extra google-drive python dev/manual_google_drive_governance.py snapshot --commit
+```
+
+Commit `snapshot` once to establish the baseline. Then, one change at a time,
+rename a file, create duplicate names, change a direct permission, change a
+parent permission, move a file between corpora, and remove access. Inspect and
+then acknowledge each incremental batch with:
+
+```bash
+uv run --extra google-drive python dev/manual_google_drive_governance.py changes
+uv run --extra google-drive python dev/manual_google_drive_governance.py changes --commit
+```
+
+For a short-lived permission, evaluate the local deadline separately:
+
+```bash
+uv run --extra google-drive python dev/manual_google_drive_governance.py expiry
+uv run --extra google-drive python dev/manual_google_drive_governance.py expiry --commit
+```
+
+Confirm stable file IDs, ACL-only events, descendant invalidation, explicit
+tombstone ambiguity, local expiry, and no checkpoint movement before commit.
+Finally force a rejected stored token or replace the authorized subject and
+confirm `changes` requires a new complete `snapshot`.
+
+:::caution
+`--commit` acknowledges observations for connector acceptance only. Use it
+against a dedicated test drive. In a real application, acknowledgement must
+happen only after the provable-revocation downstream path has durably handled
+every observation.
+:::
+
+## Compatibility source API
+
+### GoogleDriveSource
+
+The primary source class for iterating over Google Drive files.
+
+```python
+class GoogleDriveSource(
+    *,
+    service_account_credential_path: str,
+    root_folder_ids: Sequence[str],
+    mime_types: Sequence[str] | None = None,
+)
+```
+
+**Parameters:**
+
+- `service_account_credential_path` — Path to the service account JSON credential file.
+- `root_folder_ids` — List of Google Drive folder IDs to scan. Subfolders are traversed recursively.
+- `mime_types` — Optional list of MIME types to include. If `None`, all file types are included.
+
+### Iterating files
+
+`GoogleDriveSource` provides async iteration via `files()`, yielding `DriveFile` objects (implementing the [`FileLike`](../common_resources/data_types#filelike) base class):
+
+```python
+source = google_drive.GoogleDriveSource(
+    service_account_credential_path="./credentials.json",
+    root_folder_ids=["1abc...xyz"],
+)
+
+async for file in source.files():
+    text = await file.read_text()
+    ...
+```
+
+### Keyed iteration with `items()`
+
+`items()` yields `(str, DriveFile)` pairs, where the key is the file's name path. This is useful with `mount_each()`:
+
+```python
+async for key, file in source.items():
+    content = await file.read()
+```
+
+### Filtering by MIME type
+
+Use `mime_types` to restrict which files are returned:
+
+```python
+source = google_drive.GoogleDriveSource(
+    service_account_credential_path="./credentials.json",
+    root_folder_ids=["1abc...xyz"],
+    mime_types=["application/pdf", "text/plain"],
+)
+```
+
+Google Workspace files (Docs, Sheets, Slides) are automatically exported:
+
+| Google Workspace type | Exported as |
+|---|---|
+| Google Docs | Plain text |
+| Google Sheets | CSV |
+| Google Slides | Plain text |
+
+### list_files
+
+A lower-level sync iterator for listing files:
+
+```python
+def list_files(spec: GoogleDriveSourceSpec) -> Iterator[DriveFile]
+```
+
+**Parameters:**
+
+- `spec` — A `GoogleDriveSourceSpec` with the same fields as `GoogleDriveSource` constructor parameters.
+
+**Returns:** A sync iterator of `DriveFile` objects.
+
+### DriveFile
+
+`DriveFile` implements [`FileLike`](../common_resources/data_types#filelike) with Google Drive-specific behavior:
+
+- `file_path` — A `DriveFilePath` where `resolve()` returns the Google Drive file ID.
+- `read()` / `read_text()` — Downloads file content via the Google Drive API. Partial reads (`size` parameter) are not supported.
+
+## Governed source API
+
+`GovernedGoogleDriveSource` is the opt-in source for ACL-sensitive indexing and
+provable revocation workflows. It does not change `GoogleDriveSource.items()`;
+existing path-keyed applications retain their current component identity.
+
+The governed source adds:
+
+- immutable Drive file-ID component identity, independent of name and display path;
+- reconstructed parent display paths without treating names as unique;
+- fully paginated `permissions.list` normalization using opaque permission IDs;
+- ACL, inherited-origin, limited-access, capability, group-revision, and expiry
+  inputs in memo state;
+- change-fenced, complete/partial/failed snapshot authority;
+- separate user and shared-drive change cursors;
+- ambiguous tombstones instead of unproven physical-deletion claims;
+- bounded, resumable descendant policy recomputation after folder changes; and
+- explicit prepare/read/ack sessions, so a cursor cannot advance before
+  downstream work is durable.
+
+:::caution[Product boundary]
+This connector produces governed observations and durable source checkpoints.
+It does not invent destination lineage, target deletion obligations, or proof
+receipts. The controlled runtime and certified target must consume these
+observations. A direct, unguarded vector-database query remains outside the
+revocation guarantee.
+:::
+
+### Configuration
+
+```python
+import synor as syn
+from synor.connectors import google_drive
+
+source = google_drive.GovernedGoogleDriveSource(
+    service_account_credential_path="./credentials.json",
+    root_folder_ids=["root-folder-id"],
+    shared_drive_ids=["shared-drive-id"],
+    state_store=syn.state_store_from_env(),
+    connector_instance_id="production-drive-reader",
+    source_scope_id="knowledge-base-roots-v1",
+    tenant_id="tenant-a",
+    policy_id="drive-observed-acl",
+    policy_revision="policy-v1",
+    group_graph_revision="groups-2026-07-29",
+)
+```
+
+The three identity fields are deliberate:
+
+- `connector_instance_id` identifies the credential/configuration boundary;
+- `source_scope_id` identifies the configured governed root/drive boundary; and
+- the provider file ID identifies the item.
+
+Changing either configured identity creates a different ownership scope. Do not
+reuse an existing governed state store with a path-keyed source or a different
+scope without an explicit migration.
+
+Each `shared_drive_ids` entry authorizes a full-drive inventory and its
+dedicated change log. If a configured root is discovered inside a shared drive
+whose ID is not listed, the snapshot is deliberately `partial`; the user log
+alone cannot provide complete item changes for that drive.
+
+Use an encrypted control-plane store in production:
+
+```bash
+export SYNOR_STATE_STORE='file://.synor/control'
+export SYNOR_STATE_KEY='<32-byte URL-safe base64 or 64-character hex key>'
+```
+
+The connector stores operational file IDs, opaque permission IDs, parent
+relationships, and raw Drive cursors there. Its evidence summaries contain
+only digests, counts, controlled limitation codes, and opaque source digests.
+
+### Authoritative snapshot workflow
+
+Opening a session performs the inventory and its change-feed fence, but does
+not write the proposed cursor:
+
+```python
+snapshot = await source.open_governed_snapshot()
+
+if snapshot.result.status != "complete":
+    # Do not use a partial keyed inventory to authorize missing-component
+    # cleanup. Surface snapshot.result.inaccessible_scope_digests instead.
+    raise RuntimeError("Drive inventory is not authoritative")
+
+handle = await syn.mount_each(process_governed_file, snapshot.items(), target)
+await handle.ready()
+
+# Call only after the downstream handler's durable boundary.
+await snapshot.commit_after_downstream_ready()
+```
+
+`snapshot.items()` yields `(file_id, GovernedSourceItem[DriveFile])`. The
+`GovernedSourceItem` memo state includes source revision and access policy, so
+an ACL-only or inherited-policy change invalidates memoization even when bytes
+are unchanged.
+
+The snapshot algorithm captures a start token for the user log and every
+configured shared drive, inventories all pages, replays changes through each
+terminal token, and then proposes a checkpoint. A failed page, permission
+enumeration, change fence, inaccessible subtree, or `incompleteSearch=true`
+makes the result partial/failed. Such a result emits no missing-item
+revocations and cannot commit its checkpoint.
+
+### Incremental change workflow
+
+After one complete snapshot has been acknowledged:
+
+```python
+changes = await source.open_change_session()
+handle = await syn.mount_each(process_governed_file, changes.items(), target)
+await handle.ready()
+await changes.commit_after_downstream_ready()
+```
+
+The connector requests removed entries and corpus-removal context, follows
+every page, and reads the user log plus each configured shared-drive log. Newer
+states for the same file ID are coalesced per corpus before cross-corpus move
+evidence is reconciled, so a later same-corpus tombstone is never discarded.
+
+A bare `removed=true` entry becomes `ambiguous_removal`: Drive documents that
+it can mean deletion, access loss, or a corpus move. A visible
+`trashed=true` state can be classified as `source_deleted`; included current
+corpus state can prove some moves. A rejected stored cursor raises
+`DriveFullSnapshotRequired` and cannot advance.
+
+Shared-drive-level membership or authority changes also require a fresh
+snapshot because Google does not emit one item event for everything newly
+available or inaccessible. A removed configured drive emits conservative
+`access_lost` observations for its known files, but the stale cursor remains
+non-committable.
+
+Folder changes enqueue descendants for policy recomputation because Drive does
+not emit a child change for every inherited ACL effect. Work is split into
+bounded, versioned checkpoint batches. `apply_changes()` is the convenience
+method that drains all such batches through a durable-readiness callback.
+Folder revocation fences later child entries that still depend on that
+inactive ancestor. A newly in-scope folder is recursively enumerated, including
+children whose change entry preceded the parent's entry.
+
+### Permission expiry
+
+The earliest observed permission expiry is stored in `AccessSnapshot.valid_until`.
+Use `next_permission_expiry()` to schedule a local wake-up and process it with
+an explicit session:
+
+```python
+import datetime
+
+deadline = await source.next_permission_expiry()
+now = datetime.datetime.now(datetime.timezone.utc)
+expiry = source.open_permission_expiry_session(now=now)
+handle = await syn.mount_each(process_governed_file, expiry.items(), target)
+await handle.ready()
+await expiry.commit_after_downstream_ready()
+```
+
+An unacknowledged expiry is replayed with a stable observation identity.
+Acknowledgement records the handled deadline without advancing a Drive cursor.
+
+### Permission authority and limitations
+
+The resolver preserves opaque permission ID, subject type, role, direct versus
+inherited details, inheritance origin when Google exposes it, expiry,
+discovery, deleted-account state, view, and inherited-permission disabling.
+It never persists email addresses or display names as evidence.
+
+The Drive permissions API does not make every effective-access fact observable:
+
+- My Drive can omit an inherited permission's origin;
+- a group grant does not include the group's membership graph;
+- domain/anyone grants and limited-access metadata exceed a simple user allow-list;
+- `capabilities` describe the authenticated principal, not every principal; and
+- Workspace administrative policy, DLP, and trust rules may require separate
+  authoritative integrations.
+
+These limits appear as controlled `limitation_codes`. Supply a real,
+version-changing `group_graph_revision` from an authorized group-directory
+integration when group membership affects retrieval. The default
+`"unresolved"` is intentionally not a claim of complete principal expansion.
+
+See Google's current references for [file fields and stable IDs](https://developers.google.com/workspace/drive/api/reference/rest/v3/files),
+[permission details](https://developers.google.com/workspace/drive/api/reference/rest/v3/permissions),
+[user and shared-drive change logs](https://developers.google.com/workspace/drive/api/guides/about-changes),
+and [change retrieval flags](https://developers.google.com/workspace/drive/api/reference/rest/v3/changes/list).
+
+### OAuth and domain-wide delegation
+
+The connector requests only
+`https://www.googleapis.com/auth/drive.readonly`; it never broadens the scope
+at runtime. Google classifies this as a restricted scope. Use a narrower
+per-file flow where it can honestly cover the product's configured authority,
+and complete Google's verification/security-assessment requirements when
+restricted-scope data is stored or transmitted. See [Choose Google Drive API
+scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth).
+
+Domain-wide delegation is disabled unless `delegated_subject` is explicitly
+provided. It must be approved by a Workspace administrator, bound to the
+intended subject, and included in the connector-instance identity and audit
+configuration. Never use delegation merely to hide an authorization gap.
+
+### Manual acceptance
+
+Use a dedicated test Drive and the read-only probe:
+
+```bash
+export GOOGLE_DRIVE_CREDENTIALS='./credentials.json'
+export GOOGLE_DRIVE_ROOT_IDS='root-folder-id'
+export GOOGLE_DRIVE_SHARED_DRIVE_IDS='shared-drive-id'
+export SYNOR_DRIVE_CONNECTOR_ID='acceptance-reader'
+export SYNOR_DRIVE_SCOPE_ID='acceptance-scope-v1'
+export SYNOR_TENANT_ID='acceptance-tenant'
+export SYNOR_STATE_STORE='file://.synor/drive-acceptance'
+export SYNOR_STATE_KEY='<test encryption key>'
+
+uv run --extra google-drive python dev/manual_google_drive_governance.py snapshot
+uv run --extra google-drive python dev/manual_google_drive_governance.py snapshot --commit
+```
+
+After the committed baseline, rename a file, change a direct ACL, change a
+parent ACL, move a file between configured corpora, and remove access to the
+dedicated scope. Run `changes` without `--commit`, record the observations at
+the simulated downstream durability boundary, then run `changes --commit`.
+Use `expiry` / `expiry --commit` for an expired test grant. Verify the event
+kind, policy digest change, partial/ambiguous-access behavior, and delayed
+cursor commit. The script does not read file bodies and does not print IDs,
+names, or principal addresses.
+
+### Example
+
+```python
+import synor as syn
+from synor.connectors import google_drive
+from synor.resources.file import FileLike
+
+@syn.fn(memo=True)
+async def process_file(file: FileLike) -> None:
+    text = await file.read_text()
+    # ... process the file content ...
+
+@syn.fn
+async def app_main(credential_path: str, folder_ids: list[str]) -> None:
+    source = google_drive.GoogleDriveSource(
+        service_account_credential_path=credential_path,
+        root_folder_ids=folder_ids,
+    )
+
+    with syn.component_subpath("file"):
+        async for key, file in source.items():
+            await syn.mount(
+                syn.component_subpath(key),
+                process_file,
+                file,
+            )
+
+app = syn.App(
+    "GoogleDriveIngestion",
+    app_main,
+    credential_path="./credentials.json",
+    folder_ids=["1abc...xyz"],
+)
+```

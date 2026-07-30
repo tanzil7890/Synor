@@ -1,0 +1,819 @@
+---
+title: "*Qdrant* connector"
+toc_max_heading_level: 4
+description: >
+  Write points to Qdrant collections with single or named dense vectors, sparse
+  vectors, multi-vector support, and schemaless payloads — configured via
+  QdrantVectorDef and QdrantSparseVectorDef.
+---
+The `qdrant` connector provides utilities for writing points to Qdrant vector databases, with support for single vectors, named dense vectors, sparse vectors, and multi-vector configurations.
+
+```python
+from synor.connectors import qdrant
+```
+
+:::note[Dependencies]
+This connector requires additional dependencies. Install with:
+
+```bash
+pip install synor[qdrant]
+```
+
+:::
+
+## Connection setup
+
+`create_client()` creates a Qdrant client connection with optional gRPC support.
+
+```python
+def create_client(
+    url: str,
+    *,
+    prefer_grpc: bool = True,
+    **kwargs: Any,
+) -> QdrantClient
+```
+
+**Parameters:**
+
+- `url` — Qdrant server URL (e.g., `"http://localhost:6333"`).
+- `prefer_grpc` — Whether to prefer gRPC over HTTP (default: `True`).
+- `**kwargs` — Additional arguments passed directly to `QdrantClient`.
+
+**Returns:** A Qdrant client instance.
+
+**Example:**
+
+```python
+client = qdrant.create_client("http://localhost:6333")
+```
+
+## As target
+
+The `qdrant` connector provides target state APIs for writing points to collections. Synor tracks what points should exist and automatically handles upserts and deletions.
+
+### Declaring target states
+
+#### Setting up a connection
+
+Create a `ContextKey[QdrantClient]` to identify your Qdrant client, then provide it in your lifespan:
+
+:::note
+The key name is load-bearing across runs — it's the stable identity Synor uses to track managed collections. See [ContextKey as stable identity](../programming_guide/context#contextkey-as-stable-identity) before renaming.
+:::
+
+```python
+from qdrant_client import QdrantClient
+import synor as syn
+
+QDRANT_DB = syn.ContextKey[QdrantClient]("my_vectors")
+
+@syn.lifespan
+async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]:
+    client = qdrant.create_client(QDRANT_URL)
+    builder.provide(QDRANT_DB, client)
+    yield
+```
+
+#### Collections (parent state)
+
+Declares a collection as a target state. Returns a `CollectionTarget` for declaring points.
+
+```python
+def declare_collection_target(
+    db: ContextKey[QdrantClient],
+    collection_name: str,
+    schema: CollectionSchema,
+    *,
+    managed_by: Literal["system", "user"] = "system",
+) -> CollectionTarget[syn.PendingS]
+```
+
+**Parameters:**
+
+- `db` — A `ContextKey[QdrantClient]` identifying the Qdrant client to use.
+- `collection_name` — Name of the collection.
+- `schema` — Schema definition specifying vector configurations (see [Collection Schema](#collection-schema)).
+- `managed_by` — Whether Synor manages the collection lifecycle (`"system"`) or assumes it exists (`"user"`).
+
+**Returns:** A pending `CollectionTarget`. Use the convenience wrapper `await qdrant.mount_collection_target(QDRANT_DB, collection_name, schema)` to resolve.
+
+#### Points (child states)
+
+Once a `CollectionTarget` is resolved, declare points to be upserted using `qdrant.PointStruct`, which is an alias of `qdrant_client.http.models.PointStruct`:
+
+```python
+def CollectionTarget.declare_point(
+    self,
+    point: qdrant.PointStruct,
+) -> None
+```
+
+**Parameters:**
+
+- `point` — A `qdrant.PointStruct` (alias of `qdrant_client.http.models.PointStruct`) containing:
+  - `id` — Point ID (str, int, or UUID)
+  - `vector` — Vector data (single vector or dict of named vectors)
+  - `payload` — Optional metadata as a JSON-serializable dict
+
+### Collection schema
+
+Define vector configurations for a collection using `CollectionSchema`. Unlike row-oriented databases, Qdrant uses a point-oriented model where each point has schemaless payload and one or more vectors with predefined dimensions.
+
+```python
+class CollectionSchema:
+    @classmethod
+    async def create(
+        cls,
+        vectors: QdrantVectorDef
+        | dict[str, QdrantVectorDef | QdrantSparseVectorDef]
+        | None = None,
+    ) -> CollectionSchema
+```
+
+**Parameters:**
+
+- `vectors` — Either:
+  - A single `QdrantVectorDef` for an unnamed dense vector
+  - A dict mapping vector names to `QdrantVectorDef` (dense) or `QdrantSparseVectorDef` (sparse)
+
+Dense and sparse vectors share one namespace in Qdrant (the server rejects duplicate names across the two kinds), so both live in the same dict — a name collision is impossible to express. Sparse vectors are always named.
+
+#### QdrantVectorDef
+
+Specifies vector configuration including dimension, distance metric, and multi-vector settings:
+
+```python
+class QdrantVectorDef(NamedTuple):
+    schema: VectorSchemaProvider | MultiVectorSchemaProvider
+    distance: Literal["cosine", "dot", "euclid"] = "cosine"
+    multivector_comparator: Literal["max_sim"] = "max_sim"
+```
+
+**Parameters:**
+
+- `schema` — A `VectorSchemaProvider` or `MultiVectorSchemaProvider` that defines vector dimensions
+- `distance` — Distance metric for similarity search (default: `"cosine"`)
+- `multivector_comparator` — Comparator for multi-vector fields (only applies to `MultiVectorSchemaProvider`)
+
+#### QdrantSparseVectorDef
+
+Specifies a named sparse vector configuration:
+
+```python
+class QdrantSparseVectorDef(NamedTuple):
+    modifier: Literal["idf"] | None = None
+```
+
+Sparse vectors use Qdrant's native sparse-vector storage and dot-product scoring. The optional `modifier="idf"` enables Qdrant's IDF modifier for sparse vectors.
+
+#### Single (unnamed) vector
+
+For collections with a single unnamed vector:
+
+```python
+from synor.ops.sentence_transformers import SentenceTransformerEmbedder
+
+embedder = SentenceTransformerEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+
+schema = await qdrant.CollectionSchema.create(
+    vectors=qdrant.QdrantVectorDef(schema=embedder)
+)
+```
+
+Points use the vector directly:
+
+```python
+point = qdrant.PointStruct(
+    id=123,  # unsigned int or UUID — see "Point IDs" below
+    vector=embedding.tolist(),  # Single vector
+    payload={"text": "...", "metadata": {...}},
+)
+```
+
+#### Named vectors
+
+For collections with multiple named vectors:
+
+```python
+from synor.resources.schema import VectorSchema
+import numpy as np
+
+schema = await qdrant.CollectionSchema.create(
+    vectors={
+        "text_embedding": qdrant.QdrantVectorDef(
+            schema=VectorSchema(dtype=np.float32, size=384),
+            distance="cosine",
+        ),
+        "image_embedding": qdrant.QdrantVectorDef(
+            schema=VectorSchema(dtype=np.float32, size=512),
+            distance="dot",
+        ),
+    }
+)
+```
+
+Points use a dict of vectors:
+
+```python
+point = qdrant.PointStruct(
+    id=123,  # unsigned int or UUID — see "Point IDs" below
+    vector={
+        "text_embedding": text_vec.tolist(),
+        "image_embedding": image_vec.tolist(),
+    },
+    payload={"text": "...", "metadata": {...}},
+)
+```
+
+#### Dense + sparse vectors
+
+For hybrid retrieval, declare a named dense vector and a named sparse vector in the same collection:
+
+```python
+from qdrant_client.http import models as qdrant_models
+from synor.resources.schema import VectorSchema
+import numpy as np
+
+schema = await qdrant.CollectionSchema.create(
+    vectors={
+        "dense": qdrant.QdrantVectorDef(
+            schema=VectorSchema(dtype=np.float32, size=384),
+            distance="cosine",
+        ),
+        "sparse": qdrant.QdrantSparseVectorDef(modifier="idf"),
+    },
+)
+```
+
+Points put both vector types in `PointStruct.vector`. The sparse vector is a native Qdrant `SparseVector`, not payload:
+
+```python
+point = qdrant.PointStruct(
+    id=123,
+    vector={
+        "dense": dense_embedding.tolist(),
+        "sparse": qdrant_models.SparseVector(
+            indices=sparse_indices,
+            values=sparse_values,
+        ),
+    },
+    payload={"text": text},
+)
+target.declare_point(point)
+```
+
+#### VectorSchemaProvider
+
+The `schema` field of `QdrantVectorDef` accepts a [`VectorSchemaProvider`](../common_resources/vector_schema#vectorschemaprovider), a `ContextKey`, or an explicit `VectorSchema` to specify the vector dimension and dtype. See [Vector Schema](../common_resources/vector_schema#vectorschemaprovider) for details.
+
+#### Multi-vector support
+
+For multi-vector configurations (multiple vectors per point stored together):
+
+```python
+from synor.resources.schema import MultiVectorSchema, VectorSchema
+import numpy as np
+
+schema = await qdrant.CollectionSchema.create(
+    vectors=qdrant.QdrantVectorDef(
+        schema=MultiVectorSchema(
+            vector_schema=VectorSchema(dtype=np.float32, size=384)
+        ),
+        multivector_comparator="max_sim",
+    )
+)
+```
+
+### Distance metrics
+
+The `distance` parameter in `QdrantVectorDef` specifies the similarity metric:
+
+- `"cosine"` — Cosine similarity (default, normalized dot product)
+- `"dot"` — Dot product similarity
+- `"euclid"` — Euclidean distance (L2)
+
+### Example: single vector
+
+```python
+from qdrant_client import QdrantClient
+import synor as syn
+from synor.connectors import qdrant
+from synor.ops.sentence_transformers import SentenceTransformerEmbedder
+from typing import AsyncIterator
+
+QDRANT_URL = "http://localhost:6333"
+QDRANT_DB = syn.ContextKey[QdrantClient]("main_vectors")
+
+embedder = SentenceTransformerEmbedder("sentence-transformers/all-MiniLM-L6-v2")
+
+@syn.lifespan
+async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]:
+    client = qdrant.create_client(QDRANT_URL)
+    builder.provide(QDRANT_DB, client)
+    yield
+
+@syn.fn
+async def process_document(
+    doc_id: str,
+    text: str,
+    target: qdrant.CollectionTarget,
+) -> None:
+    embedding = await embedder.embed(text)
+
+    point = qdrant.PointStruct(
+        id=doc_id,
+        vector=embedding.tolist(),
+        payload={"text": text},
+    )
+    target.declare_point(point)
+
+@syn.fn
+async def app_main() -> None:
+    # Declare collection target state
+    collection = await qdrant.mount_collection_target(
+        QDRANT_DB,
+        "documents",
+        await qdrant.CollectionSchema.create(
+            vectors=qdrant.QdrantVectorDef(schema=embedder)
+        ),
+    )
+
+    # Declare points
+    for doc_id, text in documents:
+        await syn.mount(
+            syn.component_subpath("doc", doc_id),
+            process_document,
+            doc_id,
+            text,
+            collection,
+        )
+```
+
+### Example: named vectors
+
+```python
+from synor.resources.schema import VectorSchema
+import numpy as np
+
+@syn.fn
+async def app_main() -> None:
+    collection = await qdrant.mount_collection_target(
+        QDRANT_DB,
+        "multimodal_docs",
+        await qdrant.CollectionSchema.create(
+            vectors={
+                "text": qdrant.QdrantVectorDef(
+                    schema=text_embedder,
+                    distance="cosine",
+                ),
+                "image": qdrant.QdrantVectorDef(
+                    schema=VectorSchema(dtype=np.float32, size=512),
+                    distance="dot",
+                ),
+            }
+        ),
+    )
+
+    # Declare points with named vectors
+    for doc in documents:
+        point = qdrant.PointStruct(
+            id=doc.id,
+            vector={
+                "text": doc.text_embedding.tolist(),
+                "image": doc.image_embedding.tolist(),
+            },
+            payload={"title": doc.title, "url": doc.url},
+        )
+        collection.declare_point(point)
+```
+
+### Example: dense + sparse hybrid vectors
+
+```python
+from qdrant_client.http import models as qdrant_models
+from synor.resources.schema import VectorSchema
+import numpy as np
+
+@syn.fn
+async def app_main() -> None:
+    collection = await qdrant.mount_collection_target(
+        QDRANT_DB,
+        "hybrid_docs",
+        await qdrant.CollectionSchema.create(
+            vectors={
+                "dense": qdrant.QdrantVectorDef(
+                    schema=VectorSchema(dtype=np.float32, size=384),
+                    distance="cosine",
+                ),
+                "sparse": qdrant.QdrantSparseVectorDef(modifier="idf"),
+            },
+        ),
+    )
+
+    for chunk in chunks:
+        point = qdrant.PointStruct(
+            id=chunk.id,
+            vector={
+                "dense": chunk.dense_embedding.tolist(),
+                "sparse": qdrant_models.SparseVector(
+                    indices=chunk.sparse_indices,
+                    values=chunk.sparse_values,
+                ),
+            },
+            payload={"text": chunk.text},
+        )
+        collection.declare_point(point)
+```
+
+## Point IDs
+
+Qdrant only accepts two point ID types — this is enforced by the Qdrant server itself (see [Qdrant's Point IDs documentation](https://qdrant.tech/documentation/manage-data/points/#point-ids)):
+
+- `int` — unsigned 64-bit integers (`0 <= id < 2**64`)
+- `str` — UUID strings, in any standard textual form (hyphenated, 32-character hex, or URN)
+
+`uuid.UUID` instances are also accepted and converted to strings. `declare_point` validates the ID eagerly and raises `ValueError` for anything else, rather than letting the write fail later at the Qdrant server.
+
+To derive a stable point ID from an arbitrary string key (e.g. a document path or chunk key), use a deterministic UUID:
+
+```python
+import uuid
+
+point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"doc/{chunk_key}"))
+```
+
+## Payloads
+
+Point payloads are schemaless JSON objects. Any JSON-serializable Python data structure can be used:
+
+```python
+payload = {
+    "text": "Document content",
+    "metadata": {
+        "author": "Alice",
+        "tags": ["machine-learning", "nlp"],
+        "published": "2024-01-15",
+    },
+    "stats": {
+        "views": 1500,
+        "likes": 42,
+    },
+}
+```
+
+## Certified governed retrieval and revocation
+
+:::caution[Developer-preview assurance boundary]
+This is an internal adapter profile, not a production certification. Live
+deployment acceptance, trusted authenticated-context issuance, public
+declarative-handler/startup integration, and process-level durability remain
+open gates.
+:::
+
+The ordinary `CollectionTarget` remains the compatibility path. It preserves
+existing declarative reconciliation behavior, but a normal point deletion does
+not by itself provide the stronger “query-verified revocation” assurance.
+
+`CertifiedQdrantTarget` is the opt-in strict boundary. It adds:
+
+- deterministic UUID point IDs derived from source and chunk digests;
+- a connector-owned, nested `synor` payload with source, policy, tenant,
+  component, generation, serving, retention, chunk, and desired-content
+  fingerprints;
+- source-scoped queries that require tenant, policy revision, group-graph
+  revision, generation, and an opaque tenancy-scoped principal digest;
+- a `SuppressionBackedQdrantVerifier` that checks both writes and queries
+  against current Phase 2 suppression state and generation;
+- `wait=True` and `WriteOrdering.STRONG` for governed mutations;
+- `ReadConsistencyType.ALL` for guarded queries and negative read-back;
+- explicit `insert_only`/`update_only` writes, Qdrant's 30-second
+  operation-timeout parameter, caller-bounded metadata reads, and
+  connector-owned retry fingerprints so a conflicting retry cannot report a
+  false success;
+- target-native `synor.servable=false` before exact-ID deletion;
+- provider-side source-generation conditions on suppression and deletion, so a
+  delayed old action cannot erase a reauthorized point that reused the ID;
+- exact-ID retrieval after deletion, with bounded retries for stale replicas;
+- action-ID-correlated operation evidence, including the Qdrant delete
+  operation ID in the durable revocation receipt when Qdrant exposes one.
+
+At the verification instant, this contract proves logical non-return for that
+guarded operation through the supported query and read policy. It is not a
+timeless guarantee and does not attest that storage segments, snapshots, or
+backups have been physically erased. Qdrant's `consistency=all` read returns
+points present on all queried replicas; an empty result therefore proves
+non-return for that operation, not physical absence from each replica.
+
+### Supported contract
+
+The `qdrant-revocation-v1` profile requires:
+
+| Component | Runtime-accepted range | Repository validation |
+|---|---|---|
+| `qdrant-client` | `>=1.17.0,<1.19.0` | Unit and local integration tests use locked version `1.18.0`; prerelease/dev version strings fail closed. |
+| Qdrant server | Connected endpoint reports `>=1.17.0,<1.19.0` | `update_mode=insert_only/update_only` requires Qdrant 1.17+. Client/server minors may differ by at most one. Operators must pin and verify every production peer, including rolling-upgrade states; live tests are operator-gated. |
+| Collection | `green`, explicitly reported `write_consistency_factor == replication_factor`; when `replication_factor > 1`, active topology with no transfer/resharding | Missing RF/WCF values fail closed. Governed point writes, queries, deletes, and ACL transitions revalidate collection health and payload-index types. Replicated topology is inspected only when `replication_factor > 1`; the RF=1 adapter check does not inspect cluster-transfer state. |
+| Write contract | `wait=True`, `ordering=strong`, result `status=completed`, Qdrant operation timeout `30s` | Any acknowledged, malformed, timed-out, or failed result is retryable failure. `prevent_unoptimized=true` and incompatible strict-mode timeout, query-limit, batch, filter-condition-count, or condition-size limits are rejected. Mutation transport duration comes from finite `QdrantClient` configuration. |
+| Read contract | `consistency=all`, Qdrant operation timeout `30s` | Exact-ID retrieval, source-scoped guarded query, and filter verification use this setting. Metadata reads are caller-bounded to 30 seconds. This is a guarded non-return proof, not a per-replica physical-erasure proof. |
+
+Qdrant documents that `wait=false` acknowledges receipt without guaranteeing
+that an update is query-visible, while `wait=true` waits for completion. Its
+consistency documentation also distinguishes strong write ordering and
+the intersection semantics of `consistency=all` reads. See [Points: awaiting result](https://qdrant.tech/documentation/concepts/points/#awaiting-result),
+[Consistency guarantees](https://qdrant.tech/documentation/scaling/consistency-guarantees/),
+[Payload updates](https://qdrant.tech/documentation/concepts/payload/#update-payload),
+and [Horizontal scaling and Raft scope](https://qdrant.tech/documentation/scaling/horizontal-scaling/).
+
+`WCF == RF` rejects an unreplicated successful completion, but a failed point
+mutation may still have partially applied. Strong ordering is ordering, not a
+distributed transaction: Qdrant point operations do not use Raft for
+all-or-nothing data mutation. Synor therefore relies on idempotent,
+generation-fenced replay and verified serving suppression; it does not claim
+atomic mutation across points, shards, or replicas. In the capability profile,
+`atomic_serving_suppression` means the governed query boundary is centrally
+fenced and rechecked before results are released—not that Qdrant supplies a
+distributed transaction.
+
+For certified remote use, configure a finite client transport timeout. The
+repository live profile uses:
+
+```python
+client = qdrant.create_client(
+    "http://localhost:6333",
+    prefer_grpc=True,
+    timeout=30,
+)
+```
+
+The target passes `timeout=30` as Qdrant's operation-timeout parameter and
+caller-bounds metadata reads to 30 seconds. It cannot attest arbitrary client
+transport configuration. A timeout or unknown completion remains retryable
+because the mutation may apply later.
+
+Call `await target.provision_payload_indexes()` once when provisioning the
+collection, then `await target.capability_report()` during strict startup.
+Governed point writes, queries, deletes, and ACL transitions revalidate the
+capability report; it is not cached. Index provisioning and verified collection
+deletion use narrower version/provisioning or version/absence checks. The
+capability report requires typed payload indexes for every governed filter
+field, observes configured `WCF == RF`, and requires a green collection and
+healthy replica topology when `RF > 1`. The RF=1 adapter check does not inspect
+cluster-transfer state. Because preflight is not an atomic provider
+attestation, production acceptance must control configuration changes and
+exercise the live deployment topology.
+
+### Governed point declaration
+
+Governance identifiers must be opaque tokens or lowercase SHA-256 digests.
+Principal emails and display names must not be stored. The `synor` payload key
+is reserved and cannot be supplied by the caller.
+
+```python
+import hashlib
+from synor.connectors import qdrant
+
+def digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+lineage = qdrant.GovernedPointLineage(
+    source_digest=digest("stable-source-identity"),
+    source_revision="revision-v3",
+    policy_id="drive-policy",
+    policy_revision="policy-v7",
+    group_graph_revision="groups-v4",
+    tenant_digest=digest("tenant-a"),
+    owner_component_digest=digest("component-path"),
+    generation=7,
+    principal_digests=(digest("tenant-a:principal-17"),),
+)
+
+point = qdrant.governed_point(
+    lineage=lineage,
+    chunk_digest=digest("stable-chunk-0"),
+    vector=embedding.tolist(),
+    payload={"text": chunk_text},
+)
+
+# suppression_index is the Phase 2 StateStoreSuppressionIndex used by the
+# revocation runtime. The lineage generation must match current durable
+# suppression state in that index.
+verifier = qdrant.SuppressionBackedQdrantVerifier(suppression_index)
+strict_target = qdrant.CertifiedQdrantTarget(
+    client,
+    "documents",
+    lineage_authorizer=verifier.authorize_lineage,
+    query_context_verifier=verifier.verify_query_context,
+)
+await strict_target.provision_payload_indexes()
+await strict_target.capability_report()
+await strict_target.upsert_governed([point], mode="insert_only")
+```
+
+The resulting nested metadata contract is:
+
+```text
+synor.source_digest
+synor.source_revision
+synor.policy_id
+synor.policy_revision
+synor.group_graph_revision
+synor.tenant
+synor.owner_component
+synor.generation
+synor.principal_digests
+synor.servable
+synor.retention_state
+synor.contract_version
+synor.chunk_digest
+synor.content_fingerprint
+```
+
+### Guarded query
+
+`CertifiedQueryContext` is trusted input, not an authenticator. The provided
+Phase 2 verifier checks source, tenant, policy, group-revision, generation, and
+suppression-state freshness; it does not prove that the requester controls
+`principal_digest` or resolve current group membership. A trusted upstream
+authentication and policy layer must derive those values. For the documented
+`qdrant-revocation-v1` profile, bind both `lineage_authorizer` and
+`query_context_verifier` to the same trusted
+`SuppressionBackedQdrantVerifier`; arbitrary custom callbacks become part of
+the application's assurance boundary.
+
+The guarded target controls the mandatory filter, collection, and consistency
+parameters:
+
+```python
+context = qdrant.CertifiedQueryContext(
+    source_digest=digest("stable-source-identity"),
+    tenant_digest=digest("tenant-a"),
+    policy_id="drive-policy",
+    policy_revision="policy-v7",
+    group_graph_revision="groups-v4",
+    generation=7,
+    principal_digest=digest("tenant-a:principal-17"),
+)
+
+results = await strict_target.query_points(
+    context=context,
+    query=query_embedding.tolist(),
+    limit=10,
+    with_payload=True,
+)
+```
+
+This certified method deliberately exposes a smaller surface than Qdrant's
+universal query endpoint. It accepts `None`, a raw dense/multidense Python
+list, or a raw `SparseVector`. It rejects stored point IDs, model/inference
+objects, compound query models, `prefetch`, `lookup_from`, and unknown
+arguments. The
+[Qdrant universal-query contract](https://api.qdrant.tech/api-reference/search/query-points/)
+allows stored point IDs as query inputs, cross-collection vector lookup, and
+prefetch sub-requests. A top-level result filter does not authorize those query
+inputs, and compound prefetch stages have their own filters; merely attaching
+the mandatory filter at the top level is therefore not a safe tenant/ACL
+boundary. Hybrid or recommendation retrieval must not be added to the
+certified profile until every referenced point and every nested stage is
+recursively authorized and filtered.
+
+Direct `client.query_points()` calls bypass this guard and are outside the
+certified assurance boundary. Enforce that boundary in application structure
+and credentials; the connector cannot protect an unmanaged direct client.
+Calling `certified_query_filter()` directly only constructs the provider
+filter; it performs no authentication and no Phase 2 pre/post-await freshness
+checks.
+The current connector query is deliberately scoped to one source generation.
+A corpus-wide RAG query must fan out trusted source contexts or use the Phase 2
+retrieval guard; treating one scalar generation as authorization for unrelated
+sources is not supported.
+
+### Destructive revocation
+
+`verified_delete_sink()` returns the same core-compatible sink shape used by
+Synor reconciliation. For each bounded action batch it:
+
+1. validates the descriptor-to-point locator binding;
+2. validates the action/query generation and writes `synor.servable=false`
+   through an exact-ID + source-digest + source-generation condition;
+3. proves the certified filter no longer returns that point;
+4. deletes through the same provider-native source-generation fence;
+5. retrieves those IDs with `consistency=all`;
+6. retries stale positive reads;
+7. records correlated outcomes before returning success.
+
+Use the revocation runtime's outcome recorder as `record`. Optional
+`before_apply` and `after_apply` hooks bind the existing Synor precommit and
+target-applied lifecycle boundaries. If outcome or operation-evidence
+recording fails after Qdrant has converged, the sink raises and the idempotent
+action remains retryable. When Qdrant exposes a completed delete operation ID,
+it is carried through the verified outcome into the immutable runtime receipt;
+completed status is always required.
+
+### ACL narrowing
+
+`narrow_acl()` installs the new normalized policy metadata with
+`synor.servable=false`, reads back that exact lineage, verifies the guarded
+filter is suppressed, and only then enables serving. It finally proves both
+the newly allowed and explicitly denied principal cases. If the proof fails,
+it restores and verifies `synor.servable=false`; it never automatically
+re-enables the old ACL. The required `previous_generation` makes the initial
+rewrite provider-conditional, so a delayed ACL update cannot overwrite a newer
+authorization generation. On the first transition, the denied set must cover
+every principal removed from the stored ACL. A same-generation retry is
+accepted only when the stored governed lineage already matches the requested
+new lineage.
+
+### Collection deletion
+
+`delete_collection_verified()` retains compatibility deletion's strict
+exception handling and additionally verifies collection absence. Only a
+provider-confirmed REST `404` or gRPC `NOT_FOUND` is accepted as already
+absent. Authentication, authorization, transport, timeout, and server errors
+remain retryable failures.
+
+### Batching and acceptance tests
+
+Strict deletion defaults to at most 256 actions per provider mutation/read-back
+request and rejects request-batch limits above 4,096. Repository tests cover
+1/100/10,000/100,000 action planning shapes. This bounds each remote request;
+the current engine callback still materializes its incoming action sequence and
+final outcome sequence, so this benchmark is not an end-to-end constant-memory
+claim. The service-free benchmark is:
+
+```bash
+uv run python benchmarks/revocation/qdrant_benchmark.py
+```
+
+The live logical-absence test is intentionally operator-gated:
+
+```bash
+QDRANT_URL=http://localhost:6333 \
+  uv run pytest python/tests/connectors/test_qdrant_revocation.py \
+  -k live_certified_logical_absence
+```
+
+Run it only against an isolated test Qdrant instance. Cluster replica behavior
+must be accepted separately against the deployment topology that will carry
+the production claim.
+
+## Vector search
+
+For compatibility-mode vector search, use the Qdrant client directly. This
+does not provide the certified governed-query guarantee described above:
+
+```python
+from qdrant_client.http import models as qdrant_models
+
+# Get the registered client
+client = qdrant.create_client("http://localhost:6333")
+
+# Perform search
+results = client.query_points(
+    collection_name="documents",
+    query=query_embedding.tolist(),
+    limit=10,
+    with_payload=True,
+)
+
+for point in results.points:
+    print(f"Score: {point.score}, ID: {point.id}")
+    print(f"Payload: {point.payload}")
+```
+
+For named vectors:
+
+```python
+results = client.query_points(
+    collection_name="documents",
+    query=query_embedding.tolist(),
+    using="text",  # Search using the "text" vector
+    limit=10,
+)
+```
+
+For hybrid dense + sparse retrieval, use Qdrant's query API with prefetches and reciprocal rank fusion:
+
+```python
+results = client.query_points(
+    collection_name="hybrid_docs",
+    prefetch=[
+        qdrant_models.Prefetch(
+            query=query_dense_embedding.tolist(),
+            using="dense",
+            limit=100,
+        ),
+        qdrant_models.Prefetch(
+            query=qdrant_models.SparseVector(
+                indices=query_sparse_indices,
+                values=query_sparse_values,
+            ),
+            using="sparse",
+            limit=100,
+        ),
+    ],
+    query=qdrant_models.FusionQuery(fusion=qdrant_models.Fusion.RRF),
+    limit=10,
+    with_payload=True,
+)
+```

@@ -1,0 +1,32 @@
+<script>
+  const renderDiagrams = async () => {
+    const nodes = document.querySelectorAll<HTMLElement>(
+      '.mermaid:not([data-processed="true"])',
+    );
+    if (!nodes.length) return;
+
+    const { default: mermaid } = await import('mermaid');
+    mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'base',
+      themeVariables: {
+        fontFamily: 'Inter, ui-sans-serif, system-ui, sans-serif',
+        background: '#ffffff',
+        primaryColor: '#eee5ff',
+        primaryTextColor: '#19151f',
+        primaryBorderColor: '#6f45e8',
+        lineColor: '#ed5a3a',
+        secondaryColor: '#f2edff',
+        tertiaryColor: '#f7f3ea',
+      },
+    });
+    await mermaid.run({ nodes: Array.from(nodes) });
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', renderDiagrams, { once: true });
+  } else {
+    renderDiagrams();
+  }
+</script>

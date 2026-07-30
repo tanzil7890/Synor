@@ -1,0 +1,18 @@
+[project]
+name = "slides-to-speech"
+version = "0.1.0"
+description = "Synor example: turn slide decks into narrated, searchable indexes — vision LLM speaker notes, Pocket TTS, and LanceDB."
+requires-python = ">=3.11"
+dependencies = [
+    "synor[lancedb,sentence_transformers]>=0.1.0a1",
+    "lancedb>=0.34.0",    # queried directly in main.py; also pinned by the synor[lancedb] extra
+    "dspy>=3.0.0",        # vision LLM structured extraction (brings litellm + pydantic transitively)
+    "pymupdf>=1.24.0",
+    "pocket-tts>=2.1.0",
+    "pydub>=0.25.1",
+    "audioop-lts; python_version >= '3.13'",  # pydub needs stdlib audioop, removed in Python 3.13
+    "numpy>=2,<2.5",      # >=2 required by pocket-tts; <2.5 keeps NDArray vector-column resolution working
+]
+
+[tool.setuptools]
+packages = []

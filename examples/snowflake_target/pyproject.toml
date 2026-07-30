@@ -1,0 +1,13 @@
+[project]
+name = "snowflake-target"
+version = "0.1.0"
+description = "Synor example: write managed target rows to Snowflake."
+requires-python = ">=3.11"
+dependencies = [
+    "synor[snowflake]>=0.1.0a1",
+    "python-dotenv>=1.0.1",
+    "snowflake-connector-python>=3.0.0",
+]
+
+[tool.setuptools]
+py-modules = ["main"]

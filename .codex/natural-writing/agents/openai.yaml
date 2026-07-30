@@ -1,0 +1,4 @@
+interface:
+  display_name: "Natural Writing"
+  short_description: "Write natural prose without em dashes"
+  default_prompt: "Use $natural-writing to rewrite the user's text in a natural, specific voice while preserving meaning and technical precision, removing robotic phrasing, and avoiding em dashes."

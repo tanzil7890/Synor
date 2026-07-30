@@ -1,0 +1,73 @@
+---
+export interface Props {
+  id?: string;
+  title?: string;
+  closeAbove?: number;
+}
+const { id = 'mobileSheet', title = 'Menu', closeAbove = 900 } = Astro.props;
+---
+
+<div class="mobile-scrim" id={`${id}Scrim`} aria-hidden="true"></div>
+<aside
+  class="mobile-sheet"
+  id={id}
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby={`${id}Title`}
+  data-close-above={closeAbove}
+  hidden
+>
+  <header class="mobile-sheet-head">
+    <span id={`${id}Title`}>{title}</span>
+    <button class="mobile-close" type="button" aria-label="Close menu">×</button>
+  </header>
+  <slot />
+</aside>
+
+<script>
+  const initializeSheets = () => {
+    document.querySelectorAll<HTMLElement>('.mobile-sheet[id]').forEach((sheet) => {
+      if (sheet.dataset.initialized) return;
+      sheet.dataset.initialized = 'true';
+      const opener = document.querySelector<HTMLButtonElement>(
+        `[aria-controls="${sheet.id}"]`,
+      );
+      const scrim = document.getElementById(`${sheet.id}Scrim`);
+      const close = sheet.querySelector<HTMLButtonElement>('.mobile-close');
+      if (!opener || !scrim || !close) return;
+
+      const setOpen = (open: boolean) => {
+        sheet.hidden = !open;
+        sheet.classList.toggle('open', open);
+        scrim.classList.toggle('open', open);
+        scrim.setAttribute('aria-hidden', String(!open));
+        opener.setAttribute('aria-expanded', String(open));
+        document.body.style.overflow = open ? 'hidden' : '';
+        (open ? close : opener).focus();
+      };
+
+      opener.addEventListener('click', () => setOpen(sheet.hidden));
+      close.addEventListener('click', () => setOpen(false));
+      scrim.addEventListener('click', () => setOpen(false));
+      sheet.addEventListener('click', (event) => {
+        if ((event.target as Element).closest('a')) setOpen(false);
+      });
+      document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && !sheet.hidden) setOpen(false);
+      });
+
+      const query = window.matchMedia(
+        `(min-width: ${Number(sheet.dataset.closeAbove ?? 900) + 1}px)`,
+      );
+      query.addEventListener('change', (event) => {
+        if (event.matches) setOpen(false);
+      });
+    });
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initializeSheets, { once: true });
+  } else {
+    initializeSheets();
+  }
+</script>

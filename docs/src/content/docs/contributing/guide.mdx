@@ -1,0 +1,53 @@
+---
+title: "*Contributing* guide"
+description: >
+  Build and validate changes in the local alpha-stage Synor workspace.
+meta:
+  time: ~10 minutes
+---
+
+Synor is an alpha-stage open-source derivative. Public project accounts and
+support channels have not yet been verified, so contribution work currently
+happens through the local workspace and a maintainer-provided channel.
+
+## Prepare the workspace
+
+```sh
+uv sync --group dev
+uv run maturin develop
+```
+
+Read `AGENTS.md` at the repository root before changing code. It documents the
+architecture, public API boundaries, and the checks expected for each change.
+
+## Make a focused change
+
+- Keep the public API as small as the concrete use case permits.
+- Prefer end-to-end tests through user-facing APIs.
+- Preserve the declarative target-state model.
+- Do not add analytics, tracking pixels, or unverified project endpoints.
+- Update `CHANGES_FROM_UPSTREAM.md` when a release-facing change alters the
+  derivative's provenance or distribution.
+
+## Validate
+
+Choose the checks that match your change:
+
+```sh
+cargo test
+uv run mypy
+uv run pytest python/
+uv run ruff format --check .
+uv run ruff check .
+cargo fmt --check
+```
+
+For documentation:
+
+```sh
+cd docs
+npm run build
+```
+
+Before any public release, the maintainer must also run
+`python dev/check_release_readiness.py` and resolve every reported blocker.

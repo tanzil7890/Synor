@@ -1,0 +1,31 @@
+---
+interface Props {
+  d: string;
+  variant?: 'spark' | 'success' | 'quiet';
+  label?: string;
+  labelX?: number;
+  labelY?: number;
+  class?: string;
+}
+const {
+  d,
+  variant = 'spark',
+  label,
+  labelX,
+  labelY,
+  class: extraClass = '',
+} = Astro.props;
+
+const variantClass = variant === 'success' ? 'dg-flow--success' : variant === 'quiet' ? 'dg-flow--quiet' : '';
+const marker = variant === 'success'
+  ? 'url(#dg-arrow-success)'
+  : variant === 'quiet'
+    ? 'url(#dg-arrow-quiet)'
+    : 'url(#dg-arrow-spark)';
+---
+<g class={extraClass}>
+  <path class={`dg-flow ${variantClass}`.trim()} d={d} marker-end={marker} />
+  {label && labelX !== undefined && labelY !== undefined && (
+    <text class="dg-label dg-label--caps" x={labelX} y={labelY} text-anchor="middle">{label}</text>
+  )}
+</g>

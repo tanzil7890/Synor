@@ -1,0 +1,182 @@
+---
+title: Build a local *note catalog*
+description: >
+  Make a first run, make the same run again, then change one note and watch
+  Synor refresh only the outcome that moved.
+---
+import SecondRun from '/src/components/diagrams/concepts/SecondRun.astro';
+import OwnershipLedger from '/src/components/diagrams/concepts/OwnershipLedger.astro';
+
+This tutorial stays on your machine. It reads two Markdown notes, derives a
+small JSON record for each one, and writes the records to a local catalog.
+There is no model API, database server, or network request.
+
+## What you will observe
+
+<SecondRun />
+
+The first run catalogs both notes. The next run reuses both results. After you
+edit one note, Synor runs one work unit and repairs one JSON file.
+
+That sequence is the point of the tutorial. A pipeline that works once is easy.
+Synor is designed for the runs after the first one.
+
+## Prepare the local build
+
+From the repository root:
+
+```bash
+. "$HOME/.cargo/env"
+uv sync --group build-test
+uv run maturin develop
+```
+
+Confirm that Python loads this workspace:
+
+```bash
+.venv/bin/python -c "import synor; print(synor.__file__)"
+```
+
+The printed path should point into this repository.
+
+## Check and preview the example
+
+Move into the local example, diagnose the setup, and preview the target
+actions:
+
+```bash
+cd examples/local_note_catalog
+../../.venv/bin/synor doctor main.py --offline
+../../.venv/bin/synor plan main.py --offline
+../../.venv/bin/synor diff main.py --offline
+```
+
+Nothing in the plan or diff is applied. Run the update when the proposal looks
+right:
+
+```bash
+../../.venv/bin/synor update main.py --offline
+```
+
+Inspect the outcomes:
+
+```bash
+ls catalog
+cat catalog/garden.json
+```
+
+Run the update command again. The report should show both
+`catalog_note` work units as unchanged.
+
+Now edit `notes/deploy.md`, save it, and run the update again. Only the deploy
+note should refresh.
+
+Ask Synor to summarize the local ownership ledger and latest run evidence:
+
+```bash
+../../.venv/bin/synor explain main.py --offline
+```
+
+The controlled commands retain metadata-only manifests and audit events under
+`.synor/runs/`. They do not record the note bodies.
+
+## Read the pipeline
+
+The record builder is ordinary Python:
+
+```python title="main.py"
+def _note_record(text: str) -> dict[str, object]:
+    lines = [line.strip() for line in text.splitlines()]
+    title = next(
+        (line.removeprefix("# ").strip() for line in lines if line.startswith("# ")),
+        "Untitled note",
+    )
+    tags_line = next(
+        (line.removeprefix("tags:").strip() for line in lines if line.startswith("tags:")),
+        "",
+    )
+    return {
+        "title": title,
+        "tags": [tag.strip() for tag in tags_line.split(",") if tag.strip()],
+        "word_count": len(text.split()),
+    }
+```
+
+`catalog_note` is one reusable work unit. The memo flag means its result can be
+reused when the file and function code have not changed:
+
+```python title="main.py"
+@syn.fn(memo=True)
+async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
+    record = _note_record(await file.read_text())
+    localfs.declare_file(
+        catalog_dir / f"{file.file_path.path.stem}.json",
+        json.dumps(record, indent=2) + "\n",
+        create_parent_dirs=True,
+    )
+```
+
+`declare_file` is a target-state call. It says that this work unit owns a file
+with this path and content. It does not contain separate insert, update, or
+delete branches.
+
+The main function discovers notes and gives each one a stable work path:
+
+```python title="main.py"
+@syn.fn
+async def app_main(notes_dir: pathlib.Path, catalog_dir: pathlib.Path) -> None:
+    notes = localfs.walk_dir(
+        notes_dir,
+        recursive=True,
+        path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
+    )
+    await syn.mount_each(catalog_note, notes.items(), catalog_dir)
+```
+
+`mount_each` creates one processing component per keyed item. Here the note’s
+relative path is the key, so `notes/garden.md` keeps the same identity between
+runs.
+
+Finally, the App binds the run boundary to concrete directories:
+
+```python title="main.py"
+app = syn.App(
+    syn.AppConfig(name="LocalNoteCatalog"),
+    app_main,
+    notes_dir=pathlib.Path("./notes"),
+    catalog_dir=pathlib.Path("./catalog"),
+)
+```
+
+## See ownership handle removal
+
+<OwnershipLedger />
+
+Temporarily move one note outside the `*.md` pattern:
+
+```bash
+mv notes/deploy.md notes/deploy.md.off
+../../.venv/bin/synor update main.py --offline
+```
+
+`catalog/deploy.json` is removed. The work path for the deploy note disappeared,
+so the outcome it owned no longer belongs in the catalog.
+
+Restore the note when you are done:
+
+```bash
+mv notes/deploy.md.off notes/deploy.md
+../../.venv/bin/synor update main.py --offline
+```
+
+## Continue from here
+
+- Read [The second-run model](../programming_guide/core_concepts) for the
+  execution and ownership vocabulary.
+- Read [Review a run before it applies](../programming_guide/controlled_runs)
+  for offline policy, preview semantics, manifests, and the Python control API.
+- Read [Choose work units](../programming_guide/processing_component) before
+  deciding whether one component should represent a file, row, page, or event.
+- Read [Declare outcomes](../programming_guide/target_state) for container and
+  child target-state APIs.
+- Browse [Connect systems](../connectors) when the local example is clear.
