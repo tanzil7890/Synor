@@ -9,10 +9,12 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Generator
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from typing import TYPE_CHECKING, Any, Generator
 import pytest
+from synor.cli import AppSpecifier, _parse_app_target
 
 if TYPE_CHECKING:
     from synor._internal.revocation_model import RevocationCase
@@ -46,6 +48,29 @@ _SKIP_WINDOWS_FREE_THREADED_MULTI_ENV = pytest.mark.skipif(
     sys.platform == "win32" and _is_free_threaded_python(),
     reason="multi-environment CLI update is flaky on Windows free-threaded Python",
 )
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (
+            r"C:\project\main.py",
+            AppSpecifier(module_ref=r"C:\project\main.py"),
+        ),
+        (
+            r"C:\project\main.py:SelectedApp@production",
+            AppSpecifier(
+                module_ref=r"C:\project\main.py",
+                app_name="SelectedApp",
+                env_name="production",
+            ),
+        ),
+    ],
+)
+def test_parse_app_target_preserves_windows_drive(
+    target: str, expected: AppSpecifier
+) -> None:
+    assert _parse_app_target(target) == expected
 
 
 def run_cli(

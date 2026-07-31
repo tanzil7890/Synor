@@ -409,10 +409,10 @@ async def run_fake_scenario(
     point_ids_before_partial: list[frozenset[str]] = []
     partial_cases: list[revocation.RevocationCase] = []
 
-    with tempfile.TemporaryDirectory(prefix="synor-revocation-demo-") as engine_root:
-        environment = syn.Environment(
-            syn.Settings(db_path=pathlib.Path(engine_root) / "engine")
-        )
+    async def _run_controlled_apps(
+        engine_root: pathlib.Path,
+    ) -> tuple[syn.ExecutionReport, syn.ExecutionReport]:
+        environment = syn.Environment(syn.Settings(db_path=engine_root / "engine"))
 
         @syn.fn
         async def apply_revocation() -> None:
@@ -509,6 +509,12 @@ async def run_fake_scenario(
         second_report = await runtime.run(
             replay_app,
             app_target="examples/provable_index_revocation/main.py",
+        )
+        return first_report, second_report
+
+    with tempfile.TemporaryDirectory(prefix="synor-revocation-demo-") as engine_root:
+        first_report, second_report = await _run_controlled_apps(
+            pathlib.Path(engine_root)
         )
 
     if (

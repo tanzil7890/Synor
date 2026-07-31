@@ -19,6 +19,7 @@ from dotenv import find_dotenv, load_dotenv
 import synor as syn
 from synor._internal import core as _core
 from synor._internal.app import App
+from synor._internal.app_target import split_app_target
 from synor._internal.environment import (
     Environment,
     EnvironmentInfo,
@@ -125,8 +126,7 @@ def _parse_app_target(specifier: str) -> AppSpecifier:
         './main.py:app2@alpha' -> AppSpecifier('./main.py', 'app2', 'alpha')
         'mymodule:my_app@default' -> AppSpecifier('mymodule', 'my_app', 'default')
     """
-    parts = specifier.split(":", 1)
-    module_ref = parts[0]
+    module_ref, app_part = split_app_target(specifier)
 
     if not module_ref:
         raise click.BadParameter(
@@ -135,10 +135,9 @@ def _parse_app_target(specifier: str) -> AppSpecifier:
             param_hint="APP_TARGET",
         )
 
-    if len(parts) == 1:
+    if app_part is None:
         return AppSpecifier(module_ref=module_ref)
 
-    app_part = parts[1]
     if not app_part:
         return AppSpecifier(module_ref=module_ref)
 
