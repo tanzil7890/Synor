@@ -8,6 +8,7 @@ import datetime
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import typing
 
@@ -512,7 +513,12 @@ async def run_fake_scenario(
         )
         return first_report, second_report
 
-    with tempfile.TemporaryDirectory(prefix="synor-revocation-demo-") as engine_root:
+    # On Windows, LMDB keeps files open, so we need to ignore cleanup errors
+    ignore_cleanup = sys.platform == "win32"
+
+    with tempfile.TemporaryDirectory(
+        prefix="synor-revocation-demo-", ignore_cleanup_errors=ignore_cleanup
+    ) as engine_root:
         first_report, second_report = await _run_controlled_apps(
             pathlib.Path(engine_root)
         )
