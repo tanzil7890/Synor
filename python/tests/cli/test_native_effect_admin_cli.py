@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import pathlib
@@ -86,6 +87,14 @@ def test_native_effect_export_writes_private_metadata_archive(
     if os.name != "nt":
         assert stat.S_IMODE(archive.stat().st_mode) == 0o600
     assert "action:effect:1" not in result.output
+    debug_summary = asyncio.run(
+        cli_module._native_effect_export(
+            source,
+            "search-index",
+            tmp_path / "debug-native-effects.json",
+        )
+    )
+    assert "action:effect:1" not in repr(debug_summary)
 
 
 def test_native_effect_export_rejects_archive_inside_database(
@@ -222,6 +231,7 @@ def test_native_effect_compaction_requires_confirmation_and_archives_exact_candi
     payload = json.loads(archive.read_text())
     assert payload["compaction_candidate_evidence_ids"] == ["old"]
     assert payload["retention"]["unknown_timestamp_records"] == "retained"
+    assert "action:old" not in compacted.output
 
 
 def test_native_effect_downgrade_archives_before_publishing_copy(
@@ -299,3 +309,4 @@ def test_native_effect_downgrade_archives_before_publishing_copy(
     assert archive_payload["purpose"] == "downgrade_preparation"
     assert archive_payload["downgrade"]["source_database_modified"] is False
     assert archive_payload["apps"][0]["effects"][0]["evidence_id"] == "effect:1"
+    assert "action:effect:1" not in result.output

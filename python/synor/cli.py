@@ -1036,6 +1036,29 @@ def _command_state_store() -> syn.StateStore:
 _NATIVE_EFFECT_ARCHIVE_SCHEMA_VERSION = 1
 
 
+class _NativeEffectArchiveSummary(NamedTuple):
+    archive_sha256: str
+    app_count: int
+    effect_count: int
+
+
+class _NativeEffectCompactionSummary(NamedTuple):
+    archive: _NativeEffectArchiveSummary
+    requested: int
+    deleted: int
+    protected: int
+    already_absent: int
+
+
+class _NativeEffectDowngradeSummary(NamedTuple):
+    archive: _NativeEffectArchiveSummary
+    removed_schema_markers: int
+    removed_effects: int
+    removed_obligation_cursors: int
+    removed_lineage_cursors: int
+    removed_live_generation_keys: int
+
+
 def _native_effect_environment(db_path: pathlib.Path) -> Environment:
     from synor._internal.setting import Settings
 
@@ -1137,6 +1160,17 @@ def _native_effect_archive_payload(
     return payload
 
 
+def _native_effect_archive_summary(
+    archive: Mapping[str, Any],
+    digest: str,
+) -> _NativeEffectArchiveSummary:
+    return _NativeEffectArchiveSummary(
+        archive_sha256=digest,
+        app_count=int(archive["app_count"]),
+        effect_count=int(archive["effect_count"]),
+    )
+
+
 def _fsync_directory(path: pathlib.Path) -> None:
     if os.name == "nt":
         # Windows does not expose directory handles through os.open().
@@ -1202,7 +1236,7 @@ async def _native_effect_export(
     db_path: pathlib.Path,
     app_name: str,
     output: pathlib.Path,
-) -> tuple[dict[str, Any], str]:
+) -> _NativeEffectArchiveSummary:
     output = _resolve_operator_path_outside_database(
         db_path,
         output,
@@ -1223,7 +1257,7 @@ async def _native_effect_export(
         retention={"policy": "indefinite"},
     )
     digest = _write_private_json_archive(output, archive)
-    return archive, digest
+    return _native_effect_archive_summary(archive, digest)
 
 
 async def _native_effect_compact(
@@ -1231,7 +1265,7 @@ async def _native_effect_compact(
     app_name: str,
     archive_path: pathlib.Path,
     completed_before: str,
-) -> tuple[dict[str, Any], str, _core._NativeEffectCompactionResult]:
+) -> _NativeEffectCompactionSummary:
     archive_path = _resolve_operator_path_outside_database(
         db_path,
         archive_path,
@@ -1271,14 +1305,20 @@ async def _native_effect_compact(
         app_name,
         candidates,
     )
-    return archive, digest, result
+    return _NativeEffectCompactionSummary(
+        archive=_native_effect_archive_summary(archive, digest),
+        requested=result.requested,
+        deleted=result.deleted,
+        protected=result.protected,
+        already_absent=result.already_absent,
+    )
 
 
 async def _prepare_native_downgrade(
     db_path: pathlib.Path,
     output_db: pathlib.Path,
     archive_path: pathlib.Path,
-) -> tuple[dict[str, Any], str, _core._NativeEffectDowngradeResult]:
+) -> _NativeEffectDowngradeSummary:
     source = db_path.resolve()
     output = output_db.resolve()
     archive = _resolve_operator_path_outside_database(
@@ -1353,7 +1393,14 @@ async def _prepare_native_downgrade(
         finally:
             os.close(lock_descriptor)
             publish_lock.unlink(missing_ok=True)
-        return archive_payload, archive_digest, result
+        return _NativeEffectDowngradeSummary(
+            archive=_native_effect_archive_summary(archive_payload, archive_digest),
+            removed_schema_markers=result.removed_schema_markers,
+            removed_effects=result.removed_effects,
+            removed_obligation_cursors=result.removed_obligation_cursors,
+            removed_lineage_cursors=result.removed_lineage_cursors,
+            removed_live_generation_keys=result.removed_live_generation_keys,
+        )
     except Exception:
         if staging.exists():
             shutil.rmtree(staging)
@@ -2330,7 +2377,7 @@ def native_effects_export(
     """Export a metadata-only native-effect archive without mutation."""
 
     try:
-        archive, digest = asyncio.run(_native_effect_export(db_path, app_name, output))
+        exported = asyncio.run(_native_effect_export(db_path, app_name, output))
     except click.ClickException:
         raise
     except Exception as error:  # noqa: BLE001 - translate the native boundary for Click
@@ -2339,15 +2386,15 @@ def native_effects_export(
         "schema": "synor.native-effects.export-result",
         "schema_version": 1,
         "archive": str(output.resolve()),
-        "archive_sha256": digest,
-        "effect_count": archive["effect_count"],
+        "archive_sha256": exported.archive_sha256,
+        "effect_count": exported.effect_count,
     }
     if json_output:
         click.echo(json.dumps(result, indent=2, sort_keys=True))
     else:
         click.echo(f"Exported {result['effect_count']} native effect record(s).")
         click.echo(f"Archive: {result['archive']}")
-        click.echo(f"SHA-256: {digest}")
+        click.echo(f"SHA-256: {exported.archive_sha256}")
 
 
 @native_effects_group.command("compact")
@@ -2392,7 +2439,7 @@ def native_effects_compact(
             "Pass --confirm-compaction to modify native evidence."
         )
     try:
-        archive, digest, compacted = asyncio.run(
+        compacted = asyncio.run(
             _native_effect_compact(
                 db_path,
                 app_name,
@@ -2410,8 +2457,8 @@ def native_effects_compact(
         "schema": "synor.native-effects.compaction-result",
         "schema_version": 1,
         "archive": str(archive_path.resolve()),
-        "archive_sha256": digest,
-        "archived_effect_count": archive["effect_count"],
+        "archive_sha256": compacted.archive.archive_sha256,
+        "archived_effect_count": compacted.archive.effect_count,
         "requested": compacted.requested,
         "deleted": compacted.deleted,
         "protected": compacted.protected,
@@ -2427,7 +2474,7 @@ def native_effects_compact(
             f"already_absent={result['already_absent']}"
         )
         click.echo(f"Archive: {result['archive']}")
-        click.echo(f"SHA-256: {digest}")
+        click.echo(f"SHA-256: {compacted.archive.archive_sha256}")
 
 
 @native_effects_group.command("prepare-downgrade")
@@ -2471,7 +2518,7 @@ def native_effects_prepare_downgrade(
             "Pass --confirm-downgrade to create a downgrade copy."
         )
     try:
-        archive, digest, prepared = asyncio.run(
+        prepared = asyncio.run(
             _prepare_native_downgrade(
                 db_path,
                 output_db,
@@ -2489,9 +2536,9 @@ def native_effects_prepare_downgrade(
         "schema_version": 1,
         "output_database": str(output_db.resolve()),
         "archive": str(archive_path.resolve()),
-        "archive_sha256": digest,
-        "app_count": archive["app_count"],
-        "archived_effect_count": archive["effect_count"],
+        "archive_sha256": prepared.archive.archive_sha256,
+        "app_count": prepared.archive.app_count,
+        "archived_effect_count": prepared.archive.effect_count,
         "removed_schema_markers": prepared.removed_schema_markers,
         "removed_effects": prepared.removed_effects,
         "removed_obligation_cursors": prepared.removed_obligation_cursors,
@@ -2507,7 +2554,7 @@ def native_effects_prepare_downgrade(
         )
         click.echo(f"Database copy: {result['output_database']}")
         click.echo(f"Archive: {result['archive']}")
-        click.echo(f"SHA-256: {digest}")
+        click.echo(f"SHA-256: {prepared.archive.archive_sha256}")
 
 
 @cli.group("revocations")
