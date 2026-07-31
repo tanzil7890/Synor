@@ -206,7 +206,7 @@ def enable_strict_serialize() -> None:
 class _StrictPickler(pickle.Pickler):
     """Pickler that validates every object's type is in the unpickle allow-list."""
 
-    def reducer_override(self, obj: object) -> object:
+    def reducer_override(self, obj: object) -> Any:
         # When obj is a class being pickled as a global reference, check it directly.
         if isinstance(obj, type):
             if obj.__module__ != "builtins":

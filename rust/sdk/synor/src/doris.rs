@@ -25,11 +25,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use sqlx::MySqlPool;
 use sqlx::mysql::{MySqlConnectOptions, MySqlPoolOptions};
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::ctx::{ContextKey, ContextStore, Ctx};
 use crate::error::{Error, Result};

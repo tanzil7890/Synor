@@ -147,4 +147,3 @@ Synor keeps the namespace in sync with your files and does the **minimum work** 
 The same machinery covers **logic** changes: tune the chunk size or swap the embedding model, and Synor applies only the difference. A catch-up run (`synor update main`) does this once and exits; live mode (`synor update -L main`) keeps watching.
 
 ## Run it
-

@@ -6,9 +6,9 @@ use crate::{
     stable_path::{PyStableKey, PyStablePath},
 };
 
+use pyo3_async_runtimes::tokio::future_into_py;
 use synor_core::engine::live_component::LiveComponentController;
 use synor_py_utils::from_py_future;
-use pyo3_async_runtimes::tokio::future_into_py;
 
 #[pyclass(name = "LiveComponentController", skip_from_py_object)]
 #[derive(Clone)]

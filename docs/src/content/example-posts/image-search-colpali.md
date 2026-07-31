@@ -210,4 +210,3 @@ Swap the ColPali model and Synor re-embeds everything against the new space; lea
 ## Run it
 
 The full, runnable example is in this local workspace: examples/image_search_colpali. For the lighter, single-vector version that fits more images in memory and indexes faster, see the CLIP image search example; for the text equivalent, see Semantic Search 101.
-

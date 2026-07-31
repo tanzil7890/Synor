@@ -80,4 +80,3 @@ ls output_patients/
 Each file is a fully populated, schema-validated patient record — the same shape every time. Edit the BAML schema or swap the model, run `baml generate` again, and the next `synor update main.py` re-extracts only what changed.
 
 ---
-

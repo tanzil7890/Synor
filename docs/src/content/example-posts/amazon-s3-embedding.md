@@ -132,4 +132,3 @@ Synor keeps the index in sync with the bucket and does the **minimum work** to g
 Because S3 is catch-up only, you re-run `synor update main` to pick up bucket changes; the engine still applies just the difference.
 
 ## Run it
-

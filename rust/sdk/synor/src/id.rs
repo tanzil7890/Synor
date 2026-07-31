@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::Serialize;
+use synor_utils::fingerprint::Fingerprint;
 use uuid::Uuid;
 
 use crate::ctx::Ctx;

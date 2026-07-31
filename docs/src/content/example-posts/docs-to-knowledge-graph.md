@@ -364,4 +364,3 @@ This is where the declarative model pays for itself. You never compute a diff or
 The full, runnable example is in this local workspace: examples/docs_to_knowledge_graph.
 
 One natural next step: the LLM will sometimes name the same concept two ways ("PostgreSQL" vs "Postgres"). The meeting notes graph example adds an embedding + LLM entity-resolution pass that collapses near-duplicates — it drops into this pipeline between the two phases. For a bigger end-to-end graph build (transcription, multi-entity schemas, polymorphic edges), see Turn Podcasts into a Knowledge Graph.
-

@@ -120,4 +120,3 @@ On the sample set, *"revenue growth"* ranks the two financial-report images at t
 ## Run it
 
 The full, runnable example is in this local workspace: examples/multi_format_indexing. For the image-only version with a web UI, see Search Images by Text · ColPali; for a text-extraction pipeline over PDFs instead, see Semantic Search over PDFs.
-

@@ -91,4 +91,3 @@ for row in db.open_table("employees").to_arrow().to_pylist():
 Every `sku` message is a row in `products`, every `emp_id` message a row in `employees` — keyed exactly as it was on the topic, so re-consuming the same key updates the row in place rather than duplicating.
 
 ---
-

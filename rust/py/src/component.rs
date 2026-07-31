@@ -11,6 +11,7 @@ use crate::{
 
 use crate::context::{PyComponentProcessorContext, PyFnCallContext};
 use crate::fingerprint::PyFingerprint;
+use pyo3_async_runtimes::tokio::future_into_py;
 use synor_core::engine::{
     component::{
         ComponentExecutionHandle, ComponentMountRunHandle, ComponentProcessor,
@@ -19,7 +20,6 @@ use synor_core::engine::{
     context::{ComponentProcessorContext, MemoStatesPayload},
     runtime::get_runtime,
 };
-use pyo3_async_runtimes::tokio::future_into_py;
 
 /// Python wrapper for ComponentProcessorInfo that shares the same Arc instance.
 #[pyclass(name = "ComponentProcessorInfo", from_py_object)]

@@ -10,8 +10,8 @@ use crate::prelude::*;
 use crate::runtime::{PyAsyncContext, PyCallback};
 
 use async_trait::async_trait;
-use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 use pyo3_async_runtimes::tokio::future_into_py;
+use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 
 /// Options for batching behavior.
 #[pyclass(name = "BatchingOptions", from_py_object)]

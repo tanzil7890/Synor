@@ -8,9 +8,9 @@ use crate::stable_path::PyStableKey;
 use crate::app::PyStatsGroupHandle;
 use crate::value::PyStoredValue;
 use crate::{environment::PyEnvironment, stable_path::PyStablePath};
-use synor_core::engine::context::{ComponentProcessorContext, FnCallContext};
 use pyo3::types::PyDict;
 use pyo3_async_runtimes::tokio::future_into_py;
+use synor_core::engine::context::{ComponentProcessorContext, FnCallContext};
 
 #[pyclass(name = "ComponentProcessorContext", from_py_object)]
 #[derive(Clone)]

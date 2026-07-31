@@ -20,11 +20,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use synor_utils::fingerprint::Fingerprint;
 use rskafka::client::partition::{Compression, PartitionClient, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
 use serde::{Deserialize, Serialize};
+use synor_utils::fingerprint::Fingerprint;
 use tokio::sync::OnceCell;
 
 use crate::ctx::Ctx;

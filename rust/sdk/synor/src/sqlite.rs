@@ -15,11 +15,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::ctx::{ContextKey, Ctx};
 use crate::error::{Error, Result};

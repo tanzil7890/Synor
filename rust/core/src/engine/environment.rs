@@ -5,10 +5,10 @@ use crate::{
     state_store::{AppStore, Storage, StorageSettings, WriteTxn},
 };
 
-use synor_utils::fingerprint::Fingerprint;
 use futures::future::BoxFuture;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
+use synor_utils::fingerprint::Fingerprint;
 
 /// User-facing environment settings. Currently just storage configuration;
 /// re-exported as a type alias so existing call sites continue to work.

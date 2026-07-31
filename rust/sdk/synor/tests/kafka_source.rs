@@ -17,10 +17,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use synor::{App, Result, UpdateOptions, kafka};
 use rskafka::client::ClientBuilder;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::record::Record;
+use synor::{App, Result, UpdateOptions, kafka};
 
 fn brokers() -> Option<Vec<String>> {
     let raw = std::env::var("KAFKA_BOOTSTRAP_SERVERS").ok()?;

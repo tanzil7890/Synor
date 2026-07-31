@@ -226,12 +226,9 @@ async fn s3_source_mount_each_pipeline_when_available() -> Result<()> {
     )
     .await;
 
-    static S3: std::sync::LazyLock<synor::ContextKey<S3Client>> =
-        std::sync::LazyLock::new(|| {
-            synor::ContextKey::new_with_state("s3_test_client", |c: &S3Client| {
-                c.state_id().to_string()
-            })
-        });
+    static S3: std::sync::LazyLock<synor::ContextKey<S3Client>> = std::sync::LazyLock::new(|| {
+        synor::ContextKey::new_with_state("s3_test_client", |c: &S3Client| c.state_id().to_string())
+    });
 
     #[synor::function(memo)]
     async fn process(ctx: &synor::Ctx, file: &S3File) -> Result<usize> {

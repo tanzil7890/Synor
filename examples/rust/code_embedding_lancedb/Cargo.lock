@@ -883,167 +883,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "synor"
-version = "0.1.0-alpha.1"
-dependencies = [
- "arrow-array",
- "arrow-schema",
- "async-trait",
- "bytes",
- "synor_code_ast",
- "synor_core",
- "synor_macros",
- "synor_ops_text",
- "synor_utils",
- "encoding_rs",
- "fastembed",
- "futures",
- "globset",
- "lancedb",
- "linkme",
- "rmp-serde",
- "rustc-hash",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "synor_code_ast"
-version = "0.1.0-alpha.1"
-dependencies = [
- "regex",
- "serde",
- "tree-sitter",
- "tree-sitter-astro-next",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cmake",
- "tree-sitter-cpp",
- "tree-sitter-css",
- "tree-sitter-elm",
- "tree-sitter-fortran",
- "tree-sitter-go",
- "tree-sitter-hcl",
- "tree-sitter-html",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-julia",
- "tree-sitter-kotlin-ng",
- "tree-sitter-language",
- "tree-sitter-md",
- "tree-sitter-pascal",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-r",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-scala",
- "tree-sitter-sequel",
- "tree-sitter-solidity",
- "tree-sitter-svelte-ng",
- "tree-sitter-swift",
- "tree-sitter-toml-ng",
- "tree-sitter-typescript",
- "tree-sitter-vue-next",
- "tree-sitter-xml",
- "tree-sitter-yaml",
- "unicase",
-]
-
-[[package]]
-name = "synor_core"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "synor_utils",
- "env_logger",
- "futures",
- "heed",
- "indexmap 2.14.0",
- "nix",
- "page_size",
- "parking_lot",
- "rand 0.9.4",
- "rmp",
- "rmp-serde",
- "rpds",
- "serde",
- "serde_bytes",
- "serde_with",
- "storekey",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "synor_macros"
-version = "0.1.0-alpha.1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "synor_ops_text"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "synor_code_ast",
- "globset",
- "regex",
- "tree-sitter",
- "unicase",
-]
-
-[[package]]
-name = "synor_utils"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "blake2",
- "futures",
- "governor",
- "hashlink",
- "hex",
- "indexmap 2.14.0",
- "itertools 0.14.0",
- "rand 0.9.4",
- "reqwest",
- "rmp-serde",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_with",
- "storekey",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "code_embedding_lancedb"
 version = "0.1.0"
 dependencies = [
- "synor",
  "dotenvy",
  "serde",
+ "synor",
  "tokio",
 ]
 
@@ -3022,7 +2867,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -5593,7 +5437,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -6333,6 +6176,160 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3dbc01390fc626ce8d1cffe3376ded2b72a11bb70e1c75f404a210e4daa4def2"
 dependencies = [
  "crossbeam-queue",
+]
+
+[[package]]
+name = "synor"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "bytes",
+ "encoding_rs",
+ "fastembed",
+ "futures",
+ "globset",
+ "lancedb",
+ "linkme",
+ "rmp-serde",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "synor_code_ast",
+ "synor_core",
+ "synor_macros",
+ "synor_ops_text",
+ "synor_utils",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "synor_code_ast"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "regex",
+ "serde",
+ "tree-sitter",
+ "tree-sitter-astro-next",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cmake",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-elm",
+ "tree-sitter-fortran",
+ "tree-sitter-go",
+ "tree-sitter-hcl",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-julia",
+ "tree-sitter-kotlin-ng",
+ "tree-sitter-language",
+ "tree-sitter-md",
+ "tree-sitter-pascal",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-r",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-sequel",
+ "tree-sitter-solidity",
+ "tree-sitter-svelte-ng",
+ "tree-sitter-swift",
+ "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
+ "tree-sitter-vue-next",
+ "tree-sitter-xml",
+ "tree-sitter-yaml",
+ "unicase",
+]
+
+[[package]]
+name = "synor_core"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "env_logger",
+ "futures",
+ "heed",
+ "indexmap 2.14.0",
+ "nix",
+ "page_size",
+ "parking_lot",
+ "rand 0.9.4",
+ "rmp",
+ "rmp-serde",
+ "rpds",
+ "serde",
+ "serde_bytes",
+ "serde_with",
+ "storekey",
+ "synor_utils",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "synor_macros"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "synor_ops_text"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "globset",
+ "regex",
+ "synor_code_ast",
+ "tree-sitter",
+ "unicase",
+]
+
+[[package]]
+name = "synor_utils"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "blake2",
+ "futures",
+ "governor",
+ "hashlink",
+ "hex",
+ "indexmap 2.14.0",
+ "itertools 0.14.0",
+ "rand 0.9.4",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_with",
+ "storekey",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

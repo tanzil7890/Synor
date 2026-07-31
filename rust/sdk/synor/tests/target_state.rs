@@ -9,12 +9,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use synor::{
     App, ChildTargetDef, Result, StableKey, TargetAction, TargetActionSink,
     TargetChildInvalidation, TargetHandler, TargetReconcileOutput, TargetStateProvider,
     declare_target_state, mount_target, register_root_target_states_provider,
 };
-use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, sleep};
 
 // ---------------------------------------------------------------------------

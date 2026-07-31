@@ -94,4 +94,3 @@ RETURN DISTINCT rec.title
 On the sample data, recommending for a pen surfaces the notepad and the multipurpose paper — exactly the cross-sell you'd want.
 
 ---
-

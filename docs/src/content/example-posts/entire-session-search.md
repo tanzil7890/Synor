@@ -310,4 +310,3 @@ The same machinery covers **logic** changes too: tune the chunk size or swap the
 ## Run it
 
 The full, runnable example is in this local workspace: examples/entire_session_search. If your inputs are plain text or Markdown rather than session checkpoints, Semantic Search 101 is the same flow without the per-file routing; to search a folder of PDFs, see Semantic Search over PDFs.
-

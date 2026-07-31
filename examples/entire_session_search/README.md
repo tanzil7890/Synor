@@ -90,4 +90,3 @@ python main.py "how did I fix the auth bug"
 Results print which session and content type matched, so a transcript turn, a prompt, and a context chunk are all distinguishable. This example keeps it minimal and doesn't declare a vector index, so queries do a sequential scan — fine for a personal history. For a larger corpus, add `emb_table.declare_vector_index(column="embedding")` exactly as Semantic Search 101 does.
 
 ---
-

@@ -1098,10 +1098,9 @@ mod tests {
 
     #[test]
     fn parse_fn_params_rejects_multiple_ctx_params() {
-        let func: ItemFn = parse_str(
-            "async fn bad(ctx: &Ctx, other: &synor::Ctx) -> Result<i32, ()> { Ok(0) }",
-        )
-        .unwrap();
+        let func: ItemFn =
+            parse_str("async fn bad(ctx: &Ctx, other: &synor::Ctx) -> Result<i32, ()> { Ok(0) }")
+                .unwrap();
         assert!(parse_fn_params(&func).is_err());
     }
 
@@ -1116,10 +1115,9 @@ mod tests {
 
     #[test]
     fn parse_fn_params_accepts_qualified_ctx_type() {
-        let func: ItemFn = parse_str(
-            "async fn good(ctx: &synor::Ctx, value: &str) -> Result<i32, ()> { Ok(0) }",
-        )
-        .unwrap();
+        let func: ItemFn =
+            parse_str("async fn good(ctx: &synor::Ctx, value: &str) -> Result<i32, ()> { Ok(0) }")
+                .unwrap();
         assert!(parse_fn_params(&func).is_ok());
     }
 

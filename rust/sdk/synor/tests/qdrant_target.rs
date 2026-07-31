@@ -12,9 +12,9 @@
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::json;
 use synor::qdrant::{self, CollectionSchema, Distance, QdrantConnection};
 use synor::{ContextKey, Environment, Result};
-use serde_json::json;
 
 static DB: LazyLock<ContextKey<QdrantConnection>> = LazyLock::new(|| {
     ContextKey::new_with_state("qdrant_test", |c: &QdrantConnection| {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import os
+import mmap
 import shutil
 from collections.abc import Collection
 from pathlib import Path
@@ -80,7 +80,7 @@ async def _main() -> None:
 async def test_copied_pre_native_database_runs_compatibility_lifecycle(
     tmp_path: Path,
 ) -> None:
-    page_size = os.sysconf("SC_PAGE_SIZE")
+    page_size = mmap.PAGESIZE
     expected_digest = {
         4096: "fcfdae440098563ee91939e77b535971034969d554a8a477d543fb61d20554bb",
         16384: "2153128f58e1b5ce2c667c8da86d963373cd8a2216c049c8d8ca281d21a25048",

@@ -2,9 +2,9 @@
 //!
 //! Uses `tokio::sync::RwLock` which provides a fair (FIFO) lock.
 
-use synor_core::engine::runtime::get_runtime;
 use pyo3::prelude::*;
 use std::sync::Arc;
+use synor_core::engine::runtime::get_runtime;
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 /// A fair read-write lock.

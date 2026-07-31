@@ -437,4 +437,3 @@ This is where the declarative model pays for itself. You never compute a diff or
 The full, runnable example is in this local workspace: examples/meeting_notes_graph_neo4j.
 
 This pipeline is the docs knowledge graph plus an entity-resolution pass — the natural next step when the LLM names the same thing two ways. For a bigger end-to-end build (transcription, multi-entity schemas, polymorphic edges), see Turn Podcasts into a Knowledge Graph.
-

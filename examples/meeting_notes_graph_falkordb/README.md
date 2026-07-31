@@ -95,4 +95,3 @@ RETURN p.name, m.note_file, m.time
 This pipeline is the docs knowledge graph plus an entity-resolution pass — the natural next step when the LLM names the same thing two ways. Want Neo4j instead? See the Neo4j variant.
 
 ---
-

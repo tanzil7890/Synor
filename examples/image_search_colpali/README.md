@@ -83,4 +83,3 @@ cd frontend && npm install && npm run dev   # http://localhost:5173
 The React app posts your query to `/search`, which embeds the text into ColPali's per-token space and runs a MaxSim search in Qdrant — the match is by *meaning*, patch by patch, never by metadata.
 
 ---
-

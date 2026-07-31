@@ -24,9 +24,9 @@ fn nonce() -> u128 {
 #[cfg(feature = "neo4j")]
 #[tokio::test]
 async fn neo4j_vector_index_create_then_drop_when_available() {
+    use std::sync::LazyLock;
     use synor::neo4j::{self, ColumnDef, TableSchema, VectorMetric};
     use synor::{App, ContextKey, Environment, Result};
-    use std::sync::LazyLock;
 
     static G: LazyLock<ContextKey<neo4j::Graph>> =
         LazyLock::new(|| ContextKey::new("neo4j_vidx_graph"));
@@ -109,10 +109,10 @@ async fn neo4j_vector_index_create_then_drop_when_available() {
 #[cfg(feature = "falkordb")]
 #[tokio::test]
 async fn falkordb_vector_index_create_then_drop_when_available() {
-    use synor::falkordb::{self, ColumnDef, TableSchema, VectorMetric};
-    use synor::{App, ContextKey, Environment, Result};
     use std::sync::LazyLock;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use synor::falkordb::{self, ColumnDef, TableSchema, VectorMetric};
+    use synor::{App, ContextKey, Environment, Result};
 
     static G: LazyLock<ContextKey<falkordb::Graph>> =
         LazyLock::new(|| ContextKey::new("falkordb_vidx_graph"));

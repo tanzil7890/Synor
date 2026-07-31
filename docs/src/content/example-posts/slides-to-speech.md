@@ -114,4 +114,3 @@ On the sample deck, that query ranks the **Engineering Priorities** slide first 
 ## Run it
 
 The full, runnable example is in this local workspace: examples/slides_to_speech. For transcribing existing audio instead of generating it, see Audio → Text.
-

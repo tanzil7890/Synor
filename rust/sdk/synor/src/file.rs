@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use synor_utils::fingerprint::Fingerprint;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Serialize, Serializer, ser::SerializeTuple};
+use synor_utils::fingerprint::Fingerprint;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};

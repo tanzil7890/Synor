@@ -81,4 +81,3 @@ cd frontend && npm install && npm run dev   # http://localhost:5173
 Query *"long neck"* and the giraffe ranks first, then the other animals by CLIP similarity — none of which was ever tagged with a word. That's the whole point of a shared image-text space: the match is by *meaning*.
 
 ---
-

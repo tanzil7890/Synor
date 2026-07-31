@@ -89,4 +89,3 @@ FROM synor_examples.modules_info WHERE filename = 'copy.pdf';
 Re-run `synor update main` anytime — only changed manuals are re-parsed and re-extracted.
 
 ---
-

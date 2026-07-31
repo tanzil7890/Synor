@@ -12,8 +12,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
+use synor_utils::fingerprint::Fingerprint;
 use tokio::sync::Mutex;
 
 use crate::ctx::{ContextKey, ContextStore, Ctx};

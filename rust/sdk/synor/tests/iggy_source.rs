@@ -15,11 +15,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use synor::iggy::{self, IggyConsumer, IggyProducer};
-use synor::{App, Result, UpdateOptions};
 use iggy::prelude::{
     CompressionAlgorithm, Identifier, IggyExpiry, MaxTopicSize, StreamClient, TopicClient,
 };
+use synor::iggy::{self, IggyConsumer, IggyProducer};
+use synor::{App, Result, UpdateOptions};
 
 const PARTITION: u32 = 0;
 

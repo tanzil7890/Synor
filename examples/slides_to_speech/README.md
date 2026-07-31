@@ -84,4 +84,3 @@ python main.py "reducing latency and reliability"
 On the sample deck, that query ranks the **Engineering Priorities** slide first — above the roadmap and go-to-market slides — matching the spoken notes by meaning, not keywords. Each hit carries the slide's MP3 narration, ready to play.
 
 ---
-

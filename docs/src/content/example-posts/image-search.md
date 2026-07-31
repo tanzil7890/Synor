@@ -209,4 +209,3 @@ Swap the CLIP model and Synor re-embeds everything against the new space; leave 
 ## Run it
 
 The full, runnable example is in this local workspace: examples/image_search. For higher-fidelity retrieval, image_search_colpali swaps CLIP for the multi-vector ColPali model with Qdrant MaxSim; for the text equivalent, see Semantic Search 101.
-

@@ -187,4 +187,3 @@ The same machinery covers **logic** changes too: swap the transcription model an
 ## Run it
 
 The full, runnable example is in this local workspace: examples/audio_to_text. Once this clicks, Semantic Search 101 is the natural next step — embed those transcripts and search them by meaning.
-

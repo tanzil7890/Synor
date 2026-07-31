@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use crate::prelude::*;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use synor_core::engine::deadline::{
     DeadlineContext, testing_advance_deadline_clock as rust_testing_advance_deadline_clock,
     testing_disable_deadline_clock as rust_testing_disable_deadline_clock,
     testing_reset_deadline_clock as rust_testing_reset_deadline_clock,
 };
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
 
 const TESTING_ENV_VAR: &str = "SYNOR_TESTING";
 

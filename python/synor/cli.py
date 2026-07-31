@@ -1139,6 +1139,9 @@ def _native_effect_archive_payload(
 
 
 def _fsync_directory(path: pathlib.Path) -> None:
+    if os.name == "nt":
+        # Windows does not expose directory handles through os.open().
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)

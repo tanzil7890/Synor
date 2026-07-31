@@ -80,4 +80,3 @@ python main.py "what is self-attention?"
 This example keeps it minimal and doesn't declare a vector index, so queries do a sequential scan — fine for a few objects. For a larger corpus, add `target_table.declare_vector_index(column="embedding")` exactly as Semantic Search 101 does.
 
 ---
-

@@ -11,9 +11,9 @@
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde_json::json;
 use synor::turbopuffer::{self, DistanceMetric, NamespaceSchema, TurbopufferConnection};
 use synor::{ContextKey, Environment, Result};
-use serde_json::json;
 
 static DB: LazyLock<ContextKey<TurbopufferConnection>> = LazyLock::new(|| {
     ContextKey::new_with_state("turbopuffer_test", |c: &TurbopufferConnection| {

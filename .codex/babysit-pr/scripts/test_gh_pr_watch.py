@@ -69,7 +69,9 @@ class WorkflowRunSelectionTests(unittest.TestCase):
             workflow_run(101, 2, "success"),
         ]
 
-        self.assertEqual([], gh_pr_watch.failed_runs_from_workflow_runs(runs, "head-sha"))
+        self.assertEqual(
+            [], gh_pr_watch.failed_runs_from_workflow_runs(runs, "head-sha")
+        )
 
     def test_newer_pending_run_supersedes_older_failure(self):
         runs = [
@@ -77,7 +79,9 @@ class WorkflowRunSelectionTests(unittest.TestCase):
             workflow_run(101, 2, None),
         ]
 
-        self.assertEqual([], gh_pr_watch.failed_runs_from_workflow_runs(runs, "head-sha"))
+        self.assertEqual(
+            [], gh_pr_watch.failed_runs_from_workflow_runs(runs, "head-sha")
+        )
 
     def test_only_latest_failed_attempt_is_retryable(self):
         runs = [
@@ -138,11 +142,14 @@ class RetryDeduplicationTests(unittest.TestCase):
             state_path = Path(temporary_directory) / "watcher-state.json"
             state_path.write_text(json.dumps(state), encoding="utf-8")
             args = SimpleNamespace(max_flaky_retries=3)
-            with patch.object(
-                gh_pr_watch,
-                "collect_snapshot_unlocked",
-                return_value=(snapshot, state_path),
-            ), patch.object(gh_pr_watch, "gh_text") as gh_text:
+            with (
+                patch.object(
+                    gh_pr_watch,
+                    "collect_snapshot_unlocked",
+                    return_value=(snapshot, state_path),
+                ),
+                patch.object(gh_pr_watch, "gh_text") as gh_text,
+            ):
                 result = gh_pr_watch.retry_failed_now_unlocked(
                     args,
                     pull_request,

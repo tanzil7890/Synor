@@ -134,7 +134,7 @@ the public compatibility lifecycle against the host-compatible copy.
 3. creates an LMDB-consistent compacted copy;
 4. refuses any unresolved effect or child tombstone;
 5. strips only native metadata from the copy;
-6. writes and fsyncs a mode-`0600` metadata archive;
+6. writes and fsyncs a metadata archive, with mode `0600` enforced on POSIX;
 7. writes a readiness manifest with the archive hash;
 8. publishes the copy only after the archive exists.
 
@@ -152,7 +152,7 @@ obligation head. Repetition is idempotent.
 
 Focused tests cover:
 
-- archive schema, canonical hash, metadata-only fields, and mode `0600`;
+- archive schema, canonical hash, metadata-only fields, and POSIX mode `0600`;
 - rejection of archives inside the source database;
 - archive-before-compaction ordering and exact candidate selection;
 - cursor-head retention and already-absent retries;

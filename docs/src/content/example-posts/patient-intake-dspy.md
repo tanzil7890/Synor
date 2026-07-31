@@ -213,4 +213,3 @@ The same machinery covers **logic** changes too: add a field to the `Patient` mo
 ## Run it
 
 The full, runnable example is in this local workspace: examples/patient_intake_extraction_dspy. Prefer to define your schema and extraction in a typed DSL instead of Python? The twin example Patient Intake Extraction with BAML runs the exact same flow with [BAML](https://boundaryml.com/) doing the extraction. For a Postgres-backed structured-extraction flow with embeddings, see Paper Metadata.
-

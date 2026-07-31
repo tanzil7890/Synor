@@ -195,11 +195,7 @@ async fn run_conversation_graph(app: &App, include_all_entities: bool) {
 
         if include_all_entities {
             tech.declare_record(&ctx, "Rust", &serde_json::json!({ "name": "Rust" }))?;
-            org.declare_record(
-                &ctx,
-                "Synor",
-                &serde_json::json!({ "name": "Synor" }),
-            )?;
+            org.declare_record(&ctx, "Synor", &serde_json::json!({ "name": "Synor" }))?;
             statement_mentions.declare_relation_between(
                 &ctx,
                 "statement",

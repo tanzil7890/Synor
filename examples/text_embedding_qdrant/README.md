@@ -80,6 +80,5 @@ You can also browse the collection in the [Qdrant dashboard](http://localhost:63
 
 <p align="center">
   Already running Qdrant and want your docs searchable by meaning?  — it helps a lot.<br/>
-   ·  ·  · 
+   ·  ·  ·
 </p>
-

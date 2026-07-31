@@ -12,11 +12,11 @@
 //! matching, not parsing. Reports any violation with the pattern + file so it's
 //! reproducible.
 
-use synor_code_match::{LangConfig, Pattern, lang};
 use std::collections::HashSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use synor_code_match::{LangConfig, Pattern, lang};
 use tree_sitter::Parser;
 
 fn lang_for_ext(ext: &str) -> Option<(&'static str, LangConfig)> {

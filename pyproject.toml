@@ -208,6 +208,8 @@ module = [
     "torch.*",
     "qdrant_client",
     "qdrant_client.*",
+    "httpx",
+    "httpx.*",
     "google.cloud",
     "google.cloud.*",
     "snowflake",

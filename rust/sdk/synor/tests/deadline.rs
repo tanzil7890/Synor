@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use synor::{
     App, Error, StableKey, TargetAction, TargetActionSink, TargetHandler, TargetReconcileOutput,
     UpdateOptions, declare_target_state, register_root_target_states_provider,
@@ -11,7 +12,6 @@ use synor::{
 use synor_core::engine::deadline::{
     testing_advance_deadline_clock, testing_disable_deadline_clock, testing_reset_deadline_clock,
 };
-use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 static MEMO_CHILD_CALLS: AtomicUsize = AtomicUsize::new(0);

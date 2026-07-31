@@ -222,4 +222,3 @@ Synor keeps the target in sync with the source table and does the **minimum work
 The same machinery covers **logic** changes too: tweak how `full_description` is composed or swap the embedding model, and Synor compares the new output against what is already in Postgres and applies only the difference. Each `synor update main` does this once and exits; re-run it after the source table changes to bring the index back in sync.
 
 ## Run it
-

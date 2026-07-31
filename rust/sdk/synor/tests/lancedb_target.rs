@@ -8,10 +8,10 @@
 //!   cargo test -p synor --features lancedb --test lancedb_target
 #![cfg(feature = "lancedb")]
 
-use synor::lancedb::{self, ColumnDef, ColumnType, LanceDatabase, TableSchema};
-use synor::{ContextKey, Environment, ManagedTargetOptions, Result};
 use serde::Serialize;
 use std::sync::LazyLock;
+use synor::lancedb::{self, ColumnDef, ColumnType, LanceDatabase, TableSchema};
+use synor::{ContextKey, Environment, ManagedTargetOptions, Result};
 
 static DB: LazyLock<ContextKey<LanceDatabase>> = LazyLock::new(|| {
     ContextKey::new_with_state("lancedb_test", |db: &LanceDatabase| {

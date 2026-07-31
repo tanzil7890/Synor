@@ -143,4 +143,3 @@ Synor keeps the Qdrant collection in sync and does the **minimum work** to get t
 ## Run it
 
 The full, runnable example is in this local workspace: examples/text_embedding_qdrant. It's the Semantic Search 101 flow with Qdrant as the store — start there if you want the chunk-and-embed details, and see the Postgres version to compare targets.
-

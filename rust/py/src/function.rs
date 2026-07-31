@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
+use pyo3::types::{PyDict, PyList};
+use pyo3_async_runtimes::tokio::future_into_py;
 use synor_core::engine::context::MemoStatesPayload;
 use synor_core::engine::function::FnCallMemoGuard;
 use synor_core::engine::runtime::get_runtime;
 use synor_utils::fingerprint::Fingerprint;
-use pyo3::types::{PyDict, PyList};
-use pyo3_async_runtimes::tokio::future_into_py;
 
 use crate::context::{PyComponentProcessorContext, PyFnCallContext};
 use crate::fingerprint::PyFingerprint;
@@ -201,8 +201,7 @@ async fn reserve_memoization_inner(
     comp_ctx: PyComponentProcessorContext,
     memo_fp: PyFingerprint,
 ) -> Result<Py<PyAny>> {
-    let guard =
-        synor_core::engine::function::reserve_memoization(&comp_ctx.0, memo_fp.0).await?;
+    let guard = synor_core::engine::function::reserve_memoization(&comp_ctx.0, memo_fp.0).await?;
 
     Python::attach(|py| {
         // Extract cached data (if cache hit) as PyStoredValue objects (not inner Python objects).

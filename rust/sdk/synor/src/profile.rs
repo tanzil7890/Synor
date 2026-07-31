@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use synor_core::engine::component::{ComponentProcessor, ComponentProcessorInfo};
 use synor_core::engine::context::ComponentProcessorContext;
 use synor_core::engine::profile::{EngineProfile, Persist};
@@ -14,7 +15,6 @@ use synor_core::engine::target_state::{
 };
 use synor_core::state::stable_path::StableKey;
 use synor_utils::fingerprint::Fingerprint;
-use serde::{Deserialize, Serialize};
 
 use crate::ctx::ContextStore;
 use crate::error::Result;
@@ -133,9 +133,7 @@ impl ComponentProcessor<RustProfile> for BoxedProcessor {
             .lock()
             .map_err(|_| synor_utils::error::Error::internal_msg("processor state poisoned"))?
             .take()
-            .ok_or_else(|| {
-                synor_utils::error::Error::internal_msg("processor already consumed")
-            })?;
+            .ok_or_else(|| synor_utils::error::Error::internal_msg("processor already consumed"))?;
         let fut = process_fn(comp_ctx.clone());
         Ok(async move { fut.await.map_err(crate::error::Error::into_core) })
     }
@@ -187,8 +185,7 @@ impl BoxedHandler {
             Option<&Value>,
             &[Value],
             bool,
-        )
-            -> synor_utils::error::Result<Option<TargetReconcileOutput<RustProfile>>>
+        ) -> synor_utils::error::Result<Option<TargetReconcileOutput<RustProfile>>>
         + Send
         + Sync
         + 'static,

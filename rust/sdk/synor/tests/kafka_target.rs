@@ -18,9 +18,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use synor::{App, Result, kafka};
 use rskafka::client::partition::UnknownTopicHandling;
 use rskafka::client::{Client, ClientBuilder};
+use synor::{App, Result, kafka};
 
 /// Consume every record on partition 0 from the beginning. Returns the decoded
 /// `(key, value)` pairs in log order plus the high watermark.

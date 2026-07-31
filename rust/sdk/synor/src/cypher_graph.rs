@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};

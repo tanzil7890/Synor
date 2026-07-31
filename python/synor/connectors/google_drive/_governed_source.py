@@ -558,7 +558,7 @@ class _StoredNode:
                 source_revision=source_revision,
                 access=access,
                 grants=grants,
-                policy_authority=cast(Literal["complete", "partial"], policy_authority),
+                policy_authority=policy_authority,
                 limitation_codes=tuple(cast(Sequence[str], limitations)),
                 active=active,
                 last_event=SourceEventKind(last_event),

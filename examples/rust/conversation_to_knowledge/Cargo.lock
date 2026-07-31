@@ -765,99 +765,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "synor"
-version = "0.1.0-alpha.1"
-dependencies = [
- "async-trait",
- "bytes",
- "synor_core",
- "synor_macros",
- "synor_utils",
- "encoding_rs",
- "futures",
- "globset",
- "linkme",
- "rmp-serde",
- "rustc-hash",
- "serde",
- "serde_json",
- "surrealdb",
- "thiserror",
- "tokio",
- "tracing",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "synor_core"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "synor_utils",
- "env_logger",
- "futures",
- "heed",
- "indexmap 2.14.0",
- "nix",
- "page_size",
- "parking_lot",
- "rand 0.9.4",
- "rmp",
- "rmp-serde",
- "rpds",
- "serde",
- "serde_bytes",
- "serde_with",
- "storekey 0.9.0",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "synor_macros"
-version = "0.1.0-alpha.1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "synor_utils"
-version = "0.1.0-alpha.1"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "blake2",
- "futures",
- "governor",
- "hashlink",
- "hex",
- "indexmap 2.14.0",
- "itertools 0.14.0",
- "rand 0.9.4",
- "reqwest 0.12.28",
- "rmp-serde",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "serde_with",
- "storekey 0.9.0",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -933,7 +840,6 @@ name = "conversation_to_knowledge"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "synor",
  "dotenvy",
  "fastembed",
  "hf-hub",
@@ -941,6 +847,7 @@ dependencies = [
  "serde",
  "serde_json",
  "surrealdb",
+ "synor",
  "tempfile",
  "tokio",
 ]
@@ -2440,7 +2347,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -4511,8 +4417,6 @@ dependencies = [
  "native-tls",
  "percent-encoding",
  "pin-project-lite",
- "quinn",
- "rustls",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -4520,7 +4424,6 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-native-tls",
- "tokio-rustls",
  "tokio-util",
  "tower",
  "tower-http",
@@ -4530,7 +4433,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -5715,6 +5617,98 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3dbc01390fc626ce8d1cffe3376ded2b72a11bb70e1c75f404a210e4daa4def2"
 dependencies = [
  "crossbeam-queue",
+]
+
+[[package]]
+name = "synor"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "encoding_rs",
+ "futures",
+ "globset",
+ "linkme",
+ "rmp-serde",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "surrealdb",
+ "synor_core",
+ "synor_macros",
+ "synor_utils",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "synor_core"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "env_logger",
+ "futures",
+ "heed",
+ "indexmap 2.14.0",
+ "nix",
+ "page_size",
+ "parking_lot",
+ "rand 0.9.4",
+ "rmp",
+ "rmp-serde",
+ "rpds",
+ "serde",
+ "serde_bytes",
+ "serde_with",
+ "storekey 0.9.0",
+ "synor_utils",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "synor_macros"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "synor_utils"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "blake2",
+ "futures",
+ "governor",
+ "hashlink",
+ "hex",
+ "indexmap 2.14.0",
+ "itertools 0.14.0",
+ "rand 0.9.4",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_with",
+ "storekey 0.9.0",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

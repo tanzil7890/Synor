@@ -198,4 +198,3 @@ A catch-up run (`synor update main.py`) does this once and exits; live mode (`sy
 ## Run it
 
 The full, runnable example is in this local workspace: examples/csv_to_kafka. The natural next step is the consumer side — kafka_to_lancedb reads JSON messages off a topic and dispatches them into LanceDB tables, so the same declarative flow that *produces* changes can *consume* them too.
-

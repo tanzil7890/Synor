@@ -67,8 +67,11 @@ contains:
 Archives do not contain target payloads, source content, raw locators,
 principals, credentials, or remote error text. Bounded IDs are not a PII
 classifier, so store archives as sensitive operational evidence. Synor creates
-archive files with mode `0600`, fsyncs their contents, publishes them without
-overwriting an existing path, and fsyncs the parent directory.
+archive files with mode `0600`, fsyncs their contents, and publishes them
+without overwriting an existing path. POSIX hosts enforce the mode bits and
+fsync the parent directory after publication. On Windows, protect the archive
+parent with an appropriate ACL; Python does not expose directory fsync there,
+so directory-entry durability follows the filesystem and volume guarantees.
 
 Back up the Phase 2 control-plane `StateStore` separately. Its cases, receipts,
 suppression state, and receipt heads are not duplicated into this native LMDB

@@ -166,4 +166,3 @@ The expensive part (CNN detection + embedding) is fully memoized, so iterating o
 ## Run it
 
 The full, runnable example is in this local workspace: examples/face_recognition. For text-driven image search instead of face matching, see Search Images by Text (CLIP) — same Qdrant target, a different encoder.
-

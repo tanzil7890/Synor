@@ -512,11 +512,7 @@ pub fn namespace_target_with_options(
     validate_namespace(&namespace)?;
     let provider = register_root_target_states_provider(
         ctx,
-        format!(
-            "synor/turbopuffer/namespace/{}/{}",
-            conn.name(),
-            namespace
-        ),
+        format!("synor/turbopuffer/namespace/{}/{}", conn.name(), namespace),
         NamespaceHandler::new(conn.name().to_string()),
     )?;
     Ok(provider.target_state(

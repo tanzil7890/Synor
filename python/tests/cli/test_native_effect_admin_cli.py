@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import stat
 from types import SimpleNamespace
@@ -82,7 +83,8 @@ def test_native_effect_export_writes_private_metadata_archive(
     assert payload["default_retention"] == "indefinite"
     assert payload["apps"][0]["native_schema_version"] == 3
     assert payload["apps"][0]["effects"][0]["evidence_id"] == "effect:1"
-    assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+    if os.name != "nt":
+        assert stat.S_IMODE(archive.stat().st_mode) == 0o600
     assert "action:effect:1" not in result.output
 
 
