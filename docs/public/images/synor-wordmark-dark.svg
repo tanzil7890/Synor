@@ -1,0 +1,8 @@
+<svg width="304" height="72" viewBox="0 0 304 72" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="synor-wordmark-dark-title">
+  <title id="synor-wordmark-dark-title">Synor</title>
+  <rect x="4" y="4" width="64" height="64" rx="19" fill="#FFFFFF"/>
+  <path d="M16 20H31C39 20 39 29 47 29H56" fill="none" stroke="#111111" stroke-width="6" stroke-linecap="round"/>
+  <path d="M16 36H56" fill="none" stroke="#111111" stroke-width="6" stroke-linecap="round"/>
+  <path d="M16 52H31C39 52 39 43 47 43H56" fill="none" stroke="#111111" stroke-width="6" stroke-linecap="round"/>
+  <text x="88" y="51" fill="#FFFFFF" font-family="Iowan Old Style, Palatino Linotype, Book Antiqua, Georgia, serif" font-size="47" font-weight="700">Synor</text>
+</svg>

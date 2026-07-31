@@ -1,67 +1,222 @@
 <p align="center">
-  <img src="docs/public/images/synor-wordmark.svg" alt="Synor" width="220">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/images/synor-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/public/images/synor-wordmark-light.svg">
+    <img src="docs/public/images/synor-wordmark-light.svg" alt="Synor" width="220">
+  </picture>
 </p>
 
-<h1 align="center">Built for the second run.</h1>
+<h1 align="center">Incremental data pipelines for AI and data systems.</h1>
 
 <p align="center">
-  <strong>Synor keeps every derived file, row, and index aligned with the
-  inputs that produced it.</strong>
+  <strong>Write the transformation in Python. Synor detects what changed,
+  runs the affected work, and reconciles every owned outcome.</strong>
 </p>
 
-Synor is a local-first Python framework with a Rust execution engine. You write
-ordinary functions that describe the outcomes your project needs. Synor
-remembers settled work, runs the parts affected by a change, and reconciles
-creates, updates, and removals for you.
+Synor is a local-first Python framework with a Rust execution engine for
+building reliable data processing pipelines. It can power AI indexing, RAG
+ingestion, document extraction, knowledge graphs, conventional ETL, and
+stream-to-store workflows without introducing a separate pipeline DSL.
 
-This workspace is an alpha release intended for local evaluation. The current
-version is `0.1.0a1`.
+The closest category is an **incremental dataflow and reconciliation
+framework**. Synor can be used as the engine inside an AI ETL system, but it is
+not limited to AI and it is not a hosted data platform. Models are optional.
+The core job is to keep derived files, rows, vectors, and graph edges aligned
+with the inputs and code that produced them, and to publish keyed changes to
+streams.
 
-## Check before the first run
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/public/images/synor-project-overview-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/public/images/synor-project-overview-light.png">
+    <img src="docs/public/images/synor-project-overview-light.png" alt="Synor project overview diagram" width="920">
+  </picture>
+</p>
 
-Synor can inspect the local setup, compute a dry-run plan, and enforce a
-process-wide offline policy before it changes an outcome:
+> [!IMPORTANT]
+> Synor is currently an alpha release intended for local evaluation. The
+> current version is `0.1.0a1`.
 
-```bash
-cd examples/local_note_catalog
-../../.venv/bin/synor doctor main.py --offline
-../../.venv/bin/synor plan main.py --offline
-../../.venv/bin/synor diff main.py --offline
-../../.venv/bin/synor update main.py --offline
-../../.venv/bin/synor explain main.py --offline
+For a slower conceptual pass through the diagram and execution model, read
+[reading.md](reading.md).
+
+## Why Synor
+
+Most pipelines are straightforward on the first run. The difficult part is
+keeping outputs correct after a file changes, code is edited, a row disappears,
+a model is replaced, or a run is interrupted.
+
+Synor handles that lifecycle through three ideas:
+
+1. **Observe change.** Fingerprint function inputs, code, and declared
+   dependencies against a local change ledger.
+2. **Own work.** Give each processing component a stable path and a precise set
+   of outcomes that it owns.
+3. **Reconcile state.** Create, update, leave alone, or remove target states so
+   connected systems match the current declaration.
+
+That model provides:
+
+- **Incremental execution:** `@syn.fn(memo=True)` reuses work whose inputs and
+  implementation have not changed.
+- **Automatic cleanup:** when an input or component disappears, the outcomes it
+  owned are removed from supported targets.
+- **Declarative writes:** pipeline code declares the desired files, rows,
+  vectors, and graph relationships instead of maintaining separate upsert and
+  delete branches.
+- **Ordinary Python composition:** use async functions, dataclasses, Pydantic,
+  third-party libraries, local models, hosted APIs, and your existing code.
+- **Local-first execution:** the Python package, Rust engine, and LMDB change
+  ledger run on your machine. Synor does not send usage telemetry.
+- **Inspectable operation:** preview changes, enforce execution policy, and
+  retain metadata-only evidence around controlled runs.
+
+## What you can build
+
+Synor is useful wherever derived data must stay synchronized with changing
+source data:
+
+- **AI and RAG indexing:** split documents, generate embeddings, and maintain a
+  vector index without rebuilding unchanged documents.
+- **Structured extraction:** turn PDFs, audio, notes, or other unstructured
+  content into typed database records with local or hosted models.
+- **Knowledge graphs:** extract entities and relationships, then reconcile
+  shared nodes and edges as source documents evolve.
+- **ETL and enrichment:** read files, object stores, database rows, or streams,
+  transform them in Python, and write to operational or analytical stores.
+- **Continuous data products:** catch up once, then keep the same pipeline live
+  as files, rows, or events change.
+- **Governed indexes:** track ownership and provenance, apply egress and PII
+  policy, and operate strict revocation flows through supported boundaries.
+
+## The pipeline surface
+
+### Sources
+
+Read from local files, Amazon S3 and compatible stores, Azure Blob Storage,
+Google Drive, OCI Object Storage, Postgres, Kafka, and Apache Iggy. Source
+connectors expose stable keyed items or event streams. Keyed inputs let Synor
+process only the items that changed.
+
+### Transformations
+
+Use any Python function or library. Synor also includes operations for
+syntax-aware text and code splitting, local Sentence Transformers embeddings,
+hosted embeddings and audio transcription through LiteLLM, and entity
+resolution.
+
+### Targets
+
+Declare outcomes in:
+
+- local files;
+- Postgres, SQLite, Snowflake, BigQuery, and Apache Doris;
+- LanceDB, Qdrant, Turbopuffer, Valkey, and zvec;
+- Neo4j, FalkorDB, and SurrealDB; and
+- Kafka and Apache Iggy.
+
+Several connectors support both source and target roles. A custom target
+connector can extend the same reconciliation model to another system.
+
+## A small pipeline
+
+This example turns Markdown notes into JSON records. Each note is an
+independent work unit, so changing one file refreshes one output. Removing a
+note removes the JSON file it previously owned.
+
+```python
+import json
+import pathlib
+
+import synor as syn
+from synor.connectors import localfs
+from synor.resources.file import FileLike, PatternFilePathMatcher
+
+
+@syn.fn(memo=True)
+async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
+    text = await file.read_text()
+    record = {"name": file.file_path.path.name, "word_count": len(text.split())}
+    localfs.declare_file(
+        catalog_dir / f"{file.file_path.path.stem}.json",
+        json.dumps(record),
+        create_parent_dirs=True,
+    )
+
+
+@syn.fn
+async def app_main(notes_dir: pathlib.Path, catalog_dir: pathlib.Path) -> None:
+    notes = localfs.walk_dir(
+        notes_dir,
+        recursive=True,
+        path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
+    )
+    await syn.mount_each(catalog_note, notes.items(), catalog_dir)
+
+
+app = syn.App(
+    syn.AppConfig(name="NoteCatalog"),
+    app_main,
+    notes_dir=pathlib.Path("./notes"),
+    catalog_dir=pathlib.Path("./catalog"),
+)
 ```
 
-`plan` and `diff` use the engine's preview path and do not apply target
-actions. Controlled runs write metadata-only evidence under
-`.synor/runs/<run-id>/`: a final `manifest.json` and an append-only
-`audit.jsonl`. Prompts, file content, row values, credentials, and exception
-messages are not written to those logs.
-
-## Keep the run inspectable
-
-Phase 3 adds opt-in controls around the same native engine:
+Run the app twice. The first run creates the catalog; the second reuses settled
+work. Edit one note and only its component runs again.
 
 ```bash
-export SYNOR_STATE_KEY="$(../../.venv/bin/synor state-key)"
-../../.venv/bin/synor plan main.py --offline
-../../.venv/bin/synor replay .synor/runs/<run-id>/replay.json --offline
-../../.venv/bin/synor lock main.py
-../../.venv/bin/synor package main.py --output local-note-catalog.synor
-../../.venv/bin/synor dashboard
+synor update main.py
 ```
 
-The control plane supports pluggable state stores and AES-256-GCM encryption,
-records target-state ownership provenance, enforces structured PII policy,
-quarantines metadata-only failure cases for explicit review, and builds
-offline-verifiable deterministic pipeline packages. Existing `App.update()`
-code and native LMDB reconciliation remain unchanged.
+The same ownership model scales from one JSON file per note to many chunks per
+document, rows in a warehouse, vectors in a search index, or relationships in
+a graph.
 
-Encryption covers the `.synor/control` state-store mirror and review state.
-Dashboard-compatible evidence in `.synor/runs` remains redacted, metadata-only
-JSON, and native LMDB pages remain unchanged. Put either path on an encrypted
-volume when it also requires encryption at rest.
+## Controlled execution
 
-## See the second run
+The normal `App.update()` API runs the native incremental engine directly.
+`SynorRuntime` and the CLI add an opt-in control plane for teams that need to
+inspect and govern a run:
+
+```bash
+synor doctor main.py --offline
+synor plan main.py --offline
+synor diff main.py --offline
+synor update main.py --offline
+synor explain main.py --offline
+```
+
+`plan` and `diff` use the engine preview path and do not apply target actions.
+Preview still executes ordinary pipeline Python, so it is not a general
+side-effect sandbox. Controlled runs can provide:
+
+- process-wide offline and egress policy;
+- planned create, update, and delete actions before apply;
+- redacted manifests, audit events, and ownership provenance;
+- encrypted control-plane state, replay verification, and deterministic source
+  packages;
+- structured PII policy and metadata-only quarantine cases; and
+- strict, evidence-backed index revocation for registered source, target, and
+  retrieval boundaries.
+
+```bash
+export SYNOR_STATE_KEY="$(synor state-key)"
+synor replay .synor/runs/<run-id>/replay.json --offline
+synor lock main.py
+synor package main.py --output pipeline.synor
+synor dashboard
+```
+
+The control plane runs beside the engine. The LMDB database remains
+authoritative for fingerprints, memoization, component ownership, and target
+reconciliation. See the documentation on
+[controlled runs](docs/src/content/docs/programming_guide/controlled_runs.mdx),
+[trustworthy execution](docs/src/content/docs/programming_guide/trustworthy_execution.mdx),
+and [provable index revocation](docs/src/content/docs/programming_guide/provable_index_revocation.mdx)
+for the exact guarantees and limits.
+
+## Try the local example
 
 The smallest useful demonstration is the local note catalog. It reads Markdown
 notes and maintains one JSON record per note without a database server, model
@@ -69,6 +224,7 @@ API, or network request.
 
 ```bash
 . "$HOME/.cargo/env"
+uv sync --group build-test
 uv run maturin develop
 cd examples/local_note_catalog
 ../../.venv/bin/synor update main.py --offline
@@ -78,55 +234,35 @@ Run the final command twice. The first run creates the catalog. The second run
 reuses both settled work units. Edit `notes/deploy.md`, run it again, and only
 that note is refreshed.
 
-The complete pipeline is short:
+## Explore the examples
 
-```python
-@syn.fn(memo=True)
-async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
-    record = summarize(await file.read_text())
-    localfs.declare_file(
-        catalog_dir / f"{file.file_path.path.stem}.json",
-        json.dumps(record, indent=2),
-        create_parent_dirs=True,
-    )
+| Example | What it demonstrates |
+|---|---|
+| [Local note catalog](examples/local_note_catalog/) | Service-free incremental processing and cleanup |
+| [Text embedding](examples/text_embedding/) | Markdown to chunks, local embeddings, and pgvector |
+| [Postgres source](examples/postgres_source/) | Incremental row enrichment from one table to another |
+| [Manual extraction](examples/manuals_llm_extraction/) | PDF parsing and typed LLM extraction |
+| [Docs to knowledge graph](examples/docs_to_knowledge_graph/) | LLM-extracted nodes and relationships in Neo4j |
+| [CSV to Kafka](examples/csv_to_kafka/) | Catch-up and live stream publishing |
+| [Provable index revocation](examples/provable_index_revocation/) | Governed suppression, cleanup, and evidence |
 
+More examples cover image and code search, audio transcription, recommendation,
+entity resolution, cloud object stores, warehouses, graph databases, and
+multiple vector stores.
 
-@syn.fn
-async def app_main(notes_dir: pathlib.Path, catalog_dir: pathlib.Path) -> None:
-    notes = localfs.walk_dir(
-        notes_dir,
-        path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
-    )
-    await syn.mount_each(catalog_note, notes.items(), catalog_dir)
-```
+## Execution model and limits
 
-Three questions describe every run:
-
-1. What changed?
-2. What work must run?
-3. What outcome must be repaired?
-
-Synor’s local change ledger answers the first question. Stable processing
-components answer the second. Declared target states answer the third.
-
-## What Synor owns
-
-- **Work boundaries:** each processing component has a stable path and owns its
-  declared outcomes.
-- **Reuse:** `@syn.fn(memo=True)` skips a function when its inputs and code are
-  unchanged.
-- **Reconciliation:** new outcomes are created, changed outcomes are updated,
-  and outcomes with no remaining owner are removed.
-- **Local state:** the native engine keeps its execution record in a local LMDB
-  database.
-- **Python composition:** pipeline logic stays in Python and can use normal
-  classes, functions, async code, and third-party libraries.
-- **Reviewable operation:** plans, policy decisions, and metadata-only run
-  evidence make local execution inspectable before and after an update.
-
-Connectors cover local files, object storage, SQL databases, vector stores,
-graphs, and streams. Individual connectors may require their own services, but
-the Synor engine itself runs locally.
+- Synor is async-first. Processing functions can be sync or async, while
+  orchestration APIs such as `mount_each` are async.
+- A component submits its target-state changes after processing finishes. A
+  target backend applies that batch atomically when the backend supports it.
+- Writes across different target backends are not one distributed
+  transaction.
+- The native state database remains consistent across interrupted runs. The
+  next update recomputes the desired state and converges supported targets.
+- Connectors determine where data lives. A local-files pipeline can be fully
+  offline; a cloud, model, database, or stream connector naturally requires
+  its service.
 
 ## Work in this repository
 
@@ -149,6 +285,8 @@ uv run pytest python/
 cd docs && npm run build
 ```
 
-Start with the [local note catalog](examples/local_note_catalog/), then read the
-[documentation source](docs/src/content/docs/) or the
-[identity system](docs/DESIGN_SYSTEM.md).
+Start with the [local note catalog](examples/local_note_catalog/), read
+[what Synor does](docs/src/content/docs/getting_started/overview.mdx), then use
+the [second-run model](docs/src/content/docs/programming_guide/core_concepts.mdx)
+and [connector overview](docs/src/content/docs/connectors/index.mdx) as the map
+for the rest of the project.
