@@ -20,12 +20,12 @@
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+use sqlx::Row;
 use synor::doris::{
     self, ColumnDef, DorisConfig, DorisConnection, DorisTableOptions, InvertedIndexDef, TableSchema,
 };
 use synor::{ContextKey, Environment, Result};
-use serde::Serialize;
-use sqlx::Row;
 
 static DORIS_DB: LazyLock<ContextKey<DorisConnection>> =
     LazyLock::new(|| ContextKey::new("doris_target_test_db"));

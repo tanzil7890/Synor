@@ -87,4 +87,3 @@ docker exec redpanda rpk topic consume synor-csv-rows --num 10
 Edit a cell in `data/products.csv` while live mode runs, and a new message with the *same key* appears within a second. The consumer side — kafka_to_lancedb — reads these messages back off the topic and dispatches them into LanceDB tables.
 
 ---
-

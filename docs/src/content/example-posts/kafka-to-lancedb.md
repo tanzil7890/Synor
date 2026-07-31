@@ -221,4 +221,3 @@ A catch-up run (`synor update main.py`) drains the backlog once and exits; live 
 ## Run it
 
 The full, runnable example is in this local workspace: examples/kafka_to_lancedb. It pairs with the producer side — csv-to-kafka turns a folder of CSV files into the very topic this example consumes, so you can run both and watch a row edited on disk land in the right LanceDB table.
-

@@ -286,4 +286,3 @@ FROM statement;
 ```
 
 ## Run it
-

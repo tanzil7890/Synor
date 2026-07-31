@@ -13,10 +13,10 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+use regex::Regex;
 use synor_code_ast::prog_langs::ProgrammingLanguageInfo;
 use synor_code_ast::{CodeSource, ParseOutcome};
 use synor_utils::error::Result;
-use regex::Regex;
 use tree_sitter::{Node, Tree};
 
 use crate::config::LangConfig;

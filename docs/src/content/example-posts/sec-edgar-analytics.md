@@ -117,4 +117,3 @@ On the sample data that ranks **Microsoft's** cloud-and-AI filing first (it carr
 ## Run it
 
 The full, runnable example is in this local workspace: examples/sec_edgar_analytics. For the PDF-extraction side, see Manuals to Structured Data; for a pure-vector setup, see Text Embedding.
-

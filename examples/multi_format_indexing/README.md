@@ -79,4 +79,3 @@ python main.py "revenue growth"
 On the sample set, *"revenue growth"* ranks the two financial-report images at the top (Sweetgreen, then Restaurant Brands), above an unrelated healthcare page — MaxSim matching the query against the most relevant patches of each page, with zero text extraction.
 
 ---
-

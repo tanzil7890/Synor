@@ -117,7 +117,7 @@ class EgressPolicy:
 
     @classmethod
     def offline(cls) -> "EgressPolicy":
-        """Return a policy that denies every network connection."""
+        """Return a policy that denies network egress while allowing local IPC."""
 
         return cls(network_access=NetworkAccess.DENY)
 
@@ -288,16 +288,25 @@ def authorize_egress(request: EgressRequest) -> PolicyDecision:
     return decision
 
 
+def _network_destination(destination: str) -> str | None:
+    try:
+        address = _ipaddress.ip_address(destination)
+    except ValueError:
+        return destination
+    return None if address.is_loopback else destination
+
+
 def _socket_destination(sock: _socket.socket, address: _typing.Any) -> str | None:
-    if sock.family == _socket.AF_UNIX:
+    unix_family = getattr(_socket, "AF_UNIX", None)
+    if unix_family is not None and sock.family == unix_family:
         return None
     if isinstance(address, tuple) and address:
-        return str(address[0])
+        return _network_destination(str(address[0]))
     if isinstance(address, str) and sock.family in {
         _socket.AF_INET,
         _socket.AF_INET6,
     }:
-        return address
+        return _network_destination(address)
     return None
 
 
@@ -336,9 +345,11 @@ def _guarded_sendto(sock: _socket.socket, data: _typing.Any, *args: _typing.Any)
 def _guarded_create_connection(
     address: tuple[str, int], *args: _typing.Any, **kwargs: _typing.Any
 ) -> _socket.socket:
-    authorize_egress(
-        EgressRequest(destination=str(address[0]), purpose="socket connection")
-    )
+    destination = _network_destination(str(address[0]))
+    if destination is not None:
+        authorize_egress(
+            EgressRequest(destination=destination, purpose="socket connection")
+        )
     return _original_create_connection(address, *args, **kwargs)
 
 
@@ -348,10 +359,12 @@ def _guarded_getaddrinfo(
     **kwargs: _typing.Any,
 ) -> list[tuple[_typing.Any, ...]]:
     if host is not None:
-        destination = host.decode() if isinstance(host, bytes) else host
-        authorize_egress(
-            EgressRequest(destination=destination, purpose="DNS resolution")
-        )
+        raw_destination = host.decode() if isinstance(host, bytes) else host
+        destination = _network_destination(raw_destination)
+        if destination is not None:
+            authorize_egress(
+                EgressRequest(destination=destination, purpose="DNS resolution")
+            )
     return _original_getaddrinfo(host, *args, **kwargs)
 
 

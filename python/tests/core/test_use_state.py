@@ -56,6 +56,12 @@ def _process_item(item: str) -> None:
     handle.value = handle.value + 1
 
 
+def _captured_counter(item: str) -> int:
+    value = _captured[item]
+    assert isinstance(value, int) and not isinstance(value, bool)
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -77,7 +83,7 @@ def test_use_state_returns_initial_on_first_run() -> None:
     _source_items[:] = ["a"]
     app.update_blocking()
 
-    assert _captured["a"] == 0
+    assert _captured_counter("a") == 0
 
 
 def test_use_state_persists_across_runs() -> None:
@@ -88,13 +94,13 @@ def test_use_state_persists_across_runs() -> None:
     _source_items[:] = ["a"]
 
     app.update_blocking()
-    assert _captured["a"] == 0  # initial
+    assert _captured_counter("a") == 0  # initial
 
     app.update_blocking()
-    assert _captured["a"] == 1  # stored from previous run
+    assert _captured_counter("a") == 1  # stored from previous run
 
     app.update_blocking()
-    assert _captured["a"] == 2  # stored from previous run
+    assert _captured_counter("a") == 2  # stored from previous run
 
 
 def test_use_state_independent_per_component() -> None:
@@ -105,12 +111,12 @@ def test_use_state_independent_per_component() -> None:
     _source_items[:] = ["x", "y"]
 
     app.update_blocking()
-    assert _captured["x"] == 0
-    assert _captured["y"] == 0
+    assert _captured_counter("x") == 0
+    assert _captured_counter("y") == 0
 
     app.update_blocking()
-    assert _captured["x"] == 1
-    assert _captured["y"] == 1
+    assert _captured_counter("x") == 1
+    assert _captured_counter("y") == 1
 
 
 def test_use_state_resets_after_component_deleted() -> None:
@@ -121,10 +127,10 @@ def test_use_state_resets_after_component_deleted() -> None:
     _source_items[:] = ["a"]
 
     app.update_blocking()
-    assert _captured["a"] == 0
+    assert _captured_counter("a") == 0
 
     app.update_blocking()
-    assert _captured["a"] == 1
+    assert _captured_counter("a") == 1
 
     # Delete the component by removing "a" from source.
     _source_items.clear()
@@ -133,7 +139,7 @@ def test_use_state_resets_after_component_deleted() -> None:
     # Re-add: state should have been cleaned up, initial_value returned.
     _source_items[:] = ["a"]
     app.update_blocking()
-    assert _captured["a"] == 0
+    assert _captured_counter("a") == 0
 
 
 def test_use_state_defaults_to_none() -> None:

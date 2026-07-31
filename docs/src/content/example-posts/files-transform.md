@@ -124,4 +124,3 @@ The same machinery covers **logic** changes too: change the markdown-it preset o
 ## Run it
 
 The full, runnable example is in this local workspace: examples/files_transform. This is the minimal building block — once it clicks, swap the transform for chunking and embedding and you have Semantic Search 101, or point the same flow at a Postgres or vector target.
-

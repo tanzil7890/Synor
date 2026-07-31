@@ -112,4 +112,3 @@ FROM synor_examples.modules_info WHERE filename = 'copy.pdf';
 ## Run it
 
 The full, runnable example is in this local workspace: examples/manuals_llm_extraction. For extracting metadata from research papers instead, see Index Academic Papers; for extraction into typed JSON files, see the patient-intake examples.
-

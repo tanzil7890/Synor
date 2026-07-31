@@ -114,4 +114,3 @@ The graph is small and expressive — `session`, `statement`, `person`, `tech`, 
 Building graphs from other sources? See meeting notes → Neo4j and → FalkorDB, or browse all examples.
 
 ---
-

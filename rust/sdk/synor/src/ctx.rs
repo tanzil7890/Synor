@@ -8,6 +8,8 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use synor_core::engine::context::{ComponentProcessorContext, FnCallContext};
 use synor_core::engine::deadline::DeadlineContext;
 use synor_core::engine::environment::Environment;
@@ -16,8 +18,6 @@ use synor_core::engine::live_component::mount_live_prepare;
 use synor_core::engine::target_state::TargetStateProvider;
 use synor_core::state::stable_path::StableKey;
 use synor_utils::fingerprint::Fingerprint;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 
 use crate::app::{AppInner, StatsGroupHandle, StatsGroupOptions};
 use crate::error::{Error, Result};

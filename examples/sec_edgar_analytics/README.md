@@ -86,4 +86,3 @@ python search.py "cloud computing and AI risk"
 On the sample data that ranks **Microsoft's** cloud-and-AI filing first (it carries both `TOPIC:CLOUD` and `TOPIC:AI`), Apple's second, and the company-facts rows below.
 
 ---
-

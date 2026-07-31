@@ -148,4 +148,3 @@ On the sample data, recommending for a pen surfaces the notepad and the multipur
 ## Run it
 
 The full, runnable example is in this local workspace: examples/product_recommendation. For a concept graph over prose docs instead of products, see Turn Docs into a Knowledge Graph.
-

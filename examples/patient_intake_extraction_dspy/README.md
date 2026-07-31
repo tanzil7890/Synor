@@ -82,4 +82,3 @@ ls output_patients/
 Open one and you'll see the full `Patient` record — name, date of birth, address, insurance, the medication and allergy lists, consent — extracted straight from the rendered form and validated against the schema. Add a field to the `Patient` model or switch the LM, and the next run re-extracts only the affected forms.
 
 ---
-

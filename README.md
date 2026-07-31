@@ -152,4 +152,3 @@ cd docs && npm run build
 Start with the [local note catalog](examples/local_note_catalog/), then read the
 [documentation source](docs/src/content/docs/) or the
 [identity system](docs/DESIGN_SYSTEM.md).
-

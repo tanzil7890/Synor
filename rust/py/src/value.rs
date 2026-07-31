@@ -1,5 +1,5 @@
-use synor_core::engine::profile::Persist;
 use pyo3::types::PyBytes;
+use synor_core::engine::profile::Persist;
 
 use crate::{prelude::*, runtime::python_objects};
 

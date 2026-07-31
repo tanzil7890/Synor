@@ -156,4 +156,3 @@ A catch-up run (`synor update main`) does this once and exits; live mode (`synor
 ## Run it
 
 The full, runnable example is in this local workspace: examples/text_embedding_lancedb. For the chunk-and-embed walkthrough, see Semantic Search 101 — same flow, Postgres as the target.
-

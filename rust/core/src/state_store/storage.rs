@@ -9,6 +9,9 @@ use crate::prelude::*;
 use crate::state::db_schema::{
     ChildExistenceInfo, DbEntryKey, StablePathEntryKey, StablePathNodeType,
 };
+use crate::state::native_effect::{
+    NativeEffectAppSnapshot, NativeEffectDowngradeResult, NativeEffectDowngradeStripResult,
+};
 use crate::state::stable_path::{StablePath, StablePathPrefix, StablePathRef};
 use crate::state_store::app_store::{AppStore, Database};
 use crate::state_store::txn::WriteTxn;
@@ -16,14 +19,19 @@ use crate::state_store::txn::WriteTxn;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::fmt::Write as _;
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 use synor_utils::deser::from_msgpack_slice;
+use synor_utils::fingerprint::Fingerprint;
 
 const DEFAULT_MAX_DBS: u32 = 1024;
 const DEFAULT_MAP_SIZE: usize = 0x1_0000_0000; // 4GiB
 const MAP_SIZE_GROWTH_FACTOR: usize = 2;
+const ENVIRONMENT_OPERATION_LEASE_FILENAME: &str = "environment.lock";
+const OPERATION_LEASE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Sync sibling of [`AppStore::read_txn`]'s `MDB_READERS_FULL` retry,
 /// for use inside `spawn_blocking` where the async retry helper isn't
@@ -123,6 +131,41 @@ struct StorageInner {
     db_env: heed::Env<heed::WithoutTls>,
     coord: Arc<tokio::sync::RwLock<()>>,
     batcher: Batcher<TxnRunner>,
+    lease_dir: PathBuf,
+    settings: StorageSettings,
+}
+
+/// Process-scoped exclusive lease for one app's mutating operation lifecycle.
+///
+/// The operating system releases the lock when the process exits, including
+/// after `SIGKILL`. The lock file itself is intentionally retained: unlinking
+/// a lock file while another process may be opening it creates two independent
+/// inodes and defeats mutual exclusion.
+#[derive(Debug)]
+pub struct AppOperationLease {
+    _environment_file: File,
+    _app_file: File,
+}
+
+impl Drop for AppOperationLease {
+    fn drop(&mut self) {
+        // Explicit unlock prevents a duplicated descriptor from extending the
+        // lease lifetime; closing each owner file remains the fallback.
+        let _ = self._app_file.unlock();
+        let _ = self._environment_file.unlock();
+    }
+}
+
+/// Exclusive lease for a whole-environment administrative snapshot.
+#[derive(Debug)]
+struct EnvironmentOperationLease {
+    _file: File,
+}
+
+impl Drop for EnvironmentOperationLease {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
 }
 
 /// Type-erased body for a batched write transaction. Each body returns a
@@ -238,7 +281,9 @@ impl Runner for TxnRunner {
 impl Storage {
     pub async fn new(settings: &StorageSettings) -> Result<Self> {
         let db_path = settings.db_path.join("mdb");
+        let lease_dir = settings.db_path.join("leases");
         std::fs::create_dir_all(&db_path)?;
+        std::fs::create_dir_all(&lease_dir)?;
         // Backward compatibility: migrate files from old layout into mdb/.
         Self::migrate_legacy_db_files(&settings.db_path, &db_path)?;
         if settings.lmdb_max_dbs < 1 {
@@ -281,6 +326,8 @@ impl Storage {
                 db_env,
                 coord,
                 batcher,
+                lease_dir,
+                settings: settings.clone(),
             }),
         })
     }
@@ -289,6 +336,18 @@ impl Storage {
     /// tests that open an env directly without going through `StorageSettings`.
     #[cfg(test)]
     pub(crate) fn from_env(db_env: heed::Env<heed::WithoutTls>) -> Self {
+        let map_size = db_env.info().map_size;
+        let base_path = db_env
+            .path()
+            .parent()
+            .unwrap_or_else(|| db_env.path())
+            .to_path_buf();
+        let lease_dir = db_env
+            .path()
+            .parent()
+            .unwrap_or_else(|| db_env.path())
+            .join("leases");
+        std::fs::create_dir_all(&lease_dir).expect("create test lease directory");
         let coord = Arc::new(tokio::sync::RwLock::new(()));
         let batcher = Batcher::new(
             TxnRunner {
@@ -303,7 +362,155 @@ impl Storage {
                 db_env,
                 coord,
                 batcher,
+                lease_dir,
+                settings: StorageSettings {
+                    db_path: base_path,
+                    lmdb_max_dbs: DEFAULT_MAX_DBS,
+                    lmdb_map_size: map_size,
+                },
             }),
+        }
+    }
+
+    fn try_acquire_app_operation_lease_once(
+        &self,
+        app_name: &str,
+    ) -> Result<Option<AppOperationLease>> {
+        let environment_file = self.open_environment_operation_lease_file()?;
+        match environment_file.try_lock_shared() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+
+        let fingerprint = Fingerprint::from_bytes(app_name.as_bytes());
+        let mut filename = String::with_capacity(fingerprint.0.len() * 2 + 5);
+        for byte in fingerprint.0 {
+            write!(&mut filename, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        filename.push_str(".lock");
+
+        let path = self.inner.lease_dir.join(filename);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(AppOperationLease {
+                _environment_file: environment_file,
+                _app_file: file,
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    fn open_environment_operation_lease_file(&self) -> Result<File> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(
+                self.inner
+                    .lease_dir
+                    .join(ENVIRONMENT_OPERATION_LEASE_FILENAME),
+            )?)
+    }
+
+    fn try_acquire_environment_shared_lease_once(&self) -> Result<Option<File>> {
+        let file = self.open_environment_operation_lease_file()?;
+        match file.try_lock_shared() {
+            Ok(()) => Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    fn try_acquire_environment_operation_lease_once(
+        &self,
+    ) -> Result<Option<EnvironmentOperationLease>> {
+        let file = self.open_environment_operation_lease_file()?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(EnvironmentOperationLease { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
+
+    async fn acquire_environment_shared_lease(&self, timeout: std::time::Duration) -> Result<File> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(lease) = self.try_acquire_environment_shared_lease_once()? {
+                return Ok(lease);
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                client_bail!(
+                    "timed out waiting for the environment-operation lease to allow app access"
+                );
+            }
+            tokio::time::sleep(OPERATION_LEASE_RETRY_INTERVAL.min(deadline - now)).await;
+        }
+    }
+
+    async fn acquire_environment_operation_lease(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<EnvironmentOperationLease> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(lease) = self.try_acquire_environment_operation_lease_once()? {
+                return Ok(lease);
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                client_bail!(
+                    "timed out waiting for active app operations before the environment snapshot"
+                );
+            }
+            tokio::time::sleep(OPERATION_LEASE_RETRY_INTERVAL.min(deadline - now)).await;
+        }
+    }
+
+    /// Acquire the cross-process lease protecting one app's operations.
+    ///
+    /// Update uses this fail-fast form before changing operation state. All
+    /// update modes participate so a plain update cannot race a live driver.
+    pub fn try_acquire_app_operation_lease(&self, app_name: &str) -> Result<AppOperationLease> {
+        match self.try_acquire_app_operation_lease_once(app_name)? {
+            Some(lease) => Ok(lease),
+            None => {
+                client_bail!("another process already owns the app-operation lease for this app")
+            }
+        }
+    }
+
+    /// Wait for the cross-process app-operation lease up to `timeout`.
+    ///
+    /// App drop uses this only after cancelling and draining its own live
+    /// controllers. That sequencing lets the current process release its live
+    /// update lease while still bounding a wait on a genuinely external owner.
+    pub async fn acquire_app_operation_lease(
+        &self,
+        app_name: &str,
+        timeout: std::time::Duration,
+    ) -> Result<AppOperationLease> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(lease) = self.try_acquire_app_operation_lease_once(app_name)? {
+                return Ok(lease);
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                client_bail!(
+                    "timed out waiting for another process to release the app-operation lease for this app"
+                );
+            }
+            tokio::time::sleep(OPERATION_LEASE_RETRY_INTERVAL.min(deadline - now)).await;
         }
     }
 
@@ -378,6 +585,9 @@ impl Storage {
 
     /// Create the per-app sub-database and wrap it in an `AppStore`.
     pub async fn create_app_store(&self, app_name: &str) -> Result<AppStore> {
+        let _environment_lease = self
+            .acquire_environment_shared_lease(std::time::Duration::from_secs(30))
+            .await?;
         let _guard = self.inner.coord.read().await;
         let mut wtxn = self.inner.db_env.write_txn()?;
         let db = self
@@ -574,6 +784,152 @@ impl Storage {
         })
     }
 
+    /// Create an LMDB-consistent, compacted copy and remove native-only
+    /// metadata from that copy after proving every copied app is quiescent.
+    ///
+    /// The caller supplies a fresh staging directory and must archive the
+    /// returned metadata before atomically publishing the directory. The
+    /// source environment is read through LMDB's snapshot-copy API and is
+    /// never modified.
+    pub async fn prepare_native_downgrade_copy(
+        &self,
+        staging_path: &Path,
+    ) -> Result<NativeEffectDowngradeResult> {
+        let _environment_lease = self
+            .acquire_environment_operation_lease(std::time::Duration::from_secs(30))
+            .await?;
+        if staging_path.exists() {
+            client_bail!("native downgrade staging path already exists");
+        }
+        let staging_parent = staging_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(staging_parent)?;
+        let staging_parent = staging_parent.canonicalize()?;
+        let staging_name = staging_path
+            .file_name()
+            .ok_or_else(|| client_error!("native downgrade staging path must name a directory"))?;
+        let staging_absolute = staging_parent.join(staging_name);
+        let source_path = self
+            .inner
+            .settings
+            .db_path
+            .canonicalize()
+            .unwrap_or_else(|_| self.inner.settings.db_path.clone());
+        if staging_absolute.starts_with(&source_path) {
+            client_bail!("native downgrade staging path must be outside the source database");
+        }
+
+        let staging_path = staging_absolute.as_path();
+        std::fs::create_dir(staging_path)?;
+
+        let result = async {
+            let staging_mdb = staging_path.join("mdb");
+            std::fs::create_dir(&staging_mdb)?;
+            let copy_path = staging_mdb.join("data.mdb");
+            let env = self.inner.db_env.clone();
+            let coord = self.inner.coord.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let _guard = coord.blocking_read();
+                let file = env.copy_to_path(&copy_path, heed::CompactionOption::Enabled)?;
+                file.sync_all()?;
+                Ok(())
+            })
+            .await
+            .map_err(|error| internal_error!("native downgrade copy task failed: {error}"))??;
+
+            let mut copied_settings = self.inner.settings.clone();
+            copied_settings.db_path = staging_path.to_path_buf();
+            let copied = Storage::new(&copied_settings).await?;
+            let app_names = copied.list_app_names().await?;
+            let mut stores = Vec::with_capacity(app_names.len());
+            let mut apps = Vec::with_capacity(app_names.len());
+            for app_name in app_names {
+                let store = copied
+                    .open_app_store_by_name(&app_name)
+                    .await?
+                    .ok_or_else(|| internal_error!("copied app database disappeared"))?;
+                let (schema_version, effects) = store.native_effect_snapshot().await?;
+                apps.push(NativeEffectAppSnapshot {
+                    app_name,
+                    schema_version: schema_version.map(|version| version.0),
+                    effects,
+                });
+                stores.push(store);
+            }
+
+            let stores_for_txn = stores.clone();
+            let stripped = copied
+                .run_txn(move |txn| {
+                    let stores = stores_for_txn.clone();
+                    Box::pin(async move {
+                        let mut total = NativeEffectDowngradeStripResult::default();
+                        for store in stores {
+                            let result = store
+                                .strip_native_metadata_for_downgrade_in_txn(txn)
+                                .await?;
+                            total.removed_schema_markers = total
+                                .removed_schema_markers
+                                .checked_add(result.removed_schema_markers)
+                                .ok_or_else(|| {
+                                    internal_error!("native downgrade count overflow")
+                                })?;
+                            total.removed_effects = total
+                                .removed_effects
+                                .checked_add(result.removed_effects)
+                                .ok_or_else(|| {
+                                    internal_error!("native downgrade count overflow")
+                                })?;
+                            total.removed_obligation_cursors = total
+                                .removed_obligation_cursors
+                                .checked_add(result.removed_obligation_cursors)
+                                .ok_or_else(|| {
+                                    internal_error!("native downgrade count overflow")
+                                })?;
+                            total.removed_lineage_cursors = total
+                                .removed_lineage_cursors
+                                .checked_add(result.removed_lineage_cursors)
+                                .ok_or_else(|| {
+                                    internal_error!("native downgrade count overflow")
+                                })?;
+                            total.removed_live_generation_keys = total
+                                .removed_live_generation_keys
+                                .checked_add(result.removed_live_generation_keys)
+                                .ok_or_else(|| {
+                                    internal_error!("native downgrade count overflow")
+                                })?;
+                        }
+                        Ok(total)
+                    })
+                })
+                .await?;
+
+            for store in &stores {
+                let (schema_version, effects) = store.native_effect_snapshot().await?;
+                if schema_version.is_some() || !effects.is_empty() {
+                    internal_bail!("native downgrade copy retained native effect metadata");
+                }
+            }
+            copied.inner.db_env.force_sync()?;
+
+            Ok(NativeEffectDowngradeResult {
+                apps,
+                removed_schema_markers: stripped.removed_schema_markers,
+                removed_effects: stripped.removed_effects,
+                removed_obligation_cursors: stripped.removed_obligation_cursors,
+                removed_lineage_cursors: stripped.removed_lineage_cursors,
+                removed_live_generation_keys: stripped.removed_live_generation_keys,
+            })
+        }
+        .await;
+
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(staging_path);
+        }
+        result
+    }
+
     /// List every non-empty named app sub-store in this storage environment.
     /// The "unnamed database" is LMDB's catalog of named sub-databases.
     pub async fn list_app_names(&self) -> Result<Vec<String>> {
@@ -594,6 +950,7 @@ impl Storage {
                 names.push(name.to_string());
             }
         }
+        names.sort();
         Ok(names)
     }
 }
@@ -602,13 +959,16 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::state::db_schema::{
-        ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo, StablePathNodeType,
+        ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo,
+        LIVE_COMPONENT_GENERATION_KEY_SYMBOL, NativeSchemaVersion, StablePathNodeType,
     };
     use crate::state::native_effect::{
         NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent, NativeEffectOperation,
         NativeEffectStatus, NativeVerificationPolicy,
     };
     use crate::state::stable_path::{StableKey, StablePath};
+    use sha2::{Digest as _, Sha256};
+    use std::collections::HashSet;
     use std::sync::Arc;
     use synor_utils::fingerprint::Fingerprint;
     use tempfile::TempDir;
@@ -643,6 +1003,20 @@ mod tests {
             NativeVerificationPolicy::QueryVerified,
         )
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn publish_durable_test_marker(path: &Path) {
+        let marker = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        marker.sync_all().unwrap();
+        File::open(path.parent().unwrap())
+            .unwrap()
+            .sync_all()
+            .unwrap();
     }
 
     #[test]
@@ -680,6 +1054,1114 @@ mod tests {
             lmdb_map_size: 4 * 1024 * 1024 + 1,
         };
         Storage::new(&settings).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn downgrade_copy_rejects_symlinked_staging_parent_inside_source() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("source");
+        let settings = StorageSettings {
+            db_path: source_path.clone(),
+            lmdb_max_dbs: DEFAULT_MAX_DBS,
+            lmdb_map_size: 16 * 1024 * 1024,
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let source_link = root.path().join("source-link");
+        std::os::unix::fs::symlink(&source_path, &source_link).unwrap();
+        let staging_path = source_link.join("unsafe-staging");
+
+        let error = storage
+            .prepare_native_downgrade_copy(&staging_path)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("outside the source database"));
+        assert!(!source_path.join("unsafe-staging").exists());
+    }
+
+    #[tokio::test]
+    async fn downgrade_copy_exports_and_strips_only_native_metadata() {
+        let root = TempDir::new().unwrap();
+        let source_path = root.path().join("source");
+        let staging_path = root.path().join("staging");
+        let settings = StorageSettings {
+            db_path: source_path.clone(),
+            lmdb_max_dbs: DEFAULT_MAX_DBS,
+            lmdb_map_size: 16 * 1024 * 1024,
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let store = storage.create_app_store("downgrade-app").await.unwrap();
+        let operational_key = StableKey::Symbol("operator/sequence".into());
+        let live_generation_key = StableKey::Symbol(LIVE_COMPONENT_GENERATION_KEY_SYMBOL.into());
+        let proposed = effect_intent("downgrade:completed");
+
+        let store_for_txn = store.clone();
+        let proposed_for_txn = proposed.clone();
+        let operational_for_txn = operational_key.clone();
+        let live_for_txn = live_generation_key.clone();
+        let evidence_id = storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let proposed = proposed_for_txn.clone();
+                let operational_key = operational_for_txn.clone();
+                let live_generation_key = live_for_txn.clone();
+                Box::pin(async move {
+                    store.write_id_sequence(txn, &operational_key, 77).await?;
+                    store
+                        .write_id_sequence(txn, &live_generation_key, 9)
+                        .await?;
+                    let bound = store
+                        .bind_native_effect_lineage_in_txn(txn, proposed)
+                        .await?;
+                    let evidence_id = bound.evidence_id().to_owned();
+                    store
+                        .upsert_native_effect_intent_in_txn(txn, &bound)
+                        .await?;
+                    Ok(evidence_id)
+                })
+            })
+            .await
+            .unwrap();
+        store
+            .mark_native_effects_verified(std::slice::from_ref(&evidence_id))
+            .await
+            .unwrap();
+        let store_for_txn = store.clone();
+        let evidence_for_txn = evidence_id.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let evidence_id = evidence_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(txn, &[evidence_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let prepared = storage
+            .prepare_native_downgrade_copy(&staging_path)
+            .await
+            .unwrap();
+        assert_eq!(prepared.apps.len(), 1);
+        assert_eq!(prepared.apps[0].app_name, "downgrade-app");
+        assert_eq!(prepared.apps[0].schema_version, Some(3));
+        assert_eq!(prepared.apps[0].effects.len(), 1);
+        assert_eq!(prepared.removed_schema_markers, 1);
+        assert_eq!(prepared.removed_effects, 1);
+        assert_eq!(prepared.removed_lineage_cursors, 1);
+        assert_eq!(prepared.removed_live_generation_keys, 1);
+
+        // The source remains fully native and retains the same operational key.
+        assert_eq!(store.native_effect_counts().await.unwrap().completed, 1);
+        let source_store = store.clone();
+        let source_operational_key = operational_key.clone();
+        assert_eq!(
+            storage
+                .run_txn(move |txn| {
+                    let store = source_store.clone();
+                    let key = source_operational_key.clone();
+                    Box::pin(async move { store.peek_id_sequence_in_txn(txn, &key).await })
+                })
+                .await
+                .unwrap(),
+            Some(77)
+        );
+
+        let mut copied_settings = settings.clone();
+        copied_settings.db_path = staging_path;
+        let copied = Storage::new(&copied_settings).await.unwrap();
+        let copied_store = copied
+            .open_app_store_by_name("downgrade-app")
+            .await
+            .unwrap()
+            .unwrap();
+        let (schema, effects) = copied_store.native_effect_snapshot().await.unwrap();
+        assert_eq!(schema, None);
+        assert!(effects.is_empty());
+        let copied_store_for_txn = copied_store.clone();
+        let copied_operational_key = operational_key.clone();
+        let copied_live_key = live_generation_key.clone();
+        let (operational, live_generation) = copied
+            .run_txn(move |txn| {
+                let store = copied_store_for_txn.clone();
+                let operational_key = copied_operational_key.clone();
+                let live_generation_key = copied_live_key.clone();
+                Box::pin(async move {
+                    Ok((
+                        store.peek_id_sequence_in_txn(txn, &operational_key).await?,
+                        store
+                            .peek_id_sequence_in_txn(txn, &live_generation_key)
+                            .await?,
+                    ))
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(operational, Some(77));
+        assert_eq!(live_generation, None);
+    }
+
+    #[tokio::test]
+    async fn downgrade_copy_refuses_unresolved_effects_and_all_tombstones() {
+        let root = TempDir::new().unwrap();
+        let settings = StorageSettings {
+            db_path: root.path().join("source"),
+            lmdb_max_dbs: DEFAULT_MAX_DBS,
+            lmdb_map_size: 16 * 1024 * 1024,
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let unresolved_store = storage.create_app_store("unresolved").await.unwrap();
+        let proposed = effect_intent("downgrade:pending");
+        let unresolved_for_txn = unresolved_store.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = unresolved_for_txn.clone();
+                let proposed = proposed.clone();
+                Box::pin(async move {
+                    let bound = store
+                        .bind_native_effect_lineage_in_txn(txn, proposed)
+                        .await?;
+                    store.upsert_native_effect_intent_in_txn(txn, &bound).await
+                })
+            })
+            .await
+            .unwrap();
+
+        let unresolved_staging = root.path().join("unresolved-staging");
+        let error = storage
+            .prepare_native_downgrade_copy(&unresolved_staging)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unresolved native effects"));
+        assert!(!unresolved_staging.exists());
+        assert_eq!(
+            unresolved_store
+                .native_effect_counts()
+                .await
+                .unwrap()
+                .pending,
+            1
+        );
+
+        // Resolve the effect, then prove even a legacy-unverified tombstone
+        // blocks the downgrade rather than being silently discarded.
+        let (schema, effects) = unresolved_store.native_effect_snapshot().await.unwrap();
+        assert_eq!(schema, Some(NativeSchemaVersion::CURRENT));
+        let evidence_id = effects[0].evidence_id().to_owned();
+        unresolved_store
+            .mark_native_effects_verified(std::slice::from_ref(&evidence_id))
+            .await
+            .unwrap();
+        let unresolved_for_txn = unresolved_store.clone();
+        let evidence_for_txn = evidence_id.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = unresolved_for_txn.clone();
+                let evidence_id = evidence_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(txn, &[evidence_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let parent = StablePath::root();
+        let relative = component_path("retained-cleanup");
+        let tombstone = ChildTombstoneInfo::new(
+            ChildTombstoneCause::ComponentOrphan,
+            None,
+            Some(3),
+            NativeVerificationPolicy::LegacyUnverified,
+        )
+        .unwrap();
+        let unresolved_for_txn = unresolved_store.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = unresolved_for_txn.clone();
+                let parent = parent.clone();
+                let relative = relative.clone();
+                let tombstone = tombstone.clone();
+                Box::pin(async move {
+                    store
+                        .write_tombstone(txn, &parent, &relative, &tombstone)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+
+        let tombstone_staging = root.path().join("tombstone-staging");
+        let error = storage
+            .prepare_native_downgrade_copy(&tombstone_staging)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("child cleanup tombstones"));
+        assert!(!tombstone_staging.exists());
+        assert!(unresolved_store.has_any_tombstones().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn app_operation_lease_is_exclusive_and_released_on_drop() {
+        let dir = TempDir::new().unwrap();
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+
+        let lease = storage
+            .try_acquire_app_operation_lease("lease-app")
+            .unwrap();
+        // Simulate descriptors inherited across fork while the owner is dropped.
+        #[cfg(unix)]
+        let duplicated_lease_files = (
+            lease._environment_file.try_clone().unwrap(),
+            lease._app_file.try_clone().unwrap(),
+        );
+        let error = storage
+            .try_acquire_app_operation_lease("lease-app")
+            .expect_err("a second owner must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("another process already owns the app-operation lease")
+        );
+
+        // A different app has an independent lease even in the same storage.
+        let other = storage
+            .try_acquire_app_operation_lease("different-app")
+            .unwrap();
+        drop(other);
+
+        assert!(
+            storage
+                .try_acquire_environment_operation_lease_once()
+                .unwrap()
+                .is_none(),
+            "an active app must block a whole-environment snapshot"
+        );
+        drop(lease);
+        let environment_lease = storage
+            .try_acquire_environment_operation_lease_once()
+            .unwrap()
+            .expect("the environment lease must become available");
+        #[cfg(unix)]
+        let duplicated_environment_lease_file = environment_lease._file.try_clone().unwrap();
+        storage
+            .try_acquire_app_operation_lease("lease-app")
+            .expect_err("the environment snapshot must block new app operations");
+        drop(environment_lease);
+        storage
+            .try_acquire_app_operation_lease("lease-app")
+            .expect("dropping the owner must release the OS lock");
+        #[cfg(unix)]
+        drop((duplicated_lease_files, duplicated_environment_lease_file));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_operation_lease_child_process() {
+        let Some(db_path) = std::env::var_os("SYNOR_LIVE_LEASE_CHILD_DB") else {
+            return;
+        };
+        let marker_path = PathBuf::from(std::env::var_os("SYNOR_LIVE_LEASE_CHILD_MARKER").unwrap());
+        let storage = Storage::new(&StorageSettings {
+            db_path: PathBuf::from(db_path),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        })
+        .await
+        .unwrap();
+        let _lease = storage
+            .try_acquire_app_operation_lease("process-kill-app")
+            .unwrap();
+
+        publish_durable_test_marker(&marker_path);
+
+        // The parent terminates this process with SIGKILL after observing the
+        // durable marker. No Rust destructor or application cleanup can run.
+        std::future::pending::<()>().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_operation_lease_recovers_after_process_kill() {
+        struct ChildGuard(Option<std::process::Child>);
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if let Some(child) = &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let marker_path = dir.path().join("child-holds-lease");
+        let settings = StorageSettings {
+            db_path: dir.path().join("storage"),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("state_store::storage::tests::app_operation_lease_child_process")
+            .arg("--nocapture")
+            .env("SYNOR_LIVE_LEASE_CHILD_DB", &settings.db_path)
+            .env("SYNOR_LIVE_LEASE_CHILD_MARKER", &marker_path)
+            .spawn()
+            .unwrap();
+        let mut child = ChildGuard(Some(child));
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !marker_path.exists() {
+            let child_process = child.0.as_mut().unwrap();
+            if let Some(status) = child_process.try_wait().unwrap() {
+                panic!("lease child exited before publishing its marker: {status}");
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for lease child"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let error = storage
+            .try_acquire_app_operation_lease("process-kill-app")
+            .expect_err("the child process must fence a second owner");
+        assert!(
+            error
+                .to_string()
+                .contains("another process already owns the app-operation lease")
+        );
+        assert!(
+            storage
+                .try_acquire_environment_operation_lease_once()
+                .unwrap()
+                .is_none(),
+            "the child app operation must fence an environment snapshot"
+        );
+
+        // Child::kill sends SIGKILL on Unix. The child cannot unlock in user
+        // code, so successful reacquisition proves kernel-owned recovery.
+        let mut killed_child = child.0.take().unwrap();
+        killed_child.kill().unwrap();
+        let status = killed_child.wait().unwrap();
+        assert!(!status.success());
+
+        storage
+            .try_acquire_app_operation_lease("process-kill-app")
+            .expect("the OS must release the app-operation lease after process death");
+        storage
+            .try_acquire_environment_operation_lease_once()
+            .unwrap()
+            .expect("the OS must release the environment lease after process death");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_effect_crash_child_process() {
+        let Some(db_path) = std::env::var_os("SYNOR_NATIVE_CRASH_CHILD_DB") else {
+            return;
+        };
+        let phase = std::env::var("SYNOR_NATIVE_CRASH_CHILD_PHASE").unwrap();
+        let marker_path =
+            PathBuf::from(std::env::var_os("SYNOR_NATIVE_CRASH_CHILD_MARKER").unwrap());
+        let apply_path =
+            PathBuf::from(std::env::var_os("SYNOR_NATIVE_CRASH_APPLY_MARKER").unwrap());
+        let storage = Storage::new(&StorageSettings {
+            db_path: PathBuf::from(db_path),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        })
+        .await
+        .unwrap();
+        let app_store = storage.create_app_store("native-crash-app").await.unwrap();
+        let intent = effect_intent("cleanup:crash-boundary");
+        let effect_id = intent.descriptor.action_id.clone();
+
+        let store_for_txn = app_store.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = store_for_txn.clone();
+                let intent = intent.clone();
+                Box::pin(async move {
+                    app_store
+                        .db()
+                        .put(&mut **wtxn, b"crash-tracking", b"must-survive")?;
+                    app_store
+                        .upsert_native_effect_intent_in_txn(wtxn, &intent)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        if phase == "after-precommit" {
+            publish_durable_test_marker(&marker_path);
+            std::future::pending::<()>().await;
+        }
+
+        publish_durable_test_marker(&apply_path);
+        if phase == "after-apply" {
+            publish_durable_test_marker(&marker_path);
+            std::future::pending::<()>().await;
+        }
+
+        app_store
+            .mark_native_effects_verified(std::slice::from_ref(&effect_id))
+            .await
+            .unwrap();
+        if phase == "after-verification" {
+            publish_durable_test_marker(&marker_path);
+            std::future::pending::<()>().await;
+        }
+
+        assert_eq!(phase, "during-final-commit");
+        let store_for_txn = app_store.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = store_for_txn.clone();
+                let effect_id = effect_id.clone();
+                let marker_path = marker_path.clone();
+                Box::pin(async move {
+                    app_store
+                        .finalize_native_effects_in_txn(wtxn, &[effect_id])
+                        .await?;
+                    app_store.db().delete(&mut **wtxn, b"crash-tracking")?;
+                    publish_durable_test_marker(&marker_path);
+                    std::future::pending::<Result<()>>().await
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_effect_lifecycle_recovers_at_process_kill_boundaries() {
+        struct ChildGuard(Option<std::process::Child>);
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if let Some(child) = &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+
+        for (phase, expected_status, apply_preexists) in [
+            ("after-precommit", NativeEffectStatus::Pending, false),
+            ("after-apply", NativeEffectStatus::Pending, true),
+            ("after-verification", NativeEffectStatus::Verified, true),
+            ("during-final-commit", NativeEffectStatus::Verified, true),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let db_path = dir.path().join("storage");
+            let marker_path = dir.path().join("ready-to-kill");
+            let apply_path = dir.path().join("external-effect-applied");
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("state_store::storage::tests::native_effect_crash_child_process")
+                .arg("--nocapture")
+                .env("SYNOR_NATIVE_CRASH_CHILD_DB", &db_path)
+                .env("SYNOR_NATIVE_CRASH_CHILD_PHASE", phase)
+                .env("SYNOR_NATIVE_CRASH_CHILD_MARKER", &marker_path)
+                .env("SYNOR_NATIVE_CRASH_APPLY_MARKER", &apply_path)
+                .spawn()
+                .unwrap();
+            let mut child = ChildGuard(Some(child));
+
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !marker_path.exists() {
+                let child_process = child.0.as_mut().unwrap();
+                if let Some(status) = child_process.try_wait().unwrap() {
+                    panic!(
+                        "native crash child exited before {phase} marker was published: {status}"
+                    );
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "timed out waiting for native crash child at {phase}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+
+            let mut killed_child = child.0.take().unwrap();
+            killed_child.kill().unwrap();
+            let status = killed_child.wait().unwrap();
+            assert!(!status.success(), "{phase} child was not killed");
+
+            let storage = Storage::new(&StorageSettings {
+                db_path,
+                lmdb_max_dbs: 8,
+                lmdb_map_size: default_map_size(),
+            })
+            .await
+            .unwrap();
+            let app_store = storage
+                .open_app_store_by_name("native-crash-app")
+                .await
+                .unwrap()
+                .unwrap();
+            let effect_id = "cleanup:crash-boundary".to_owned();
+            let effect = app_store.native_effect(&effect_id).await.unwrap().unwrap();
+            assert_eq!(effect.status, expected_status, "phase: {phase}");
+            let rtxn = app_store.read_txn().await.unwrap();
+            assert_eq!(
+                app_store.db().get(&*rtxn, b"crash-tracking").unwrap(),
+                Some(&b"must-survive"[..]),
+                "tracking disappeared at {phase}"
+            );
+            drop(rtxn);
+            assert_eq!(apply_path.exists(), apply_preexists, "phase: {phase}");
+
+            // Recover exactly as a fresh controlled run would: ensure the
+            // external postcondition, persist verification, then atomically
+            // finalize evidence with tracking removal.
+            if !apply_path.exists() {
+                publish_durable_test_marker(&apply_path);
+            }
+            if expected_status == NativeEffectStatus::Pending {
+                app_store
+                    .mark_native_effects_verified(std::slice::from_ref(&effect_id))
+                    .await
+                    .unwrap();
+            }
+            let store_for_txn = app_store.clone();
+            let effect_for_txn = effect_id.clone();
+            storage
+                .run_txn(move |wtxn| {
+                    let app_store = store_for_txn.clone();
+                    let effect_id = effect_for_txn.clone();
+                    Box::pin(async move {
+                        app_store
+                            .finalize_native_effects_in_txn(wtxn, &[effect_id])
+                            .await?;
+                        app_store.db().delete(&mut **wtxn, b"crash-tracking")?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+
+            assert_eq!(
+                app_store
+                    .native_effect(&effect_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                NativeEffectStatus::Completed,
+                "phase: {phase}"
+            );
+            let rtxn = app_store.read_txn().await.unwrap();
+            assert!(
+                app_store
+                    .db()
+                    .get(&*rtxn, b"crash-tracking")
+                    .unwrap()
+                    .is_none(),
+                "recovery left tracking at {phase}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn copied_pre_native_database_runs_compatibility_and_native_migration_lifecycle() {
+        let page_size = page_size::get();
+        assert!(
+            matches!(page_size, 4096 | 16384),
+            "no certified pre-native fixture for {page_size}-byte pages"
+        );
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pre_native_63df53f")
+            .join(page_size.to_string())
+            .join("data.mdb");
+        let fixture_bytes = std::fs::read(&fixture_path).unwrap();
+        let expected_digest = match page_size {
+            4096 => "fcfdae440098563ee91939e77b535971034969d554a8a477d543fb61d20554bb",
+            16384 => "2153128f58e1b5ce2c667c8da86d963373cd8a2216c049c8d8ca281d21a25048",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&fixture_bytes)),
+            expected_digest,
+            "pre-native fixture provenance digest changed"
+        );
+
+        let dir = TempDir::new().unwrap();
+        let mdb_path = dir.path().join("mdb");
+        std::fs::create_dir(&mdb_path).unwrap();
+        std::fs::write(mdb_path.join("data.mdb"), fixture_bytes).unwrap();
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let app_store = storage
+            .open_app_store_by_name("pre_native_fixture")
+            .await
+            .unwrap()
+            .expect("fixture app database is missing");
+
+        assert_eq!(app_store.validate_native_schema().await.unwrap(), None);
+        let operational_before = raw_app_entries(&app_store).await;
+        assert!(
+            operational_before.len() >= 6,
+            "fixture does not contain the expected real app state: {} entries",
+            operational_before.len()
+        );
+        let counts = app_store.native_effect_counts().await.unwrap();
+        assert_eq!(
+            (
+                counts.pending,
+                counts.verified,
+                counts.failed,
+                counts.blocked,
+                counts.completed,
+            ),
+            (0, 0, 0, 0, 0)
+        );
+        assert_eq!(
+            raw_app_entries(&app_store).await,
+            operational_before,
+            "read-only native inspection mutated the pre-feature database"
+        );
+
+        let proposed = effect_intent("cleanup:pre-native-migration");
+        let store_for_txn = app_store.clone();
+        let evidence_id = storage
+            .run_txn(move |wtxn| {
+                let app_store = store_for_txn.clone();
+                let proposed = proposed.clone();
+                Box::pin(async move {
+                    let bound = app_store
+                        .bind_native_effect_lineage_in_txn(wtxn, proposed)
+                        .await?;
+                    let evidence_id = bound.evidence_id().to_owned();
+                    app_store
+                        .upsert_native_effect_intent_in_txn(wtxn, &bound)
+                        .await?;
+                    Ok(evidence_id)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            app_store.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+        let migrated_entries = raw_app_entries(&app_store).await;
+        for original in &operational_before {
+            assert!(
+                migrated_entries.contains(original),
+                "native migration rewrote pre-feature operational state"
+            );
+        }
+
+        app_store
+            .mark_native_effects_verified(std::slice::from_ref(&evidence_id))
+            .await
+            .unwrap();
+        let store_for_txn = app_store.clone();
+        let evidence_for_txn = evidence_id.clone();
+        storage
+            .run_txn(move |wtxn| {
+                let app_store = store_for_txn.clone();
+                let evidence_id = evidence_for_txn.clone();
+                Box::pin(async move {
+                    app_store
+                        .finalize_native_effects_in_txn(wtxn, &[evidence_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        storage.drop_app("pre_native_fixture").await.unwrap();
+        assert_eq!(
+            app_store
+                .native_effect(&evidence_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Completed
+        );
+        let retained_entries = raw_app_entries(&app_store).await;
+        for (original_key, _) in &operational_before {
+            assert!(
+                retained_entries
+                    .iter()
+                    .all(|(retained_key, _)| retained_key != original_key),
+                "app drop retained a pre-feature operational key"
+            );
+        }
+
+        drop(app_store);
+        drop(storage);
+        let reopened = Storage::new(&settings).await.unwrap();
+        let reopened_app = reopened
+            .open_app_store_by_name("pre_native_fixture")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened_app.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+        assert_eq!(
+            reopened_app
+                .native_effect(&evidence_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            NativeEffectStatus::Completed
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn native_effect_concurrent_single_writer_stress() {
+        const WRITER_COUNT: usize = 64;
+        const EFFECTS_PER_WRITER: usize = 64;
+        const TOTAL_EFFECTS: usize = WRITER_COUNT * EFFECTS_PER_WRITER;
+
+        let dir = TempDir::new().unwrap();
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let app_store = storage
+            .create_app_store("native_writer_stress")
+            .await
+            .unwrap();
+        let start = Arc::new(tokio::sync::Barrier::new(WRITER_COUNT));
+
+        let mut tasks = Vec::with_capacity(WRITER_COUNT);
+        for writer in 0..WRITER_COUNT {
+            let storage = storage.clone();
+            let app_store = app_store.clone();
+            let start = start.clone();
+            tasks.push(tokio::spawn(async move {
+                let proposed: Vec<(NativeEffectIntent, Vec<u8>)> = (0..EFFECTS_PER_WRITER)
+                    .map(|effect| {
+                        let action_id = format!("stress:{writer}:{effect}");
+                        (
+                            effect_intent(&action_id),
+                            format!("stress-tracking:{writer}:{effect}").into_bytes(),
+                        )
+                    })
+                    .collect();
+
+                start.wait().await;
+                let store_for_txn = app_store.clone();
+                let proposed_for_txn = proposed.clone();
+                let evidence_ids = storage
+                    .run_txn(move |wtxn| {
+                        let app_store = store_for_txn.clone();
+                        let proposed = proposed_for_txn.clone();
+                        Box::pin(async move {
+                            let mut evidence_ids = Vec::with_capacity(proposed.len());
+                            for (intent, tracking_key) in proposed {
+                                app_store.db().put(
+                                    &mut **wtxn,
+                                    &tracking_key,
+                                    b"must-survive-until-finalization",
+                                )?;
+                                let bound = app_store
+                                    .bind_native_effect_lineage_in_txn(wtxn, intent)
+                                    .await?;
+                                evidence_ids.push(bound.evidence_id().to_owned());
+                                app_store
+                                    .upsert_native_effect_intent_in_txn(wtxn, &bound)
+                                    .await?;
+                            }
+                            Ok(evidence_ids)
+                        })
+                    })
+                    .await?;
+
+                tokio::task::yield_now().await;
+                app_store
+                    .mark_native_effects_verified(&evidence_ids)
+                    .await?;
+                tokio::task::yield_now().await;
+
+                let store_for_txn = app_store.clone();
+                let evidence_for_txn = evidence_ids.clone();
+                let tracking_keys: Vec<Vec<u8>> = proposed
+                    .iter()
+                    .map(|(_, tracking_key)| tracking_key.clone())
+                    .collect();
+                storage
+                    .run_txn(move |wtxn| {
+                        let app_store = store_for_txn.clone();
+                        let evidence_ids = evidence_for_txn.clone();
+                        let tracking_keys = tracking_keys.clone();
+                        Box::pin(async move {
+                            app_store
+                                .finalize_native_effects_in_txn(wtxn, &evidence_ids)
+                                .await?;
+                            for tracking_key in tracking_keys {
+                                app_store.db().delete(&mut **wtxn, &tracking_key)?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .await?;
+                Ok::<_, Error>((evidence_ids, proposed))
+            }));
+        }
+
+        let mut all_evidence_ids = HashSet::with_capacity(TOTAL_EFFECTS);
+        let mut all_tracking_keys = Vec::with_capacity(TOTAL_EFFECTS);
+        for task in tasks {
+            let (evidence_ids, proposed) = task.await.unwrap().unwrap();
+            for evidence_id in evidence_ids {
+                assert!(
+                    all_evidence_ids.insert(evidence_id),
+                    "duplicate evidence identity under concurrent allocation"
+                );
+            }
+            all_tracking_keys.extend(proposed.into_iter().map(|(_, tracking_key)| tracking_key));
+        }
+        assert_eq!(all_evidence_ids.len(), TOTAL_EFFECTS);
+
+        let counts = app_store.native_effect_counts().await.unwrap();
+        assert_eq!(
+            (
+                counts.pending,
+                counts.verified,
+                counts.failed,
+                counts.blocked,
+                counts.completed,
+            ),
+            (0, 0, 0, 0, TOTAL_EFFECTS as u64)
+        );
+        assert_eq!(
+            app_store.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+        let rtxn = app_store.read_txn().await.unwrap();
+        for tracking_key in all_tracking_keys {
+            assert!(
+                app_store.db().get(&*rtxn, &tracking_key).unwrap().is_none(),
+                "final commit left concurrent tracking behind"
+            );
+        }
+        drop(rtxn);
+
+        for evidence_id in all_evidence_ids.iter().take(32) {
+            assert_eq!(
+                app_store
+                    .native_effect(evidence_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                NativeEffectStatus::Completed
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "phase 6 million-action scale certification"]
+    async fn million_action_descriptor_receipt_native_correlation() {
+        const TOTAL_EFFECTS: usize = 1_000_000;
+        const BATCH_SIZE: usize = 10_000;
+
+        fn digest_hex(domain: &str, index: usize) -> String {
+            format!("{:x}", Sha256::digest(format!("{domain}:{index}")))
+        }
+
+        fn receipt_digest(intent: &NativeEffectIntent) -> [u8; 32] {
+            let descriptor = &intent.descriptor;
+            let mut hasher = Sha256::new();
+            hasher.update(b"synor-phase6-scale-receipt-v1\0");
+            hasher.update(descriptor.action_id.as_bytes());
+            hasher.update([0]);
+            hasher.update(match descriptor.operation {
+                NativeEffectOperation::Delete => b"delete".as_slice(),
+                NativeEffectOperation::Isolate => b"isolate".as_slice(),
+                NativeEffectOperation::Cleanup => b"cleanup".as_slice(),
+            });
+            hasher.update([0]);
+            hasher.update(descriptor.source_digest.as_bytes());
+            hasher.update(descriptor.source_generation.to_be_bytes());
+            hasher.update(descriptor.target_locator_digest.as_bytes());
+            hasher.finalize().into()
+        }
+
+        fn accumulate(xor: &mut [u8; 32], wrapping_sum: &mut u128, digest: [u8; 32]) {
+            for (current, byte) in xor.iter_mut().zip(digest) {
+                *current ^= byte;
+            }
+            *wrapping_sum =
+                wrapping_sum.wrapping_add(u128::from_be_bytes(digest[..16].try_into().unwrap()));
+        }
+
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(&StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        })
+        .await
+        .unwrap();
+        let app_store = storage
+            .create_app_store("million_action_correlation")
+            .await
+            .unwrap();
+        let started = std::time::Instant::now();
+        let mut expected_xor = [0_u8; 32];
+        let mut expected_sum = 0_u128;
+
+        for batch_start in (0..TOTAL_EFFECTS).step_by(BATCH_SIZE) {
+            let batch_end = (batch_start + BATCH_SIZE).min(TOTAL_EFFECTS);
+            let proposed: Vec<NativeEffectIntent> = (batch_start..batch_end)
+                .map(|index| {
+                    let action_id = format!("scale:{index}");
+                    let intent = NativeEffectIntent::new(
+                        NativeEffectDescriptor {
+                            action_id,
+                            operation: NativeEffectOperation::Delete,
+                            source_digest: digest_hex("source", index),
+                            source_generation: 1,
+                            target_locator_digest: digest_hex("target", index),
+                        },
+                        Fingerprint::from_bytes(format!("tracking:{index}").as_bytes()),
+                        NativeVerificationPolicy::QueryVerified,
+                    )
+                    .unwrap();
+                    accumulate(
+                        &mut expected_xor,
+                        &mut expected_sum,
+                        receipt_digest(&intent),
+                    );
+                    intent
+                })
+                .collect();
+
+            let store_for_txn = app_store.clone();
+            let proposed_for_txn = proposed.clone();
+            let evidence_ids = storage
+                .run_txn(move |txn| {
+                    let store = store_for_txn.clone();
+                    let proposed = proposed_for_txn.clone();
+                    Box::pin(async move {
+                        let mut evidence_ids = Vec::with_capacity(proposed.len());
+                        for intent in proposed {
+                            let bound =
+                                store.bind_native_effect_lineage_in_txn(txn, intent).await?;
+                            evidence_ids.push(bound.evidence_id().to_owned());
+                            store
+                                .upsert_native_effect_intent_in_txn(txn, &bound)
+                                .await?;
+                        }
+                        Ok(evidence_ids)
+                    })
+                })
+                .await
+                .unwrap();
+            assert_eq!(evidence_ids.len(), batch_end - batch_start);
+            app_store
+                .mark_native_effects_verified(&evidence_ids)
+                .await
+                .unwrap();
+            let store_for_txn = app_store.clone();
+            let evidence_for_txn = evidence_ids.clone();
+            storage
+                .run_txn(move |txn| {
+                    let store = store_for_txn.clone();
+                    let evidence_ids = evidence_for_txn.clone();
+                    Box::pin(async move {
+                        store
+                            .finalize_native_effects_in_txn(txn, &evidence_ids)
+                            .await
+                    })
+                })
+                .await
+                .unwrap();
+
+            if batch_end % 100_000 == 0 {
+                eprintln!("million-action certification: completed {batch_end}/{TOTAL_EFFECTS}");
+            }
+        }
+
+        let counts = app_store.native_effect_counts().await.unwrap();
+        assert_eq!(
+            (
+                counts.pending,
+                counts.verified,
+                counts.failed,
+                counts.blocked,
+                counts.completed,
+            ),
+            (0, 0, 0, 0, TOTAL_EFFECTS as u64)
+        );
+
+        let effect_prefix = DbEntryKey::NativeEffectPrefix.encode().unwrap();
+        let rtxn = app_store.read_txn().await.unwrap();
+        let mut observed_count = 0_usize;
+        let mut observed_xor = [0_u8; 32];
+        let mut observed_sum = 0_u128;
+        for entry in app_store.db().prefix_iter(&*rtxn, &effect_prefix).unwrap() {
+            let (_, raw_value) = entry.unwrap();
+            let intent: NativeEffectIntent = from_msgpack_slice(raw_value).unwrap();
+            intent.validate().unwrap();
+            assert_eq!(intent.status, NativeEffectStatus::Completed);
+            let index: usize = intent
+                .descriptor
+                .action_id
+                .strip_prefix("scale:")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(index < TOTAL_EFFECTS);
+            assert_eq!(intent.descriptor.source_digest, digest_hex("source", index));
+            assert_eq!(
+                intent.descriptor.target_locator_digest,
+                digest_hex("target", index)
+            );
+            assert_eq!(
+                intent.tracking_locator,
+                Fingerprint::from_bytes(format!("tracking:{index}").as_bytes())
+            );
+            accumulate(
+                &mut observed_xor,
+                &mut observed_sum,
+                receipt_digest(&intent),
+            );
+            observed_count += 1;
+        }
+        assert_eq!(observed_count, TOTAL_EFFECTS);
+        assert_eq!(observed_xor, expected_xor);
+        assert_eq!(observed_sum, expected_sum);
+        eprintln!(
+            "million-action certification passed in {:.3}s; data.mdb={} bytes",
+            started.elapsed().as_secs_f64(),
+            std::fs::metadata(dir.path().join("mdb/data.mdb"))
+                .unwrap()
+                .len()
+        );
     }
 
     #[tokio::test]

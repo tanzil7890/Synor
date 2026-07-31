@@ -243,4 +243,3 @@ The same machinery covers **logic** changes too: tune the chunk size or swap the
 ## Run it
 
 The full, runnable example is in this local workspace: examples/pdf_embedding. If your inputs are already plain text or Markdown, Semantic Search 101 is the same flow without the docling step; if you want the Markdown itself as the output, see PDF → Markdown.
-

@@ -11,10 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
+use serde_json::json;
 use synor::ops::api::{ApiEmbedder, ApiTranscriber, LlmPairResolver};
 use synor::prelude::{FileContentCache, FileLike, FileMetadata, FilePath};
 use synor::{CanonicalSide, PairResolver};
-use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 

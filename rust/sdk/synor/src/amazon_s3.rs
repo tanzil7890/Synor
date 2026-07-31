@@ -24,8 +24,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use aws_sdk_s3::Client;
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
+use synor_utils::fingerprint::Fingerprint;
 
 /// Re-export of the upstream [`aws_sdk_s3`] crate. The bucket and its objects are
 /// user-managed (the source is read-only), so callers use this — together with

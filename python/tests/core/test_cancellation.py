@@ -14,16 +14,30 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+import pytest_asyncio
 
 import synor as syn
 
 from tests import common
 
-synor_env = common.create_test_env(__file__)
+
+@pytest_asyncio.fixture
+async def synor_env(request: pytest.FixtureRequest) -> syn.Environment:
+    """Bind the Environment to the test's own running event loop.
+
+    These tests assert on `asyncio.Event`s that the app coroutine sets. A
+    module-level Environment runs that coroutine on its own background loop,
+    and a cross-loop `Event.set()` never wakes the test's loop — the waiter
+    only resumes when its own timeout timer fires, which both slows the tests
+    to their timeout values and makes the flags race with the assertions.
+    """
+    return common.create_test_env(__file__, suffix=request.node.name)
 
 
 @pytest.mark.asyncio
-async def test_non_live_global_cancel_terminates_update() -> None:
+async def test_non_live_global_cancel_terminates_update(
+    synor_env: syn.Environment,
+) -> None:
     """Global cancellation must reach a non-live component's Python coroutine.
 
     Regression test for the case where Component::run / run_in_background
@@ -76,7 +90,9 @@ async def test_non_live_global_cancel_terminates_update() -> None:
 
 
 @pytest.mark.asyncio
-async def test_app_drop_interrupts_in_flight_update() -> None:
+async def test_app_drop_interrupts_in_flight_update(
+    synor_env: syn.Environment,
+) -> None:
     """App.drop() must interrupt a concurrent update.
 
     The app token is shared between update and drop_app. drop_app cancels
@@ -114,6 +130,12 @@ async def test_app_drop_interrupts_in_flight_update() -> None:
             await asyncio.wait_for(result_task, timeout=5.0)
         except Exception:
             pass
+
+        # Same propagation caveat as the global-cancel test above: drop_app
+        # returns once the Rust update task exits, while the inner spawned task
+        # that drops the work future and triggers CancelOnDropPy still has to
+        # deliver CancelledError into Python. Wait for it rather than sampling.
+        await asyncio.wait_for(cancelled_in_python.wait(), timeout=5.0)
 
         assert cancelled_in_python.is_set(), (
             "process coroutine never received CancelledError — "

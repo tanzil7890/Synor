@@ -33,6 +33,9 @@ def test_lock_and_package_are_deterministic_and_exclude_data(
     main = _project(tmp_path)
     lock = packaging.build_pipeline_lock(str(main))
     assert packaging.verify_pipeline_lock(lock).ok
+    selected_lock = packaging.build_pipeline_lock(f"{main}:LockedApp")
+    assert selected_lock.entrypoint == lock.entrypoint
+    assert selected_lock.files == lock.files
 
     first = packaging.create_pipeline_package(lock, tmp_path / "first.synor")
     second = packaging.create_pipeline_package(lock, tmp_path / "second.synor")

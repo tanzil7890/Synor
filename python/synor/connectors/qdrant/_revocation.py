@@ -1654,7 +1654,8 @@ class CertifiedQdrantTarget:
         if not observed:
             return None
         assert isinstance(records, list)
-        return records[0]
+        record: object = records[0]
+        return record
 
     async def _retrieve_payload(self, point_id: _PointId) -> dict[str, Any] | None:
         record = await self._retrieve_point(point_id, with_vectors=False)
@@ -1899,12 +1900,7 @@ def _lineage_filter(
 ) -> qdrant_models.Filter:
     return qdrant_models.Filter(
         must=[
-            qdrant_models.HasIdCondition(
-                has_id=cast(
-                    list[qdrant_models.ExtendedPointId],
-                    [point_id],
-                )
-            ),
+            qdrant_models.HasIdCondition(has_id=[point_id]),
             _match("synor.source_digest", source_digest),
             _match("synor.generation", generation),
         ]
@@ -1918,12 +1914,7 @@ def _lineage_upto_filter(
 ) -> qdrant_models.Filter:
     return qdrant_models.Filter(
         must=[
-            qdrant_models.HasIdCondition(
-                has_id=cast(
-                    list[qdrant_models.ExtendedPointId],
-                    [point_id],
-                )
-            ),
+            qdrant_models.HasIdCondition(has_id=[point_id]),
             _match("synor.source_digest", source_digest),
             qdrant_models.FieldCondition(
                 key="synor.generation",
@@ -1941,12 +1932,7 @@ def _lineage_transition_filter(
 ) -> qdrant_models.Filter:
     return qdrant_models.Filter(
         must=[
-            qdrant_models.HasIdCondition(
-                has_id=cast(
-                    list[qdrant_models.ExtendedPointId],
-                    [point_id],
-                )
-            ),
+            qdrant_models.HasIdCondition(has_id=[point_id]),
             _match("synor.source_digest", source_digest),
             qdrant_models.FieldCondition(
                 key="synor.generation",
@@ -2171,7 +2157,7 @@ def _canonical_point_id(point_id: object) -> str:
 
 def _is_not_found(error: BaseException) -> bool:
     if isinstance(error, UnexpectedResponse):
-        return error.status_code == 404
+        return bool(error.status_code == 404)
     if isinstance(error, grpc.RpcError):
         code = getattr(error, "code", None)
         return callable(code) and code() == grpc.StatusCode.NOT_FOUND

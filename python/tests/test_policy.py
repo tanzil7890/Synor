@@ -13,6 +13,27 @@ def test_offline_policy_denies_before_dns() -> None:
             socket.getaddrinfo("example.invalid", 443)
 
 
+def test_offline_policy_allows_local_ipc_without_af_unix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delattr(socket, "AF_UNIX", raising=False)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+
+        with synor.policy_scope(synor.EgressPolicy.offline()):
+            with socket.create_connection(listener.getsockname()) as client:
+                connection, _address = listener.accept()
+                connection.close()
+                assert client.getpeername() == listener.getsockname()
+
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as external:
+                with pytest.raises(
+                    synor.PolicyViolation, match="network access is disabled"
+                ):
+                    external.connect(("192.0.2.1", 443))
+
+
 def test_allow_list_and_classification_are_enforced() -> None:
     policy = synor.EgressPolicy(
         allowed_hosts=frozenset({"api.example.test", "*.trusted.test"}),

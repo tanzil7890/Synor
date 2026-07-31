@@ -5,12 +5,12 @@
 
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use synor::{
     App, PreviewAction, Result, StableKey, TargetAction, TargetActionSink, TargetHandler,
     TargetReconcileOutput, UpdateOptions, declare_target_state,
     register_root_target_states_provider,
 };
-use serde::{Deserialize, Serialize};
 
 type Log = Arc<Mutex<Vec<String>>>;
 

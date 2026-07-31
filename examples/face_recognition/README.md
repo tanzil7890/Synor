@@ -82,4 +82,3 @@ python main.py query images/einplanck3.jpg
 Because Einstein appears in *both* the Einstein–Planck photo and the Solvay conference, the query pulls his Solvay face back as a close match — a Euclidean distance around `0.46`, comfortably under dlib's ~0.6 same-person threshold. That's face recognition across photos, with no labels or tags.
 
 ---
-

@@ -84,4 +84,3 @@ python main.py "wireless headphones"
 The most semantically similar products come back ranked — even when they share none of the words in your query. That's the whole point of a vector index.
 
 ---
-

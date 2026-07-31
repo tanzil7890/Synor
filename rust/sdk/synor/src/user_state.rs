@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use synor_core::engine::context::ComponentProcessorContext;
-use synor_core::state::stable_path::StableKey;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use synor_core::engine::context::ComponentProcessorContext;
+use synor_core::state::stable_path::StableKey;
 
 use crate::error::{Error, Result};
 use crate::profile::{RustProfile, Value};

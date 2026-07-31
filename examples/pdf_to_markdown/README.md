@@ -68,4 +68,3 @@ ls out/      # e.g. 1706.03762v7.md
 Add, replace, or delete a PDF in `pdf_files/` and re-run `synor update main` — only the changed file is reprocessed, and a removed PDF's `.md` is deleted automatically.
 
 ---
-

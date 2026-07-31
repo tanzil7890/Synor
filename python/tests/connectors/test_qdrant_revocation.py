@@ -40,8 +40,8 @@ if HAS_QDRANT:
     from synor._internal.context_keys import ContextProvider
     from synor._internal.suppression import StateStoreSuppressionIndex
     from synor._internal.verified_sink import (
-        TargetActionDescriptionError,
         TargetActionApplyError,
+        TargetActionDescriptionError,
         TargetVerificationError,
         TargetVerificationOutcome,
         VerificationRetryPolicy,
@@ -242,10 +242,12 @@ class _FakeClient:
             point_ids = [str(raw_id) for raw_id in selector.points]
         for point_id in point_ids:
             if point_id in self.payloads:
-                self.pending_delete_reads[point_id] = self.delete_visibility_reads
                 if self.delete_visibility_reads == 0:
+                    self.pending_delete_reads.pop(point_id, None)
                     self.payloads.pop(point_id, None)
                     self.vectors.pop(point_id, None)
+                else:
+                    self.pending_delete_reads[point_id] = self.delete_visibility_reads
         return self._result()
 
     def retrieve(self, **kwargs: Any) -> list[SimpleNamespace]:
@@ -1486,6 +1488,71 @@ async def test_delayed_old_generation_cannot_delete_reauthorized_point() -> None
     assert point_id in client.payloads
     assert client.payloads[point_id]["synor"]["generation"] == 3
     assert client.payloads[point_id]["synor"]["servable"] is True
+
+
+@requires_qdrant
+@pytest.mark.asyncio
+async def test_delete_reinsert_race_preserves_new_generation_after_remote_apply() -> (
+    None
+):
+    client = _FakeClient()
+    target, action, point_id = _delete_setup(client)
+    delete_applied = asyncio.Event()
+    release_verification = asyncio.Event()
+    outcomes: list[TargetVerificationOutcome] = []
+
+    async def after_apply(
+        context_provider: ContextProvider,
+        applied_action: qdrant.QdrantRevocationAction,
+    ) -> None:
+        del context_provider
+        assert applied_action is action
+        assert point_id not in client.payloads
+        delete_applied.set()
+        await release_verification.wait()
+
+    async def record(
+        context_provider: ContextProvider,
+        values: Sequence[TargetVerificationOutcome],
+        /,
+    ) -> None:
+        del context_provider
+        outcomes.extend(values)
+
+    stale_delete = asyncio.create_task(
+        target.verified_delete_sink(
+            record=record,
+            after_apply=after_apply,
+            policy=_policy(1),
+        )(ContextProvider(), [action])
+    )
+    await asyncio.wait_for(delete_applied.wait(), timeout=2)
+
+    replacement = qdrant.governed_point(
+        lineage=_lineage(generation=3),
+        chunk_digest=_digest("point-a"),
+        vector=[0.3],
+        payload={"text": "reauthorized"},
+    )
+    assert str(replacement.id) == point_id
+    await target.upsert_governed([replacement], mode="insert_only")
+    release_verification.set()
+
+    with pytest.raises(TargetVerificationError):
+        await stale_delete
+
+    governed = client.payloads[point_id]["synor"]
+    assert governed["generation"] == 3
+    assert governed["servable"] is True
+    assert client.payloads[point_id]["text"] == "reauthorized"
+    assert outcomes[-1].status.value == "present"
+
+    # A retry of the old delete is generation-filtered and cannot touch the
+    # replacement even though it reuses the deterministic point ID.
+    retry = target.verified_delete_sink(record=_record_noop, policy=_policy(1))
+    with pytest.raises(TargetActionApplyError):
+        await retry(ContextProvider(), [action])
+    assert client.payloads[point_id]["synor"]["generation"] == 3
 
 
 @requires_qdrant

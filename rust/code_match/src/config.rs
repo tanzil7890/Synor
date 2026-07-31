@@ -11,8 +11,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use synor_code_ast::prog_langs::{self, ProgrammingLanguageInfo};
 use regex::Regex;
+use synor_code_ast::prog_langs::{self, ProgrammingLanguageInfo};
 use tree_sitter::Language;
 
 // ---------------------------------------------------------------------------

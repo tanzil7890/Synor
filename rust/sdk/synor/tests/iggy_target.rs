@@ -16,12 +16,12 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use synor::iggy::{self, IggyProducer};
-use synor::{App, Result};
 use iggy::prelude::{
     CompressionAlgorithm, Consumer, Identifier, IggyExpiry, MaxTopicSize, MessageClient,
     PollingStrategy, StreamClient, TopicClient,
 };
+use synor::iggy::{self, IggyProducer};
+use synor::{App, Result};
 
 const PARTITION: u32 = 0; // Iggy partitions are 0-indexed (matches the connector default).
 

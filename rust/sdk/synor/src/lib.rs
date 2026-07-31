@@ -101,7 +101,7 @@ pub use live_component::{
     LiveMapSubscriber, LiveMapView, MountKind, SingleWatcherGuard, SingleWatcherToken,
 };
 #[doc(hidden)]
-pub use logic::{SYNOR_FN_LOGIC, FnLogicEntry};
+pub use logic::{FnLogicEntry, SYNOR_FN_LOGIC};
 pub use resources::chunk::{Chunk, TextPosition};
 pub use resources::embedder::Embedder;
 pub use resources::live_map::LiveMap;
@@ -124,8 +124,8 @@ pub use target_state::{
 pub use user_state::{IntoStateKey, StateHandle};
 
 // Re-export proc macros
-pub use synor_macros::{SchemaFields, function, mount_each, use_mount};
 pub use row_schema::{LogicalType, SchemaField, SchemaFields};
+pub use synor_macros::{SchemaFields, function, mount_each, use_mount};
 
 // Re-exported so users can implement the async `LiveComponent` / `LiveMapFeed`
 // / `LiveMapView` traits as `#[synor::async_trait]` without taking their own

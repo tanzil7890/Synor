@@ -25,15 +25,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 
-type BatchFuture<Out> =
-    Pin<Box<dyn Future<Output = synor_utils::error::Result<Vec<Out>>> + Send>>;
+type BatchFuture<Out> = Pin<Box<dyn Future<Output = synor_utils::error::Result<Vec<Out>>> + Send>>;
 type BatchFn<In, Out> = Box<dyn Fn(Vec<In>) -> BatchFuture<Out> + Send + Sync>;
 
 /// Adapts a user closure `Vec<In> -> Result<Vec<Out>>` to the core batcher's `Runner`.
@@ -118,8 +117,7 @@ where
     /// the item is handed to the core batcher (coalesced with other concurrent
     /// misses) and the result is memoized.
     pub async fn call(&self, ctx: &Ctx, item: In) -> Result<Out> {
-        let fp =
-            crate::memo::key_fingerprint_result(&("synor_batched", self.code_hash, &item))?;
+        let fp = crate::memo::key_fingerprint_result(&("synor_batched", self.code_hash, &item))?;
         let batcher = self.batcher.clone();
         // A batch impl is ctx-free, so it makes no tracked child `#[function]`
         // calls; the `propagate_children_fn_logic` flag is therefore inert here.

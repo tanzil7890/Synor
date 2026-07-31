@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
+use synor_utils::fingerprint::Fingerprint;
 use walkdir::WalkDir;
 
 use crate::ctx::Ctx;

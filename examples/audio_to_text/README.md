@@ -83,4 +83,3 @@ psql "$POSTGRES_URL" -c \
 Re-running `synor update main.py` incrementally processes only added, changed, and removed files.
 
 ---
-

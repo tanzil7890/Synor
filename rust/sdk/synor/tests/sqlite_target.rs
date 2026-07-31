@@ -8,10 +8,10 @@
 
 use std::sync::LazyLock;
 
-use synor::{App, ContextKey, Ctx, Environment, Result, sqlite};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::Row as _;
+use synor::{App, ContextKey, Ctx, Environment, Result, sqlite};
 
 static DB: LazyLock<ContextKey<sqlite::Database>> = LazyLock::new(|| {
     ContextKey::new_with_state("sqlite_target_test_db", |db: &sqlite::Database| {

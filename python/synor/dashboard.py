@@ -173,6 +173,12 @@ class _ThreadingHTTPServer(_socketserver.ThreadingMixIn, _http_server.HTTPServer
     daemon_threads = True
     allow_reuse_address = True
 
+    def server_bind(self) -> None:
+        _socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
+
 
 class DashboardServer:
     """Read-only dashboard server. Call :meth:`shutdown` from another thread."""
@@ -219,7 +225,7 @@ class DashboardServer:
                 self._headers("application/json; charset=utf-8", len(payload))
                 self.wfile.write(payload)
 
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 path = _urlparse.urlsplit(self.path).path
                 try:
                     if path == "/":

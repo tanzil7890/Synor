@@ -38,8 +38,8 @@
 //! regex is a `client` error from `lex` / `Pattern::compile`.
 
 use crate::config::{LangConfig, TokKind};
-use synor_utils::error::{Error, Result};
 use regex::Regex;
+use synor_utils::error::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cardinality {

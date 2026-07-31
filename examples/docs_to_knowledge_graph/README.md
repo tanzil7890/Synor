@@ -91,4 +91,3 @@ ORDER BY docs DESC LIMIT 10
 The LLM will sometimes name the same concept two ways ("PostgreSQL" vs "Postgres"). The meeting notes graph example adds an embedding + LLM entity-resolution pass that collapses near-duplicates — it drops into this pipeline between the two phases.
 
 ---
-

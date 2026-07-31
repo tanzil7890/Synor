@@ -1242,17 +1242,11 @@ class RevocationRuntime:
                 not outcome.required_postcondition_holds for outcome in outcome_batch
             )
             if any_failed:
-                if case.stage in {
-                    RevocationStage.ACKNOWLEDGED,
+                return await self._append_transition(
+                    case,
                     RevocationStage.FAILED,
-                }:
-                    if case.stage is not RevocationStage.FAILED:
-                        case = await self._append_transition(
-                            case,
-                            RevocationStage.FAILED,
-                            safe_error_code=self._failure_code(outcome_batch),
-                        )
-                return case
+                    safe_error_code=self._failure_code(outcome_batch),
+                )
 
             latest_receipts: dict[str, RevocationReceipt] = {}
             for receipt in receipts_by_id.values():

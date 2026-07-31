@@ -36,7 +36,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use synor_utils::fingerprint::Fingerprint;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::pkcs1v15::SigningKey;
@@ -44,6 +43,7 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::signature::{SignatureEncoding, Signer};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::error::{Error, Result};
 use crate::file::{

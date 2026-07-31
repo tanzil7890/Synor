@@ -1,9 +1,9 @@
-use synor_utils::error::{CError, CResult};
 use pyo3::exceptions::{PyRuntimeError, PyTimeoutError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule, PyString};
 use std::any::Any;
 use std::fmt::{Debug, Display};
+use synor_utils::error::{CError, CResult};
 
 pyo3::create_exception!(synor_py_utils, DeadlineExceededError, PyTimeoutError);
 

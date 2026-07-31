@@ -16,13 +16,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use synor::oci_object_storage::{
-    ListOptions, OciClient, OciConfig, OciFile, list_objects_live,
-};
-use synor::{App, LiveMapView, PatternFilePathMatcher, Result, UpdateOptions};
 use rsa::RsaPrivateKey;
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use serde_json::json;
+use synor::oci_object_storage::{ListOptions, OciClient, OciConfig, OciFile, list_objects_live};
+use synor::{App, LiveMapView, PatternFilePathMatcher, Result, UpdateOptions};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 

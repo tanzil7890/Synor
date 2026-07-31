@@ -84,4 +84,3 @@ python main.py "rust"     # search content for one topic
 The trending score is computed in SQL: a thread-level mention counts for more than a comment-level one, grouped by topic and ordered by score. Re-run `synor update main` anytime to catch up on new stories — only new content hits the LLM.
 
 ---
-

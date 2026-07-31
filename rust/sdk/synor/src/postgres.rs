@@ -13,11 +13,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::ctx::{ContextKey, ContextStore, Ctx};
 use crate::error::{Error, Result};

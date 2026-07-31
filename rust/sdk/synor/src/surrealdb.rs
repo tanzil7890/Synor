@@ -13,13 +13,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use synor_utils::fingerprint::Fingerprint;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
 use surrealdb::Surreal;
 use surrealdb::engine::remote::ws::{Client, Ws};
 use surrealdb::opt::auth::Root;
 use surrealdb::types::RecordId;
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::ctx::{ContextKey, ContextStore, Ctx};
 use crate::error::{Error, Result};
@@ -476,11 +476,7 @@ fn table_target_state(
     validate_ident(&spec.table_name, "table name")?;
     let provider = register_root_target_states_provider(
         ctx,
-        format!(
-            "synor/surrealdb/table/{}/{}",
-            graph.name(),
-            spec.table_name
-        ),
+        format!("synor/surrealdb/table/{}/{}", graph.name(), spec.table_name),
         TableHandler {
             graph_key: graph.name().to_string(),
         },

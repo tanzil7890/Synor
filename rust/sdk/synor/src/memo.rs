@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use synor_core::engine::context::{FnCallContext, MemoStatesPayload};
 use synor_core::engine::function::reserve_memoization;
 use synor_utils::fingerprint::{Fingerprint, Fingerprinter};
-use serde::{Deserialize, Serialize};
 
 use crate::ctx::{Ctx, fn_call_guard};
 use crate::error::{Error, Result};

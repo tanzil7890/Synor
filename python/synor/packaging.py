@@ -14,6 +14,7 @@ import typing as _typing
 import uuid as _uuid
 import zipfile as _zipfile
 
+from ._internal.app_target import split_app_target as _split_app_target
 from ._version import __version__ as _synor_version
 
 __all__ = [
@@ -63,7 +64,7 @@ def _is_sha256(value: str) -> bool:
 
 
 def _module_path(app_target: str) -> _pathlib.Path:
-    module_ref = app_target.split(":", 1)[0]
+    module_ref, _app_selection = _split_app_target(app_target)
     path = _pathlib.Path(module_ref).resolve()
     if not path.is_file() or path.suffix != ".py":
         raise ValueError("pipeline packaging requires a local Python APP_TARGET")

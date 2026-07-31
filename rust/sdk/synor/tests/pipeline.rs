@@ -1,8 +1,6 @@
 //! Integration tests for the pipeline: App::update, memo::cached, sync API.
 
-use synor::{
-    App, ContextKey, Environment, IdGenerator, UuidGenerator, generate_id, generate_uuid,
-};
+use synor::{App, ContextKey, Environment, IdGenerator, UuidGenerator, generate_id, generate_uuid};
 use tokio::time::{Duration, sleep};
 
 /// Helper: create an App with a temp LMDB directory (async tests).
@@ -1239,9 +1237,10 @@ async fn memo_cached_propagates_closure_error() {
 #[test]
 fn update_blocking_propagates_closure_error() {
     let (app, _dir) = temp_app_blocking("sync_error");
-    let result = app.update_blocking(|_ctx| async move {
-        Err::<(), _>(synor::Error::engine("sync test error"))
-    });
+    let result =
+        app.update_blocking(
+            |_ctx| async move { Err::<(), _>(synor::Error::engine("sync test error")) },
+        );
     assert!(result.is_err());
 }
 
@@ -1955,8 +1954,8 @@ mod function_macro_memo_key_tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, OnceLock};
 
-    use synor::{ContextKey, Ctx, Result};
     use serde::Serialize;
+    use synor::{ContextKey, Ctx, Result};
 
     #[derive(Clone, Serialize)]
     struct Entry {
@@ -2260,12 +2259,12 @@ async fn max_inflight_components_allows_nested_scope_with_single_permit() {
 
 #[tokio::test]
 async fn public_target_state_api_reconciles_typed_actions_and_tracking_records() {
+    use serde::{Deserialize, Serialize};
+    use std::sync::{Arc, Mutex};
     use synor::{
         StableKey, TargetAction, TargetActionSink, TargetHandler, TargetReconcileOutput,
         declare_target_state, register_root_target_states_provider,
     };
-    use serde::{Deserialize, Serialize};
-    use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
     struct WriteAction {
@@ -2807,9 +2806,9 @@ async fn ctx_mount_each_rejects_duplicate_keys() {
 
 #[tokio::test]
 async fn dir_target_writes_skips_unchanged_and_reconciles_orphans() {
-    use synor::DirTarget;
     use std::fs;
     use std::time::Duration;
+    use synor::DirTarget;
 
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("lmdb");
@@ -2938,8 +2937,8 @@ async fn dir_target_deletes_file_when_source_disappears_via_mount_each() {
 
 mod mount_macros {
     use super::temp_app;
-    use synor::prelude::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use synor::prelude::*;
 
     static EACH_CALLS: AtomicUsize = AtomicUsize::new(0);
 

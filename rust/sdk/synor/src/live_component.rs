@@ -131,8 +131,7 @@ pub(crate) fn build_chained_on_error(
                 }
             }
             Err(to_core_error(current))
-        })
-            as Pin<Box<dyn Future<Output = synor_utils::error::Result<()>> + Send + 'static>>
+        }) as Pin<Box<dyn Future<Output = synor_utils::error::Result<()>> + Send + 'static>>
     }))
 }
 

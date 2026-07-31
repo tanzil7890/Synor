@@ -23,12 +23,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use synor_utils::fingerprint::Fingerprint;
 use iggy::prelude::{
     Client, Consumer, Identifier, IggyClient, IggyMessage, MessageClient, Partitioning,
     PollingStrategy, TopicClient,
 };
 use serde::{Deserialize, Serialize};
+use synor_utils::fingerprint::Fingerprint;
 
 /// Re-export of the upstream [`iggy`] crate prelude. Streams and topics are
 /// user-managed, so callers use this to create/manage them and to poll messages

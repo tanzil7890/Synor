@@ -1,5 +1,6 @@
 //! Text processing operations exposed to Python.
 
+use pyo3::prelude::*;
 use synor_code_ast::view::{SegmentKind, SourceView};
 use synor_code_ast::{CodeSource, prog_langs};
 use synor_ops_text::pattern_matcher::PatternMatcher;
@@ -7,7 +8,6 @@ use synor_ops_text::split::{
     Chunk, CustomLanguageConfig, KeepSeparator, RecursiveChunkConfig, RecursiveChunker,
     RecursiveSplitConfig, SeparatorSplitConfig, SeparatorSplitter,
 };
-use pyo3::prelude::*;
 
 use crate::code::PyCodeSource;
 

@@ -79,4 +79,3 @@ cat output/code_embedding.md
 Each page has an **Overview**, a **Components** list (★ marks `@syn.fn` functions), a **Synor Pipeline** Mermaid diagram where applicable, and per-file summaries for multi-file projects. Edit a `.py` file and re-run — only that file is re-analyzed, every other file served from the memo cache.
 
 ---
-

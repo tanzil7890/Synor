@@ -61,7 +61,9 @@ byte count. Decisions are explicit values and denied decisions raise
 
 During a controlled run, `policy_scope()` guards standard Python socket
 connections. `--offline` installs a deny-network policy before loading and
-running the app. Unix-domain sockets remain local and are allowed.
+running the app. Unix-domain sockets and numeric loopback connections remain
+local and are allowed, including the loopback socketpairs used by Windows event
+loops.
 
 Synor-owned model helpers call the policy engine explicitly before remote model
 operations. Native libraries that bypass Python's socket API must also call

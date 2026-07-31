@@ -7,9 +7,9 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use pyo3::prelude::*;
 use synor_code_ast::{CodeSource, LineIndex, OutputPosition, ParseOutcome, prog_langs};
 use synor_code_match::{Match, Pattern, Prefilter, index_terms_in_tree, lang};
-use pyo3::prelude::*;
 
 use crate::ops::PyChunk;
 

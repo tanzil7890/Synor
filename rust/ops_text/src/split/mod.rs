@@ -8,10 +8,10 @@ mod by_separators;
 mod recursive;
 
 pub use by_separators::{KeepSeparator, SeparatorSplitConfig, SeparatorSplitter};
-pub use synor_code_ast::{LineIndex, OutputPosition, TextRange};
 pub use recursive::{
     CustomLanguageConfig, RecursiveChunkConfig, RecursiveChunker, RecursiveSplitConfig,
 };
+pub use synor_code_ast::{LineIndex, OutputPosition, TextRange};
 
 /// A chunk of text with its range and position information.
 #[derive(Debug, Clone)]

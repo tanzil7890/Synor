@@ -18,12 +18,12 @@ use arrow_array::{
     Array, ArrayRef, Float64Array, Int64Array, RecordBatch, RecordBatchIterator, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use synor_utils::fingerprint::Fingerprint;
 use lancedb::Connection;
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::table::NewColumnTransform;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+use synor_utils::fingerprint::Fingerprint;
 
 use crate::ctx::{ContextKey, ContextStore, Ctx};
 use crate::error::{Error, Result};

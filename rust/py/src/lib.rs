@@ -91,6 +91,15 @@ fn core_module(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()>
     m.add_function(wrap_pyfunction!(inspect::list_app_names, m)?)?;
     m.add_function(wrap_pyfunction!(inspect::native_effect_counts, m)?)?;
     m.add_function(wrap_pyfunction!(inspect::native_effect_counts_by_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        inspect::native_effect_snapshot_by_name,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(
+        inspect::compact_native_effects_by_name,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(inspect::prepare_native_downgrade, m)?)?;
     m.add_function(wrap_pyfunction!(inspect::get_stable_path_detail, m)?)?;
     m.add_function(wrap_pyfunction!(
         inspect::get_stable_path_detail_by_name,
@@ -107,6 +116,11 @@ fn core_module(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()>
     m.add_class::<inspect::PyStablePathNodeType>()?;
     m.add_class::<inspect::PyStablePathInfo>()?;
     m.add_class::<inspect::PyNativeEffectCounts>()?;
+    m.add_class::<inspect::PyNativeEffectRecord>()?;
+    m.add_class::<inspect::PyNativeEffectSnapshot>()?;
+    m.add_class::<inspect::PyNativeEffectAppSnapshot>()?;
+    m.add_class::<inspect::PyNativeEffectCompactionResult>()?;
+    m.add_class::<inspect::PyNativeEffectDowngradeResult>()?;
     m.add_class::<inspect::PyStablePathInfoAsyncIterator>()?;
     m.add_class::<inspect::PyTargetStateEntryAsyncIterator>()?;
     m.add_class::<inspect::PyTargetStateVersion>()?;

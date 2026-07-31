@@ -68,4 +68,3 @@ python main.py "what is attention?"
 With the sample papers indexed, the most semantically similar passages come back ranked — even when they share none of the words in your query. This example keeps it minimal and doesn't declare a vector index, so queries do a sequential scan. For a larger corpus, add `target_table.declare_vector_index(column="embedding")` exactly as Semantic Search 101 does.
 
 ---
-

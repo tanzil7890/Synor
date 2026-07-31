@@ -392,5 +392,3 @@ Edit the topic-extraction prompt or switch `LLM_MODEL`, then run `synor update m
 ## Run it
 
 Full source on GitHub:
-
-

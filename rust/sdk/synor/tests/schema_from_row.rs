@@ -119,9 +119,9 @@ fn postgres_from_row_matches_explicit_schema() {
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn sqlite_from_row_round_trips_a_row() -> synor::Result<()> {
+    use sqlx::Row as _;
     use synor::sqlite::{self, Database, TableSchema};
     use synor::{ContextKey, Environment, SchemaFields};
-    use sqlx::Row as _;
 
     #[derive(serde::Serialize, SchemaFields, Clone)]
     struct Item {
@@ -193,9 +193,9 @@ async fn sqlite_from_row_round_trips_a_row() -> synor::Result<()> {
 #[cfg(feature = "doris")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn doris_from_row_round_trips_a_row() -> synor::Result<()> {
+    use sqlx::Row as _;
     use synor::doris::{self, DorisConfig, DorisConnection, TableSchema};
     use synor::{ContextKey, Environment, SchemaFields};
-    use sqlx::Row as _;
 
     let Ok(fe_host) = std::env::var("DORIS_FE_HOST") else {
         eprintln!("skipping live Doris from_row test; DORIS_FE_HOST is not set");

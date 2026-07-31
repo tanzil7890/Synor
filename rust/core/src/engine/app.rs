@@ -154,6 +154,16 @@ impl<Prof: EngineProfile> App<Prof> {
         if preview_collector.is_some() && options.live {
             client_bail!("live app updates are not supported during preview");
         }
+        // A durable generation fences stale writes inside one database, while
+        // this OS-backed lease prevents another process from driving any
+        // update mode against the same app during a live run. Acquire before
+        // operation state changes and hold it until the spawned task exits.
+        // Process death releases it automatically.
+        let app_operation_lease = self
+            .app_ctx()
+            .env()
+            .storage()
+            .try_acquire_app_operation_lease(self.app_ctx().app_reg().name())?;
         // Refresh the app token if a prior operation (e.g. drop_app) cancelled
         // it, so this update starts with a non-cancelled token.
         self.app_ctx().reset_cancellation_token_if_cancelled();
@@ -192,6 +202,7 @@ impl<Prof: EngineProfile> App<Prof> {
         let span = Span::current();
         let task = get_runtime().spawn(
             async move {
+                let _app_operation_lease = app_operation_lease;
                 let run_fut = async {
                     root_component
                         .clone()
@@ -208,6 +219,15 @@ impl<Prof: EngineProfile> App<Prof> {
                 if live && result.is_ok() {
                     // In live mode, wait for all descendants to finish before signaling termination.
                     root_component.wait_until_inactive().await;
+                    // The root processor can resolve in the same instant the
+                    // app token is cancelled (drop_app, Ctrl+C), in which case
+                    // the select above takes the `run_fut` branch and the live
+                    // descendants above became inactive because cancellation
+                    // tore them down — not because they finished their work.
+                    // Re-check so a cancelled live run never reports success.
+                    if cancel_token.is_cancelled() {
+                        result = Err(internal_error!("Operation cancelled"));
+                    }
                 }
                 let live_terminal_error = root_component
                     .app_ctx()
@@ -343,6 +363,20 @@ impl<Prof: EngineProfile> App<Prof> {
                 // root component / clearing the DB, so leaked drain tasks
                 // don't race teardown of shared resources) ──
                 drain_live_components(live_snapshot).await?;
+
+                // Cancellation also terminates this process's root live
+                // update, which owns the app lease. Acquire only after that
+                // drain barrier so drop can take over the lease. An external
+                // owner remains a bounded, read-only failure.
+                let _app_operation_lease = root_component
+                    .app_ctx()
+                    .env()
+                    .storage()
+                    .acquire_app_operation_lease(
+                        root_component.app_ctx().app_reg().name(),
+                        std::time::Duration::from_secs(LIVE_COMPONENT_DRAIN_TIMEOUT_SECS),
+                    )
+                    .await?;
 
                 // A live submit may have crossed its first fence immediately
                 // before cancellation and persisted an obligation while the

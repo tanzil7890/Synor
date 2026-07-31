@@ -157,4 +157,3 @@ In catch-up mode Synor discovers these by re-scanning the bucket; in live mode t
 ## Run it
 
 The full, runnable example is in this local workspace: examples/oci_object_storage_embedding. If you're starting from a local folder instead of a bucket, Semantic Search 101 is the same flow on the local filesystem.
-

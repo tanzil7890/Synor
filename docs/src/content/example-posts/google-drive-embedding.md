@@ -124,4 +124,3 @@ Because the Drive source is catch-up only, each `synor update main` rescans the 
 ## Run it
 
 The full, runnable example is in this local workspace: examples/gdrive_text_embedding. If you haven't yet, read Semantic Search 101 for the line-by-line tour of chunking and embedding.
-

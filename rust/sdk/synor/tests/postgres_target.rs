@@ -3,9 +3,9 @@
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use synor::{ContextKey, Ctx, Environment, Result, postgres};
 use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
+use synor::{ContextKey, Ctx, Environment, Result, postgres};
 
 static PG: LazyLock<ContextKey<postgres::Database>> = LazyLock::new(|| {
     ContextKey::new_with_state("postgres_target_test_db", |db: &postgres::Database| {
