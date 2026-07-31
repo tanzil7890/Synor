@@ -219,6 +219,15 @@ impl<Prof: EngineProfile> App<Prof> {
                 if live && result.is_ok() {
                     // In live mode, wait for all descendants to finish before signaling termination.
                     root_component.wait_until_inactive().await;
+                    // The root processor can resolve in the same instant the
+                    // app token is cancelled (drop_app, Ctrl+C), in which case
+                    // the select above takes the `run_fut` branch and the live
+                    // descendants above became inactive because cancellation
+                    // tore them down — not because they finished their work.
+                    // Re-check so a cancelled live run never reports success.
+                    if cancel_token.is_cancelled() {
+                        result = Err(internal_error!("Operation cancelled"));
+                    }
                 }
                 let live_terminal_error = root_component
                     .app_ctx()
