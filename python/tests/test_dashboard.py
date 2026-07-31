@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import json
 import pathlib
+import socket
 import threading
 import urllib.request
 
 import pytest
-
-from synor import audit
-from synor import dashboard
+from synor import audit, dashboard
 from synor.state import MemoryStateStore
 
 
 def test_dashboard_is_loopback_read_only_and_serves_redacted_evidence(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: pathlib.Path,
 ) -> None:
+    def reject_reverse_dns(_host: str) -> str:
+        raise AssertionError("dashboard startup must not perform reverse DNS")
+
+    monkeypatch.setattr(socket, "getfqdn", reject_reverse_dns)
     recorder = audit.RunRecorder.start(
         command="plan",
         app_name="LocalDashboard",
