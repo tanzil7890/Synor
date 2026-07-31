@@ -330,6 +330,43 @@ pub struct NativeEffectCounts {
     pub completed: u64,
 }
 
+/// Result of an explicit, archive-backed completed-evidence compaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeEffectCompactionResult {
+    pub requested: u64,
+    pub deleted: u64,
+    pub protected: u64,
+    pub already_absent: u64,
+}
+
+/// Metadata captured for one app while preparing a downgrade copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeEffectAppSnapshot {
+    pub app_name: String,
+    pub schema_version: Option<u32>,
+    pub effects: Vec<NativeEffectIntent>,
+}
+
+/// Result of preparing a separate, pre-native-compatible database copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NativeEffectDowngradeResult {
+    pub apps: Vec<NativeEffectAppSnapshot>,
+    pub removed_schema_markers: u64,
+    pub removed_effects: u64,
+    pub removed_obligation_cursors: u64,
+    pub removed_lineage_cursors: u64,
+    pub removed_live_generation_keys: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct NativeEffectDowngradeStripResult {
+    pub removed_schema_markers: u64,
+    pub removed_effects: u64,
+    pub removed_obligation_cursors: u64,
+    pub removed_lineage_cursors: u64,
+    pub removed_live_generation_keys: u64,
+}
+
 /// Persisted allocation cursor for repeated cleanup obligations at the same
 /// tracking locator and source generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1623,3 +1623,7 @@ class TestRevocationCLI:
         assert "### `revocations repair-ledger`" in generated
         assert "synor revocations repair-ledger [OPTIONS]" in generated
         assert "### `revocations verify`" in generated
+        assert "### `native-effects export`" in generated
+        assert "synor native-effects export [OPTIONS]" in generated
+        assert "### `native-effects compact`" in generated
+        assert "### `native-effects prepare-downgrade`" in generated

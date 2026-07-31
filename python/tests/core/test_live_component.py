@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any
+import hashlib
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Sequence,
+)
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any, cast
 
 import pytest
 import synor as syn
 import synor.inspect as synor_inspect
+from synor._internal.context_keys import ContextProvider
+from synor._internal.revocation_model import (
+    EffectDescriptor,
+    EffectOperation,
+    VerificationOutcome,
+)
+from synor._internal.verified_sink import (
+    TargetVerificationOutcome,
+    TargetVerificationResult,
+    VerificationRetryPolicy,
+    VerifiedTargetActionSink,
+)
 
 from tests import common
 from tests.common.target_states import DictDataWithPrev, GlobalDictTarget
@@ -685,6 +706,204 @@ async def test_live_component_incremental_delete_no_stale_tombstone() -> None:
     assert "<unknown>" not in stats.by_component, (
         f"Stale tombstone caused '<unknown>' deletion: {stats.by_component}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _LiveRaceDeleteAction:
+    key: str
+    descriptor: EffectDescriptor
+
+    def __synor_effect_descriptor__(self) -> EffectDescriptor:
+        return self.descriptor
+
+
+@pytest.mark.asyncio
+async def test_live_delete_reinsert_serializes_verified_effect_boundaries() -> None:
+    external: dict[str, int] = {}
+    events: list[str] = []
+    delete_apply_started = asyncio.Event()
+    release_delete_apply = asyncio.Event()
+    recorded: list[TargetVerificationOutcome] = []
+
+    async def apply_upsert(
+        context_provider: ContextProvider,
+        actions: Sequence[tuple[str, int]],
+        /,
+    ) -> None:
+        del context_provider
+        for key, value in actions:
+            external[key] = value
+            events.append(f"upsert:{value}")
+
+    async def apply_delete(
+        context_provider: ContextProvider,
+        actions: Sequence[_LiveRaceDeleteAction],
+        /,
+    ) -> None:
+        del context_provider
+        assert len(actions) == 1
+        external.pop(actions[0].key, None)
+        events.append("delete:apply")
+        delete_apply_started.set()
+        await release_delete_apply.wait()
+
+    async def verify_delete(
+        context_provider: ContextProvider,
+        actions: Sequence[_LiveRaceDeleteAction],
+        applied: None,
+        /,
+    ) -> Sequence[TargetVerificationResult]:
+        del context_provider, applied
+        events.append("delete:verify")
+        return [
+            TargetVerificationResult(
+                status=(
+                    VerificationOutcome.ABSENT
+                    if action.key not in external
+                    else VerificationOutcome.PRESENT
+                ),
+                action_id=action.descriptor.action_id,
+            )
+            for action in actions
+        ]
+
+    async def record_delete(
+        context_provider: ContextProvider,
+        outcomes: Sequence[TargetVerificationOutcome],
+        /,
+    ) -> None:
+        del context_provider
+        events.append("delete:record")
+        recorded.extend(outcomes)
+
+    upsert_sink = syn.TargetActionSink.from_async_fn(apply_upsert)
+    delete_sink = VerifiedTargetActionSink[_LiveRaceDeleteAction, None](
+        apply=apply_delete,
+        verify=verify_delete,
+        record=record_delete,
+        policy=VerificationRetryPolicy(
+            timeout=timedelta(seconds=2),
+            max_attempts=1,
+            initial_backoff=0,
+            max_backoff=0,
+            jitter=0,
+        ),
+    )
+    action_sink_type = syn.TargetActionSink[
+        tuple[str, int] | _LiveRaceDeleteAction,
+        None,
+    ]
+    typed_delete_sink = cast(action_sink_type, delete_sink.sink)
+    typed_upsert_sink = cast(action_sink_type, upsert_sink)
+
+    class Handler:
+        def reconcile(
+            self,
+            key: syn.StableKey,
+            desired_state: int | syn.NonExistenceType,
+            prev_possible_records: Collection[int],
+            prev_may_be_missing: bool,
+            /,
+        ) -> (
+            syn.TargetReconcileOutput[
+                tuple[str, int] | _LiveRaceDeleteAction,
+                int,
+            ]
+            | None
+        ):
+            del prev_may_be_missing
+            assert isinstance(key, str)
+            if syn.is_non_existence(desired_state):
+                if not prev_possible_records:
+                    return None
+                descriptor = EffectDescriptor(
+                    action_id="live-delete:item:1",
+                    operation_kind=EffectOperation.DELETE,
+                    source_digest=hashlib.sha256(b"live-race-source").hexdigest(),
+                    source_generation=1,
+                    target_locator_digest=hashlib.sha256(key.encode()).hexdigest(),
+                )
+                return syn.TargetReconcileOutput(
+                    action=_LiveRaceDeleteAction(key, descriptor),
+                    sink=typed_delete_sink,
+                    tracking_record=desired_state,
+                )
+            return syn.TargetReconcileOutput(
+                action=(key, desired_state),
+                sink=typed_upsert_sink,
+                tracking_record=desired_state,
+            )
+
+    provider = syn.register_root_target_states_provider(
+        "test/live_delete_reinsert_verified",
+        Handler(),
+    )
+
+    async def declare_value(value: int) -> None:
+        syn.declare_target_state(provider.target_state("item", value))
+
+    class RaceLiveComponent:
+        async def process(self) -> None:
+            pass
+
+        async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+            await operator.update_full()
+            initial = await operator.update(
+                syn.component_subpath("item"),
+                declare_value,
+                1,
+            )
+            await initial.ready()
+
+            deleting = await operator.delete(syn.component_subpath("item"))
+            await asyncio.wait_for(delete_apply_started.wait(), timeout=2)
+            assert external == {}
+
+            replacement = await operator.update(
+                syn.component_subpath("item"),
+                declare_value,
+                2,
+            )
+            # Same-subpath queueing must keep the replacement processor from
+            # starting while the old delete effect is awaiting verification.
+            assert events == ["upsert:1", "delete:apply"]
+            release_delete_apply.set()
+            await deleting.ready()
+            await replacement.ready()
+            await operator.mark_ready()
+
+    environment = common.create_test_env(__file__, suffix="verified_delete_reinsert")
+
+    async def main() -> None:
+        await syn.mount(syn.component_subpath("live"), RaceLiveComponent)
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_live_delete_reinsert_verified",
+            environment=environment,
+        ),
+        main,
+    )
+    await asyncio.wait_for(app.update(live=True).result(), timeout=10)
+
+    assert external == {"item": 2}
+    assert events == [
+        "upsert:1",
+        "delete:apply",
+        "delete:verify",
+        "delete:record",
+        "upsert:2",
+    ]
+    assert len(recorded) == 1
+    assert recorded[0].status is VerificationOutcome.ABSENT
+    counts = await synor_inspect.native_effect_counts(app)
+    assert (
+        counts.pending,
+        counts.verified,
+        counts.failed,
+        counts.blocked,
+        counts.completed,
+    ) == (0, 0, 0, 0, 1)
 
 
 class _IncrementalDeleteViaGCLiveComponent:
@@ -1568,6 +1787,52 @@ async def test_live_component_global_cancel_terminates_update() -> None:
         if not result_task.done():
             result_task.cancel()
         _core.reset_global_cancellation()
+
+
+@pytest.mark.asyncio
+async def test_drop_cancels_own_live_update_then_acquires_process_lease() -> None:
+    GlobalDictTarget.store.clear()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingLive:
+        async def process(self) -> None:
+            syn.declare_target_state(GlobalDictTarget.target_state("leased-live", 1))
+
+        async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+            await operator.update_full()
+            await operator.mark_ready()
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    environment = common.create_test_env(__file__, suffix="drop_live_lease_handoff")
+
+    async def main() -> None:
+        await syn.mount(syn.component_subpath("live"), BlockingLive)
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test_drop_live_lease_handoff",
+            environment=environment,
+        ),
+        main,
+    )
+    update_result = asyncio.create_task(app.update(live=True).result())
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    await asyncio.wait_for(app.drop(), timeout=10)
+    await asyncio.wait_for(cancelled.wait(), timeout=5)
+    assert GlobalDictTarget.store.data == {}
+
+    # The cancelled live update is expected to fail, but it must terminate;
+    # otherwise its process lease or root task survived the drop barrier.
+    result = await asyncio.gather(update_result, return_exceptions=True)
+    assert len(result) == 1
+    assert isinstance(result[0], BaseException)
 
 
 # ============================================================================

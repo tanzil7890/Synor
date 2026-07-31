@@ -203,6 +203,56 @@ def native_effect_counts(app: App) -> NativeEffectCounts: ...
 def native_effect_counts_by_name(
     env: Environment, app_name: str
 ) -> NativeEffectCounts | None: ...
+
+class _NativeEffectRecord:
+    record_version: int
+    evidence_id: str
+    action_id: str
+    operation: str
+    source_digest: str
+    source_generation: int
+    target_locator_digest: str
+    tracking_locator: str
+    verification_policy: str
+    cause: str
+    status: str
+    created_at_unix_ms: int
+    updated_at_unix_ms: int
+    attempt_count: int
+    last_error_code: str | None
+
+class _NativeEffectSnapshot:
+    schema_version: int | None
+    effects: list[_NativeEffectRecord]
+
+class _NativeEffectAppSnapshot:
+    app_name: str
+    schema_version: int | None
+    effects: list[_NativeEffectRecord]
+
+class _NativeEffectCompactionResult:
+    requested: int
+    deleted: int
+    protected: int
+    already_absent: int
+
+class _NativeEffectDowngradeResult:
+    apps: list[_NativeEffectAppSnapshot]
+    removed_schema_markers: int
+    removed_effects: int
+    removed_obligation_cursors: int
+    removed_lineage_cursors: int
+    removed_live_generation_keys: int
+
+def native_effect_snapshot_by_name(
+    env: Environment, app_name: str
+) -> _NativeEffectSnapshot | None: ...
+def compact_native_effects_by_name(
+    env: Environment, app_name: str, evidence_ids: list[str]
+) -> _NativeEffectCompactionResult: ...
+def prepare_native_downgrade(
+    env: Environment, staging_path: str
+) -> _NativeEffectDowngradeResult: ...
 def iter_stable_paths(app: App) -> StablePathInfoAsyncIterator: ...
 def iter_stable_paths_by_name(
     env: Environment, app_name: str

@@ -35,7 +35,8 @@ use crate::state::db_schema::{
     NativeSchemaVersion, StablePathEntryKey, StablePathNodeType, StateKind, TargetStateOwnerInfo,
 };
 use crate::state::native_effect::{
-    NativeEffectCause, NativeEffectCounts, NativeEffectErrorCode, NativeEffectIntent,
+    NativeEffectCause, NativeEffectCompactionResult, NativeEffectCounts,
+    NativeEffectDowngradeStripResult, NativeEffectErrorCode, NativeEffectIntent,
     NativeEffectLineageCursor, NativeEffectObligationCursor, NativeEffectStatus,
     NativeVerificationPolicy, blocked_cleanup_action_id_for_epoch, native_effect_evidence_id,
     native_effect_key_fingerprint, native_effect_lineage_key_fingerprint,
@@ -896,6 +897,52 @@ impl AppStore {
         Ok(out)
     }
 
+    /// Whether any child cleanup obligation exists, regardless of assurance.
+    ///
+    /// Downgrade preparation uses the stricter all-tombstone check because a
+    /// pre-native binary cannot safely resume the richer tombstone lifecycle.
+    pub async fn has_any_tombstones(&self) -> Result<bool> {
+        let rtxn = self.read_txn().await?;
+        self.has_any_tombstones_in_ro_txn(&rtxn)
+    }
+
+    fn has_any_tombstones_in_ro_txn(
+        &self,
+        txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    ) -> Result<bool> {
+        for entry in self.db().iter(txn)? {
+            let (raw_key, raw_value) = entry?;
+            if raw_key.first() != Some(&0x10) {
+                continue;
+            }
+            if matches!(
+                DbEntryKey::decode(raw_key)?,
+                DbEntryKey::StablePath(_, StablePathEntryKey::ChildComponentTombstone(_))
+            ) {
+                decode_tombstone(raw_value)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn has_any_tombstones_in_txn(&self, txn: &mut WriteTxn<'_>) -> Result<bool> {
+        for entry in self.db().iter(&**txn)? {
+            let (raw_key, raw_value) = entry?;
+            if raw_key.first() != Some(&0x10) {
+                continue;
+            }
+            if matches!(
+                DbEntryKey::decode(raw_key)?,
+                DbEntryKey::StablePath(_, StablePathEntryKey::ChildComponentTombstone(_))
+            ) {
+                decode_tombstone(raw_value)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether any cleanup obligation still requires query-verified
     /// reconciliation. This global scan is used only at the strict App
     /// completion boundary, after descendants have quiesced. It closes the
@@ -1119,19 +1166,19 @@ impl AppStore {
         Ok(())
     }
 
-    /// Validate the native schema from a fresh snapshot. Returns `None` for an
-    /// untouched pre-feature database.
-    pub async fn validate_native_schema(&self) -> Result<Option<NativeSchemaVersion>> {
-        let rtxn = self.read_txn().await?;
+    fn validate_native_schema_in_ro_txn(
+        &self,
+        rtxn: &heed::RoTxn<'_, heed::WithoutTls>,
+    ) -> Result<Option<NativeSchemaVersion>> {
         let schema_key = key_native_schema_version()?;
         let version: Option<NativeSchemaVersion> = self
             .db()
-            .get(&*rtxn, &schema_key)?
+            .get(rtxn, &schema_key)?
             .map(from_msgpack_slice)
             .transpose()?;
         match version {
             Some(version) if version.is_supported() => {
-                self.validate_native_cursor_integrity(&rtxn)?;
+                self.validate_native_cursor_integrity(rtxn)?;
                 Ok(Some(version))
             }
             Some(_) => client_bail!("native effect schema is newer than this binary"),
@@ -1139,7 +1186,7 @@ impl AppStore {
                 let effect_prefix = key_native_effect_prefix()?;
                 if self
                     .db()
-                    .prefix_iter(&*rtxn, &effect_prefix)?
+                    .prefix_iter(rtxn, &effect_prefix)?
                     .next()
                     .transpose()?
                     .is_some()
@@ -1149,7 +1196,7 @@ impl AppStore {
                 let obligation_prefix = key_native_effect_obligation_prefix()?;
                 if self
                     .db()
-                    .prefix_iter(&*rtxn, &obligation_prefix)?
+                    .prefix_iter(rtxn, &obligation_prefix)?
                     .next()
                     .transpose()?
                     .is_some()
@@ -1159,7 +1206,7 @@ impl AppStore {
                 let lineage_prefix = key_native_effect_lineage_prefix()?;
                 if self
                     .db()
-                    .prefix_iter(&*rtxn, &lineage_prefix)?
+                    .prefix_iter(rtxn, &lineage_prefix)?
                     .next()
                     .transpose()?
                     .is_some()
@@ -1169,6 +1216,13 @@ impl AppStore {
                 Ok(None)
             }
         }
+    }
+
+    /// Validate the native schema from a fresh snapshot. Returns `None` for an
+    /// untouched pre-feature database.
+    pub async fn validate_native_schema(&self) -> Result<Option<NativeSchemaVersion>> {
+        let rtxn = self.read_txn().await?;
+        self.validate_native_schema_in_ro_txn(&rtxn)
     }
 
     async fn read_native_effect_in_txn(
@@ -2223,6 +2277,125 @@ impl AppStore {
         Ok(Some(intent))
     }
 
+    /// Return one consistent metadata-only snapshot for operator export.
+    pub async fn native_effect_snapshot(
+        &self,
+    ) -> Result<(Option<NativeSchemaVersion>, Vec<NativeEffectIntent>)> {
+        let rtxn = self.read_txn().await?;
+        let version = self.validate_native_schema_in_ro_txn(&rtxn)?;
+        let prefix = key_native_effect_prefix()?;
+        let mut effects = Vec::new();
+        for entry in self.db().prefix_iter(&rtxn, &prefix)? {
+            let (raw_key, raw_value) = entry?;
+            let DbEntryKey::NativeEffect(fingerprint) = DbEntryKey::decode(raw_key)? else {
+                internal_bail!("unexpected key in native effect keyspace");
+            };
+            let intent = decode_native_effect(raw_value)?;
+            validate_native_effect_key(fingerprint, &intent)?;
+            effects.push(intent);
+        }
+        effects.sort_by(|left, right| left.evidence_id().cmp(right.evidence_id()));
+        Ok((version, effects))
+    }
+
+    fn referenced_native_effect_ids(
+        &self,
+        txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut referenced = std::collections::HashSet::new();
+
+        let lineage_prefix = key_native_effect_lineage_prefix()?;
+        for entry in self.db().prefix_iter(txn, &lineage_prefix)? {
+            let (_, raw_value) = entry?;
+            let cursor = decode_native_effect_lineage(raw_value)?;
+            referenced.insert(cursor.current_evidence_id);
+        }
+
+        let obligation_prefix = key_native_effect_obligation_prefix()?;
+        for entry in self.db().prefix_iter(txn, &obligation_prefix)? {
+            let (_, raw_value) = entry?;
+            let cursor = decode_native_effect_obligation(raw_value)?;
+            referenced.insert(blocked_cleanup_action_id_for_epoch(
+                cursor.tracking_locator,
+                cursor.source_generation,
+                cursor.current_epoch,
+            ));
+        }
+
+        Ok(referenced)
+    }
+
+    async fn compact_completed_native_effects_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+        evidence_ids: &[String],
+    ) -> Result<NativeEffectCompactionResult> {
+        self.validate_native_schema_in_txn(txn).await?;
+        self.validate_native_cursor_integrity(&**txn)?;
+
+        let candidates: std::collections::BTreeSet<&str> =
+            evidence_ids.iter().map(String::as_str).collect();
+        let referenced = self.referenced_native_effect_ids(&**txn)?;
+        let mut result = NativeEffectCompactionResult {
+            requested: u64::try_from(candidates.len())
+                .map_err(|_| internal_error!("native effect compaction count overflow"))?,
+            ..NativeEffectCompactionResult::default()
+        };
+
+        for evidence_id in candidates {
+            let key = key_native_effect(evidence_id)?;
+            let Some(raw_value) = self.db().get(&**txn, &key)? else {
+                result.already_absent = result
+                    .already_absent
+                    .checked_add(1)
+                    .ok_or_else(|| internal_error!("native effect compaction count overflow"))?;
+                continue;
+            };
+            let intent = decode_native_effect(raw_value)?;
+            if intent.evidence_id() != evidence_id {
+                internal_bail!("native effect evidence ID collided with an existing key");
+            }
+            if intent.status != NativeEffectStatus::Completed {
+                client_bail!("native effect compaction candidate is not completed");
+            }
+            if referenced.contains(evidence_id) {
+                result.protected = result
+                    .protected
+                    .checked_add(1)
+                    .ok_or_else(|| internal_error!("native effect compaction count overflow"))?;
+                continue;
+            }
+            if self.db().delete(&mut **txn, &key)? {
+                result.deleted = result
+                    .deleted
+                    .checked_add(1)
+                    .ok_or_else(|| internal_error!("native effect compaction count overflow"))?;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Delete only archive-selected completed records that no live cursor
+    /// references. The caller must durably archive the selected IDs first.
+    pub async fn compact_completed_native_effects(
+        &self,
+        evidence_ids: &[String],
+    ) -> Result<NativeEffectCompactionResult> {
+        let store = self.clone();
+        let evidence_ids = evidence_ids.to_vec();
+        self.run_in_batcher_typed(move |txn| {
+            let store = store.clone();
+            let evidence_ids = evidence_ids.clone();
+            Box::pin(async move {
+                store
+                    .compact_completed_native_effects_in_txn(txn, &evidence_ids)
+                    .await
+            })
+        })
+        .await
+    }
+
     async fn native_effect_counts_in_txn(
         &self,
         txn: &mut WriteTxn<'_>,
@@ -2413,6 +2586,60 @@ impl AppStore {
 // --- App-level -----------------------------------------------------------
 
 impl AppStore {
+    /// Remove native-only metadata from a separately copied, quiescent app
+    /// database after proving that no effect or child cleanup remains open.
+    ///
+    /// This must never run against the source database. Storage owns the only
+    /// call site and invokes it exclusively on an LMDB-consistent staging copy.
+    pub(crate) async fn strip_native_metadata_for_downgrade_in_txn(
+        &self,
+        txn: &mut WriteTxn<'_>,
+    ) -> Result<NativeEffectDowngradeStripResult> {
+        if self.has_unresolved_native_effects_in_txn(txn).await? {
+            client_bail!("downgrade blocked by unresolved native effects");
+        }
+        if self.has_any_tombstones_in_txn(txn).await? {
+            client_bail!("downgrade blocked by child cleanup tombstones");
+        }
+
+        let schema_key = key_native_schema_version()?;
+        let effect_prefix = key_native_effect_prefix()?;
+        let obligation_prefix = key_native_effect_obligation_prefix()?;
+        let lineage_prefix = key_native_effect_lineage_prefix()?;
+        let live_generation_key = key_id_sequencer(&StableKey::Symbol(
+            LIVE_COMPONENT_GENERATION_KEY_SYMBOL.into(),
+        ))?;
+
+        let mut result = NativeEffectDowngradeStripResult::default();
+        let mut iter = self.db().iter_mut(&mut **txn)?;
+        while let Some((key, _)) = iter.next().transpose()? {
+            let counter = if key == schema_key.as_slice() {
+                Some(&mut result.removed_schema_markers)
+            } else if key.starts_with(&effect_prefix) {
+                Some(&mut result.removed_effects)
+            } else if key.starts_with(&obligation_prefix) {
+                Some(&mut result.removed_obligation_cursors)
+            } else if key.starts_with(&lineage_prefix) {
+                Some(&mut result.removed_lineage_cursors)
+            } else if key == live_generation_key.as_slice() {
+                Some(&mut result.removed_live_generation_keys)
+            } else {
+                None
+            };
+            if let Some(counter) = counter {
+                *counter = counter
+                    .checked_add(1)
+                    .ok_or_else(|| internal_error!("native downgrade count overflow"))?;
+                // Safety: the borrowed key/value are not used after deleting
+                // the cursor's current entry.
+                unsafe {
+                    iter.del_current()?;
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Clear operational state while retaining native schema/effect evidence,
     /// obligation cursors, and the live-generation sequencer. Returns `false`
     /// without writing if any effect is not completed or a query-verified
@@ -2753,8 +2980,9 @@ mod tests {
         key_native_effect_obligation, key_native_schema_version, key_tombstone,
     };
     use crate::state::db_schema::{
-        ChildExistenceInfo, ChildTombstoneCause, ChildTombstoneInfo,
-        LIVE_COMPONENT_GENERATION_KEY_SYMBOL, NativeSchemaVersion, StablePathNodeType, StateKind,
+        CHILD_TOMBSTONE_SCHEMA_VERSION, ChildExistenceInfo, ChildTombstoneCause,
+        ChildTombstoneInfo, LIVE_COMPONENT_GENERATION_KEY_SYMBOL, NativeSchemaVersion,
+        StablePathNodeType, StateKind,
     };
     use crate::state::native_effect::{
         NativeEffectCause, NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent,
@@ -2764,7 +2992,9 @@ mod tests {
     use crate::state::stable_path::{StableKey, StablePath};
     use crate::state_store::test_support::make_test_store;
     use crate::state_store::txn::WriteTxn;
+    use sha2::{Digest as _, Sha256};
     use std::collections::HashMap;
+    use std::fmt::Write as _;
     use std::sync::Arc;
     use synor_utils::fingerprint::Fingerprint;
 
@@ -3547,6 +3777,48 @@ mod tests {
                 .status,
             NativeEffectStatus::Pending
         );
+    }
+
+    #[tokio::test]
+    async fn archived_compaction_deletes_only_unreferenced_completed_evidence() {
+        let (store, _dir) = make_test_store().await;
+        let first = bind_and_complete_effect(&store, "delete:retention-lineage").await;
+        let second = bind_and_complete_effect(&store, "delete:retention-lineage").await;
+        assert_ne!(first, second);
+
+        let tracking_locator = Fingerprint::from_bytes(b"retention-obligation");
+        let blocker = allocate_and_block(&store, tracking_locator, 17).await;
+        complete_blocker(&store, &blocker).await;
+
+        let (schema, exported) = store.native_effect_snapshot().await.unwrap();
+        assert_eq!(schema, Some(NativeSchemaVersion::CURRENT));
+        assert_eq!(exported.len(), 3);
+        assert!(
+            exported
+                .windows(2)
+                .all(|pair| { pair[0].evidence_id().cmp(pair[1].evidence_id()).is_le() })
+        );
+
+        let candidates = vec![first.clone(), second.clone(), blocker.clone()];
+        let result = store
+            .compact_completed_native_effects(&candidates)
+            .await
+            .unwrap();
+        assert_eq!(result.requested, 3);
+        assert_eq!(result.deleted, 1);
+        assert_eq!(result.protected, 2);
+        assert_eq!(result.already_absent, 0);
+        assert!(store.native_effect(&first).await.unwrap().is_none());
+        assert!(store.native_effect(&second).await.unwrap().is_some());
+        assert!(store.native_effect(&blocker).await.unwrap().is_some());
+
+        let repeated = store
+            .compact_completed_native_effects(&candidates)
+            .await
+            .unwrap();
+        assert_eq!(repeated.deleted, 0);
+        assert_eq!(repeated.protected, 2);
+        assert_eq!(repeated.already_absent, 1);
     }
 
     #[tokio::test]
@@ -4385,6 +4657,100 @@ mod tests {
                 .unwrap()
         );
         assert!(store.list_tombstones(&parent).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rich_tombstone_lmdb_excludes_sensitive_source_values() {
+        let (store, dir) = make_test_store().await;
+        let raw_sentinels = [
+            "tombstone-content-sentinel-0731c9",
+            "tombstone-principal-sentinel-a2e54b",
+            "tombstone-credential-sentinel-629ea1",
+            "tombstone-raw-locator-sentinel-4dc220",
+            "tombstone-remote-error-sentinel-7de08f",
+        ];
+        let mut hasher = Sha256::new();
+        for sentinel in raw_sentinels {
+            hasher.update(sentinel.as_bytes());
+            hasher.update([0]);
+        }
+        let mut source_digest = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            write!(&mut source_digest, "{byte:02x}").unwrap();
+        }
+
+        let parent = comp_path("privacy-owner");
+        let relative = comp_path("privacy-child");
+        let tombstone = ChildTombstoneInfo::new(
+            ChildTombstoneCause::LiveDelete,
+            Some(source_digest.clone()),
+            Some(41),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap();
+        let store_for_txn = store.clone();
+        let parent_for_txn = parent.clone();
+        let relative_for_txn = relative.clone();
+        store
+            .storage
+            .run_txn(move |wtxn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                let tombstone = tombstone.clone();
+                Box::pin(async move {
+                    store
+                        .write_tombstone(wtxn, &parent, &relative, &tombstone)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(
+            store
+                .mark_tombstone_failed(
+                    &parent,
+                    &relative,
+                    Some(41),
+                    NativeEffectErrorCode::VerificationFailed,
+                )
+                .await
+                .unwrap()
+        );
+
+        let persisted = store.list_tombstones(&parent).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        let info = &persisted[0].1;
+        assert_eq!(info.schema_version, CHILD_TOMBSTONE_SCHEMA_VERSION);
+        assert_eq!(info.cause, ChildTombstoneCause::LiveDelete);
+        assert_eq!(info.source_digest.as_deref(), Some(source_digest.as_str()));
+        assert_eq!(info.generation, Some(41));
+        assert_ne!(info.created_at_ms, 0);
+        assert_eq!(info.attempt_count, 1);
+        assert_eq!(
+            info.last_error_code,
+            Some(NativeEffectErrorCode::VerificationFailed)
+        );
+        assert_eq!(
+            info.verification_policy,
+            NativeVerificationPolicy::QueryVerified
+        );
+
+        let serialized_lmdb = std::fs::read(dir.path().join("mdb/data.mdb")).unwrap();
+        assert!(
+            serialized_lmdb
+                .windows(source_digest.len())
+                .any(|window| window == source_digest.as_bytes()),
+            "the expected opaque source digest was not serialized"
+        );
+        for sentinel in raw_sentinels {
+            assert!(
+                !serialized_lmdb
+                    .windows(sentinel.len())
+                    .any(|window| window == sentinel.as_bytes()),
+                "sensitive tombstone source value leaked: {sentinel}"
+            );
+        }
     }
 
     #[tokio::test]

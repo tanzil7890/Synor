@@ -6,7 +6,10 @@ use crate::prelude::*;
 use crate::engine::environment::Environment;
 use crate::engine::{app::App, profile::EngineProfile};
 use crate::state::db_schema::{self, ChildExistenceInfo, DbEntryKey, StablePathEntryKey};
-use crate::state::native_effect::NativeEffectCounts;
+use crate::state::native_effect::{
+    NativeEffectCompactionResult, NativeEffectCounts, NativeEffectDowngradeResult,
+    NativeEffectIntent,
+};
 use crate::state::stable_path::{StableKey, StablePath, StablePathRef};
 use crate::state::target_state_path::{TargetStatePath, TargetStatePathWithProviderId};
 use crate::state_store::{AppStore, Storage};
@@ -82,6 +85,53 @@ pub async fn native_effect_counts_by_name<Prof: EngineProfile>(
         return Ok(None);
     };
     native_effect_counts_from_store(&store).await.map(Some)
+}
+
+/// Internal operator snapshot used by the archive/retention CLI.
+#[derive(Clone, Debug)]
+pub struct NativeEffectSnapshot {
+    pub schema_version: Option<u32>,
+    pub effects: Vec<NativeEffectIntent>,
+}
+
+pub async fn native_effect_snapshot_by_name<Prof: EngineProfile>(
+    env: &Environment<Prof>,
+    app_name: &str,
+) -> Result<Option<NativeEffectSnapshot>> {
+    let Some(store) = env.storage().open_app_store_by_name(app_name).await? else {
+        return Ok(None);
+    };
+    let (schema_version, effects) = store.native_effect_snapshot().await?;
+    Ok(Some(NativeEffectSnapshot {
+        schema_version: schema_version.map(|version| version.0),
+        effects,
+    }))
+}
+
+pub async fn compact_native_effects_by_name<Prof: EngineProfile>(
+    env: &Environment<Prof>,
+    app_name: &str,
+    evidence_ids: &[String],
+) -> Result<NativeEffectCompactionResult> {
+    let _lease = env
+        .storage()
+        .acquire_app_operation_lease(app_name, std::time::Duration::from_secs(30))
+        .await?;
+    let store = env
+        .storage()
+        .open_app_store_by_name(app_name)
+        .await?
+        .ok_or_else(|| client_error!("app database does not exist"))?;
+    store.compact_completed_native_effects(evidence_ids).await
+}
+
+pub async fn prepare_native_downgrade<Prof: EngineProfile>(
+    env: &Environment<Prof>,
+    staging_path: &std::path::Path,
+) -> Result<NativeEffectDowngradeResult> {
+    env.storage()
+        .prepare_native_downgrade_copy(staging_path)
+        .await
 }
 
 /// Version and state label for a single target state entry.

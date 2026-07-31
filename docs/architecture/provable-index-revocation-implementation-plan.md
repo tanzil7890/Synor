@@ -1,15 +1,17 @@
 # Provable Index Revocation: implementation plan
 
-- **Status:** Phases 0–5 ✅ complete for their explicitly bounded milestones.
-  Phase 6 now has a bounded native implementation milestone: additive LMDB
-  schema v3/effect-record v2 state, immutable evidence lineages,
-  verified-sink capability, write-free strict preview, strict provider
-  blockers with fresh-process recovery, retained evidence, rich tombstones,
-  and in-process live queue/generation fencing are implemented. Phase 6 is not
-  production/GA complete because kill/power-loss certification, remote or
-  multi-process fencing, the copied-database migration drill, scale and
-  compatibility-overhead benchmarks, and the complete live delete/reinsert
-  race remain open.
+- **Status:** Phases 0–6 ✅ complete for their explicitly bounded milestones.
+  Phase 6 now includes additive LMDB schema v3/effect-record v2 state,
+  immutable evidence lineages, verified-sink capability, write-free strict
+  preview, strict provider recovery, retained evidence, rich tombstones, an
+  OS-backed app-operation lease and environment snapshot barrier,
+  deterministic live and Qdrant generation races, real copied-database
+  migration, process `SIGKILL` recovery, native
+  writer stress, million-action correlation, compatibility benchmarks, and
+  archive/compaction/downgrade operations. Phase 6 is not production/GA
+  complete because sudden physical power loss or storage-controller failure,
+  generic connector-side multi-host fencing, and the later release gates
+  remain open.
   Phase 5 now includes the opt-in public governance/revocation/retrieval API,
   strict `SynorRuntime` policy and startup health, schema-compatible reports,
   privacy-safe operator CLI, generated documentation, and the reproducible
@@ -66,7 +68,7 @@ completed unless a nearby implementation-status block says otherwise.
 | Phase 3 | **✅ Complete for the governed source milestone** | Stable Drive-ID identity, privacy-safe ACL normalization, authoritative snapshots, user/shared-drive and drive-authority change replay, bounded descendant invalidation, strict newly-in-scope subtree discovery, permission expiry, semantic-policy rescan fencing, explicit ambiguity, and durable-readiness checkpointing are implemented and fake-service tested. Live Workspace acceptance remains operator-gated. |
 | Phase 4 | **✅ Complete for the internal certified-adapter milestone** | Additive governed point lineage/content binding, exact Phase 2 suppression-state freshness/current-generation checks, mandatory source/tenant/policy/generation/principal filters, configured-`WCF == RF` preflight plus strong completed writes, collection/index and RF>1 replicated-topology preflight, target-native suppression, exact-ID delete, ACL narrowing, strict collection absence, durable provider operation evidence, a 30-second Qdrant operation timeout, caller-bounded metadata reads, compatibility coverage, and runtime reconstruction are locally tested. Principal authentication/context issuance, live acceptance, and a production declarative Qdrant handler remain open. `consistency=all` proves guarded non-return for the verified operation, not physical per-replica absence. |
 | Phase 5 | **✅ Complete for the public/reference milestone** | Minimal public types alias the proven schemas; strict `SynorRuntime` adds startup repair/health, controlled finalization, explicit outcome status, and optional revocation summaries; the redacted/versioned operator CLI and generated docs are tested; and the two-tenant local flagship runs twice with ACL-only revocation, pre-score suppression, delayed convergence, receipts, partial-scan safety, restore non-resurrection, and content-free evidence. Optional real Drive/Qdrant mode is configuration-only; live acceptance and a production declarative handler remain open. |
-| Phase 6 | **✅ Implemented for the bounded native milestone; certification gates open** | Schema-v3/effect-record-v2 LMDB effects with immutable per-locator evidence lineages, safe status-count inspection, verified-sink/PyO3 integration, write-free strict preview, precommit → verified → final-commit ordering, strict provider blockers and fresh-process recovery, drop protection, tracking-owner deletion repair, rich backward-compatible tombstones, durable local live generations, and serialized live/plain/delete transitions are implemented. `SIGKILL`/power-loss certification, remote CAS or multi-process fencing, copied real pre-feature migration, the million-action correlation run, native concurrency/performance benchmarks, and the complete live delete/reinsert race remain open. |
+| Phase 6 | **✅ Complete for the locally certifiable native milestone; external gates open** | Schema-v3/effect-record-v2 LMDB effects, immutable evidence lineages, safe inspection, verified-sink/PyO3 integration, write-free preview, precommit → verified → final-commit ordering, strict recovery and drop protection, rich tombstones, OS-backed app-operation serialization and whole-environment snapshot exclusion, deterministic live/Qdrant generation races, process-kill recovery, copied real-fixture migration, native writer stress, million-action correlation, compatibility benchmarks, and archive/compaction/downgrade tooling are implemented and tested. Sudden physical power loss, storage-controller failure, generic connector-side multi-host fencing, and live production acceptance remain open. |
 | Phase 7 | **Not started** | Drift/orphan scanning, cache-recipient assurance, and restore gating remain planned. |
 | Phase 8 | **Not started** | Connector expansion, conformance kit, SLOs, and GA hardening remain planned. |
 
@@ -251,8 +253,8 @@ behavior rather than listing unrelated operations and connectors.
 | `rust/core/src/engine/target_state.rs` | Batches flat sink actions and declares internal legacy/query-verified assurance plus safe effect description. | The existing action order and four-field reconcile output remain intact; legacy sinks stay compatible. |
 | `rust/core/src/state_store/submit_session.rs` | Atomically writes ownership, tracking, native intents, final effect status, and existence/tombstone reconciliation inside LMDB transactions. | Every new write remains inside a caller-owned transaction opened through `Storage::run_txn`. |
 | `rust/core/src/state/db_schema.rs` and `state/native_effect.rs` | Define target ownership, schema-v3/effect-record-v2 native evidence, `0x48` obligation and `0x50` lineage cursors, component existence, and rich compatible tombstones. | Connector action IDs remain receipt-correlation IDs; engine evidence IDs are epoch-derived and immutable. Legacy values have safe defaults, supported v1/v2 state upgrades before write, and future/corrupt native state fails closed. |
-| `rust/core/src/engine/live_component.rs` | Applies live work with a durable local generation, generation-checked committed state, cancellation fence, one per-subpath live/plain/delete queue, and generation-bound tombstones. | The latest queued transition wins and a handoff timeout fails without installing a successor. Remote CAS, a multi-process live lease, and the complete deterministic delete/reinsert race remain open. |
-| `rust/core/src/engine/app.rs` | Configures compatibility/strict root update behavior and protected drop. | Strict updates surface unresolved native effects; drop refuses every non-completed effect and otherwise retains native evidence. |
+| `rust/core/src/engine/live_component.rs` | Applies live work with a durable local generation, generation-checked committed state, cancellation fence, one per-subpath live/plain/delete queue, and generation-bound tombstones. | The latest queued transition wins and a handoff timeout fails without installing a successor. The deterministic delete/reinsert race proves the replacement waits for the old verified-effect boundary. |
+| `rust/core/src/engine/app.rs` | Configures compatibility/strict root update behavior, protected drop, and the app-operation lease lifecycle. | Strict updates surface unresolved native effects; drop refuses every non-completed effect and otherwise retains native evidence; every update mode and drop serializes against other processes for the same app. |
 | `rust/py/src/target_state.rs` | Bridges the unchanged four-field reconcile output plus optional verified-sink descriptors. | Invalid descriptors become fixed redacted errors; no fifth tuple field was added. |
 | `python/synor/_internal/target_state.py` and `_verified_sink.py` | Define legacy sink factories and the internal query-verified wrapper/describer. | A sink still returns optional child handlers; assurance/effect description uses a separate private capability. |
 | `python/synor/connectorkits/statediff.py` | Produces idempotent insert/upsert/replace/delete actions from tracked state. | Reuse it. It compares Synor tracking, not external state, so strict connectors still need read-back. |
@@ -1258,18 +1260,19 @@ state-schema change was made.
   stable source identity.
 - [x] Reproduce and fix Qdrant collection deletion so only confirmed
   not-found or a literal successful result is accepted.
-- [ ] **Phase 6 certification gate — not a Phase 0–2 blocker:** the existing core
+- [x] **Phase 6 process-kill certification gate, not a Phase 0–2 blocker:** the existing core
   suite proves compatibility orphan-cleanup retry, Phase 2 proves strict
   failure-before-final-commit for root target reconciliation, and Phase 5
   proves controlled post-commit finalization/recovery. Phase 6 adds native
-  tracking-owner cleanup plus a fresh-process provider-missing/blocker/recovery
-  lifecycle. Destructive child-component process-kill/power-loss coverage
-  remains open.
-- [ ] **Phase 6 certification gate — not a Phase 0–2 blocker:** Phase 2 proves
+  tracking-owner cleanup, a fresh-process provider-missing/blocker/recovery
+  lifecycle, and real subprocess `SIGKILL` recovery at each native boundary.
+  Sudden physical power loss and storage-controller failure remain separate
+  external certification work.
+- [x] **Phase 6 deterministic race gate, not a Phase 0–2 blocker:** Phase 2 proves
   stale-generation fencing in the control plane and synthetic provider, and
   Phase 6 adds native local live-incarnation generations and cancellation
-  checks. The deterministic `LiveMapSubscriber`/live delete-reinsert race test
-  remains open.
+  checks. Deterministic live delete/reinsert and Qdrant remote-apply/reinsert
+  tests prove that an old generation cannot erase its replacement.
 - [x] Record a compatibility-path baseline in
   `revocation-phase2-validation.md`.
 
@@ -1510,8 +1513,9 @@ Synor deletion, apply/read-back, retry, receipt, and guarded retrieval.
 - [x] ✅ Re-run the full revocation package after rebuilding the Phase 6 native
   extension on 2026-07-30: 172 tests passed on the recorded rebuilt snapshot.
   That run preceded a final minor compatibility-path adjustment; its
-  post-adjustment source is covered by the final Python repository result of
-  1,412 passed and 241 skipped. Neither result broadens this Phase 2
+  post-adjustment source, including the completed Phase 6 work, is covered by
+  the final Python repository result of 1,420 passed and 241
+  integration-dependent skips. Neither result broadens this Phase 2
   milestone.
 - [x] ✅ Implement compatibility, strict query-verified, and deterministic
   test-only policy presets.
@@ -1588,7 +1592,9 @@ reconstruction. If recovery has not run, an unresolved durable fence denies
 serving rather than reopening an older authorization. Phase 5 now adds the
 public strict runtime that repairs/replays open cases before reporting startup
 health, so stranded fences converge and cleanup resumes. Cross-process writers
-and `SIGKILL`/power-loss durability remain outside this internal milestone.
+and `SIGKILL`/power-loss durability remain outside this Phase 2 milestone.
+Phase 6 separately certifies process `SIGKILL` and same-database app-operation
+serialization; physical power/storage failure remains open.
 
 #### ✅ Implemented files
 
@@ -2376,26 +2382,25 @@ present.
 Close engine-level gaps found by the vertical slice before calling the feature
 production/GA ready. This phase is deliberately after the contract is proven.
 
-#### Implementation status — bounded native milestone implemented; certification open (2026-07-30)
+#### Implementation status — locally certifiable native milestone complete; external certification open (2026-07-30)
 
 The additive native design is implemented across the Rust engine, LMDB state,
 PyO3, and the internal Python controlled runtime. It establishes local effect
 intent/finalization ordering, schema-v3 immutable evidence lineages, strict
 verified-sink enforcement, write-free preview parity, strict provider-missing
 blockers and fresh-process recovery, retained metadata-only evidence, richer
-compatible tombstones, and in-process live queue/incarnation fencing.
+compatible tombstones, an OS-backed app-operation lease with an exclusive
+environment snapshot barrier, live queue/incarnation fencing, archive-first
+retention operations, and a copy-only downgrade workflow.
 
 This does **not** complete Phase 6's production/GA exit gate. Process-kill and
-sudden-power-loss injection, connector-side or multi-process fencing, a copied
-real pre-feature database migration drill, the million-action correlation run,
+same-host multi-process serialization, a connector-specific Qdrant generation
+race, copied real pre-feature migration, million-action correlation,
 dedicated native-writer stress, compatibility-overhead benchmarks, and the
-complete live delete/reinsert race remain open. Recorded scoped commands and
-results are in `revocation-phase6-validation.md`.
-
-Final repository validation for this source state reports a passing Cargo
-workspace and 1,412 passed / 241 skipped Python tests. The focused core and
-live modules report 103 and 37 passes respectively. These results validate the
-implemented milestone; they do not satisfy any open certification checkbox.
+complete local live delete/reinsert race are now certified. Sudden physical
+power loss or storage-controller failure and generic connector-side
+multi-host fencing remain open. Recorded commands, measurements, fixtures,
+and exact non-claims are in `revocation-phase6-validation.md`.
 
 #### Decision gate
 
@@ -2440,8 +2445,19 @@ PyO3 and internal Python integration:
 - `python/synor/execution.py`
 - `python/tests/core/test_native_effect_inspection.py`
 - `python/tests/core/test_live_component.py`
+- `python/tests/core/test_pre_native_fixture.py`
 - `python/tests/revocation/test_native_provider_recovery.py`
 - `python/tests/revocation/test_verified_sink.py`
+
+Operator, migration, and certification assets:
+
+- `python/synor/cli.py`
+- `python/tests/cli/test_native_effect_admin_cli.py`
+- `rust/core/tests/fixtures/pre_native_63df53f/`
+- `rust/core/benches/native_compatibility.rs`
+- `benchmarks/revocation/compatibility_benchmark.py`
+- `benchmarks/revocation/scale_certification.py`
+- `docs/architecture/native-effect-operations-runbook.md`
 
 #### Required native outcomes
 
@@ -2490,9 +2506,20 @@ PyO3 and internal Python integration:
   nested live mount, and delete use one per-subpath latest-operation-wins
   queue gated by `update_full`. A transition or successor handoff fails if the
   old incarnation cannot drain within the bounded timeout.
-- [ ] **Distributed live-generation fencing.** Connector-side CAS/generation
-  checks and an app-wide multi-process lease are not implemented. The local
-  cancellation fence cannot recall a remote mutation already in flight.
+- [x] **Bounded cross-process and remote-generation fencing.** Every update
+  mode and app drop participates in one OS-backed, per-app operation lease.
+  The operating system releases the lease after normal exit or `SIGKILL`, and
+  tests prove exclusion and recovery across processes. Normal app operations
+  also hold a shared environment lease; whole-environment downgrade snapshots
+  take it exclusively, blocking existing and new app runs across the copy
+  boundary. Qdrant mutations carry generation predicates, and a deterministic
+  remote-apply/reinsert race proves an old delete cannot remove a newer
+  authorization with the same point ID. This is a same-database lease plus one
+  certified connector profile, not a universal multi-host transaction.
+- [ ] **Universal distributed fencing.** Connectors other than the certified
+  Qdrant path still need profile-specific generation/CAS conformance where
+  multiple hosts can mutate the same remote object. A local cancellation
+  fence cannot recall a remote mutation already in flight.
 - [x] **Retained evidence.** Completed effect records live outside target
   tracking, survive tracking reduction, and are retained by ordinary app drop.
 - [x] **Tracking-owner cleanup repair.** Delete-mode commit now removes the
@@ -2552,22 +2579,34 @@ when a later app lifecycle repeats the same connector action ID.
   attempts, and no last-error code.
 - [x] Expose metadata-only native effect counts for
   `pending|verified|failed|blocked|completed`.
-- [ ] Run a migration test against a copied, real pre-feature app database.
-  Current coverage constructs untouched, empty-legacy, and schema-v1 upgrade
-  states in unit tests; the same supported-version migration path accepts v2,
-  but neither is the required real fixture.
-- [ ] Publish a downgrade/export tool and deployment runbook. An older binary
-  released before schema version 3 cannot be made to recognize or refuse that
-  schema; a v3 upgrade is therefore a one-way operational boundary for this
-  milestone.
-- [ ] Define and validate completed-effect retention, export, and compaction.
-  Completed records are retained indefinitely in this milestone.
+- [x] Run migration and compatibility lifecycles against copied pre-feature
+  databases generated by revision
+  `63df53f605a552547cc016ef879d7cdf582e76e8`. Checked-in 4 KiB and 16 KiB
+  page-size fixtures cover Linux and macOS LMDB layouts; Rust opens, updates,
+  migrates, drops, and updates the copy, while Python exercises the public
+  compatibility lifecycle.
+- [x] Publish metadata-only export and copy-only downgrade tooling plus
+  `native-effect-operations-runbook.md`. The downgrade command uses an
+  LMDB-consistent staging copy, refuses unresolved effects or any tombstone,
+  archives before publication, strips only native metadata from the copy,
+  publishes a readiness hash, and leaves the schema-v3 source untouched. A
+  wheel built from the pre-native revision completed
+  `update -> drop -> update` against the prepared copy.
+- [x] Define and validate completed-effect retention, export, and compaction.
+  Retention is indefinite by default. Explicit compaction writes and fsyncs a
+  private versioned archive first, then atomically removes only the exact
+  archived, completed, unreferenced records. Unknown timestamps, unresolved
+  records, and cursor heads remain retained.
 
 #### Tests
 
-- [ ] Kill the process after precommit, after apply, after verification, and
-  during final commit. Controlled Phase 2 interruption tests do not substitute
-  for native process-kill or sudden-power-loss injection.
+- [x] Send real subprocess `SIGKILL` after precommit, after apply, after
+  verification, and during final commit. Each copied database reopens and
+  preserves either retryable tracking or the native obligation, then converges
+  without duplicating completed evidence.
+- [ ] Run sudden physical power-loss, kernel-panic, and storage-controller
+  failure injection on the supported deployment filesystems. Process
+  `SIGKILL` does not establish device-level durability.
 - [x] Verify strict policy rejects a legacy cleanup before apply.
 - [x] Verify malformed native descriptors are rejected with a fixed redacted
   error before apply.
@@ -2575,9 +2614,9 @@ when a later app lifecycle repeats the same connector action ID.
   credential, raw-locator, and remote-error sentinels. The metadata-only native
   effect contains the expected opaque action/digests and none of the planted
   raw values.
-- [ ] Add the equivalent planted-sentinel serialization scan for a rich child
-  tombstone value. Existing tombstone schema/default tests do not plant every
-  sensitive category.
+- [x] Add the equivalent planted-sentinel serialization scan for a rich child
+  tombstone value. The serialized LMDB excludes action payload, principal,
+  credential, raw-locator, and remote-error sentinels.
 - [x] Verify a verified sink failure keeps effect/tracking state retryable.
 - [x] Verify the native `pending → verified → completed` state machine and
   finalization preconditions at the AppStore transaction boundary.
@@ -2604,39 +2643,51 @@ when a later app lifecycle repeats the same connector action ID.
 - [x] Verify preview rejects live mounts without stable-path or target-state
   mutation, and verify nested live→plain and plain→live transitions use the
   shared queue with latest-operation-wins behavior.
-- [ ] Exercise one million batched synthetic actions and confirm descriptor,
-  receipt, and native-effect correlation.
-- [ ] Reproduce the complete live delete/reinsert race under deterministic
-  scheduling and prove every old-incarnation write/effect boundary is fenced.
-- [ ] Open a copied pre-feature LMDB database and run the full compatibility
-  lifecycle unchanged.
+- [x] Exercise one million batched Phase 2 descriptors/receipts and one
+  million real native effect lifecycles. Both runs recompute exact
+  correlation; the native run persists and re-reads every schema-v3 record.
+- [x] Reproduce the complete live delete/reinsert race under deterministic
+  scheduling and prove the replacement waits for the old verified-effect
+  boundary. Separately, pause a Qdrant delete after remote apply, reinsert a
+  newer generation, and prove old verification/retry cannot erase it.
+- [x] Open copied 4 KiB and 16 KiB pre-feature LMDB databases and run the
+  compatibility and native-migration lifecycles unchanged.
 - [x] Route every new LMDB write through `Storage::run_txn` or a caller-owned
   transaction opened by it.
-- [ ] Run a dedicated concurrent single-writer stress test for the new native
-  lifecycle.
+- [x] Run a dedicated concurrent single-writer stress test for 4,096 native
+  lifecycles through `Storage::run_txn`; all effects complete without
+  bypassing the LMDB write batcher.
 
 #### Exit criteria
 
-- [ ] Process-kill testing establishes that no supported crash boundary loses
-  both target tracking and the native revocation obligation.
+- [x] Process-kill testing establishes that no supported process-crash boundary
+  loses both target tracking and the native revocation obligation.
 - [x] Strict provider removal cannot silently complete governed cleanup at the
   implemented engine boundary.
 - [x] Strict root update surfaces outstanding native deletion failure.
 - [x] Existing legacy sinks remain source-compatible and direct app updates
   keep compatibility semantics.
-- [ ] Copied old-database compatibility and downgrade operations are validated.
-- [ ] Rust benchmarks establish acceptable overhead outside strict mode.
+- [x] Copied old-database compatibility and copy-only downgrade operations are
+  validated with a real pre-native binary.
+- [x] Rust benchmarks establish acceptable overhead outside strict mode. The
+  inactive-hook Criterion point estimate is 0.36% over the operational-write
+  control with overlapping intervals; a back-to-back, 1,000-update
+  cross-version run records current p95 at 5.85% over the pre-native revision
+  on the same host.
 
-**Phase 6 production/GA exit gate:** not satisfied. The checked items define
-the bounded native milestone only.
+**Phase 6 production/GA exit gate:** not satisfied. The locally certifiable
+milestone is complete, but physical power/storage failure certification,
+generic connector-side multi-host fencing, live production acceptance, and
+the later GA gates remain open.
 
 #### Rollback
 
 Disable creation of new strict effects while retaining read, retry, inspection,
-and drop protection. Never downgrade by deleting the native keyspace or
-suppression evidence. Do not open a schema-v3 database with a binary that
-predates native schema version 3. A documented one-way export path for using
-an older binary remains an open operational deliverable.
+and drop protection. Never downgrade the source by deleting its native
+keyspace or suppression evidence. Do not open a schema-v3 database with a
+binary that predates native schema version 3. Use the copy-only
+`native-effects prepare-downgrade` procedure and retain the original database,
+archive, and readiness hash through the rollback window.
 
 ---
 
@@ -2890,11 +2941,13 @@ database without repurposing target tracking:
   non-mutating while any native effect is non-completed;
 - completed native evidence and the schema marker survive ordinary app drop.
 
-Native activation is one-way for this milestone. A genuinely older executable
-cannot know about a schema added after it was released, so it cannot be made to
-refuse that schema retroactively. Do not downgrade a schema-v3 app database in
-place. A copied real pre-feature database migration drill and a documented
-one-way export path remain required before the production gate.
+Native activation is one-way for the source database. A genuinely older
+executable cannot know about a schema added after it was released, so it cannot
+be made to refuse that schema retroactively. Do not downgrade a schema-v3 app
+database in place. The checked-in pre-feature fixtures validate forward
+migration. For an older executable, use the documented copy-only downgrade
+command, verify its external archive/readiness hash, and retain the source for
+rollback.
 
 ### 15.5 Provider rename/removal
 
@@ -3328,9 +3381,14 @@ product decision.
   `TargetReconcileOutput` field.
 - **First ledger:** single-process, single-event-loop adapter over
   `StateStore`, with immutable events and repairable summaries.
-- **GA durability:** the bounded native effect state is implemented after the
-  real vertical slice; process-kill/power-loss, remote fencing, migration, and
-  performance certification remain release gates.
+- **GA durability:** the bounded native effect state, process-kill recovery,
+  same-host app-operation lease, Qdrant generation race, copied migration,
+  scale, and compatibility performance are certified. Physical power/storage
+  failure and generic connector-side multi-host fencing remain release gates.
+- **Native evidence operations:** retain completed evidence indefinitely by
+  default; export versioned metadata-only private archives; compact only an
+  exact archived and revalidated set; prepare older binaries through a
+  separate stripped copy, never by mutating the source database.
 - **Ambiguous removal:** suppress and report honestly; do not label it physical
   deletion.
 - **ACL narrowing:** update policy and query authorization; do not necessarily
@@ -3349,17 +3407,16 @@ product decision.
 | 1 | **✅ Answered for the bounded public runtime** | The verified wrapper accesses the run-scoped ledger through the internal Phase 2 runtime under the tested batching and coroutine-concurrency paths. Phase 5 adds opt-in public controlled-runtime policy, startup repair/health, post-engine-commit finalization, interrupted-finalization recovery, and public reports. Automatic inference of arbitrary connector calls and a production declarative Drive → Qdrant handler remain intentionally outside this answer. |
 | 2 | **✅ Answered for the internal certified Qdrant adapter milestone** | The `qdrant-revocation-v1` profile runtime-checks a stable client and connected server `>=1.17.0,<1.19.0`, with at most one minor of skew, because explicit `insert_only`/`update_only` modes require Qdrant 1.17+. It requires a green collection, explicitly observed configured `WCF == RF`, typed payload indexes, compatible strict-mode query/filter/batch limits, and RF>1 replicated topology; it also passes Qdrant's 30-second operation timeout, caller-bounds metadata reads, and requires `wait=True`, strong ordering, completed results, durable operation-status evidence plus an operation ID when exposed, and source-scoped `consistency=all` guarded/exact-ID non-return. The locked client is 1.18.0; finite mutation transport timeout and verification of every cluster peer are operator responsibilities, the RF=1 adapter check does not inspect cluster-transfer state, preflight is not an atomic provider attestation, live server/topology acceptance remains operator-gated, and physical per-replica absence is not claimed. |
 | 3 | **Answered for the internal slice** | Phase 2 uses explicit per-action descriptors and correlates one verification outcome with each tested flattened action. |
-| 4 | **Partially answered by the bounded Phase 6 implementation** | Delete-mode removes inverted owner rows; a fresh-process provider-removal lifecycle proves strict blocked obligation/tracking retention, compatibility preservation, verified recovery, and idempotent steady state; rich tombstones carry optional generations; and local live work uses durable generations, generation-checked committed state, cancellation fences, and one serialized live/plain/delete queue. The deterministic complete live delete/reinsert race and remote/multi-process fencing remain outstanding. |
+| 4 | **✅ Answered for the bounded Phase 6 implementation** | Delete-mode removes inverted owner rows; fresh-process recovery preserves strict blockers and tracking; rich tombstones carry optional generations; local live work uses durable generations and one serialized live/plain/delete queue; the deterministic live delete/reinsert test holds replacement work behind the old verified-effect boundary; an OS-backed app-operation lease excludes a second process and recovers after `SIGKILL`; and Qdrant generation predicates preserve a newer reauthorization after an old delete's remote apply. Generic multi-host fencing for other connectors remains profile-specific work. |
 | 5 | **✅ Answered for the governed source milestone** | Phase 3 requests and fake-service tests the available file, capability, inheritance, permission-detail, expiration, and limited-access fields. Missing inheritance origin, unresolved group membership, and principal visibility are explicit limitation codes. The documented live acceptance probe remains required for each real service-account/delegation configuration. |
 | 6 | **✅ Partially answered with a safe implementation bound** | Phase 3 uses a versioned, StateStore-persisted descendant queue and processes at most 500 recomputations per batch before resuming. Production sizing and the threshold for a dedicated external graph remain measurement work, not a correctness gap in cursor ordering. |
-| 7 | **Answered only for the current local boundaries** | The control-plane `StateStore` ledger retains its tested single-process, single-event-loop reconstruction boundary. Phase 6 adds transactional LMDB effect ordering and a durable local live-generation number, but it has not been certified with sudden power loss or process kill and does not provide connector-side CAS, cross-event-loop coordination, or a multi-process live lease. |
+| 7 | **✅ Answered for process crashes and same-database writers; physical failure remains open** | The control-plane `StateStore` ledger retains its documented boundary. Phase 6 adds transactional LMDB effect ordering, durable live generations, an OS-backed app-operation lease across every update mode and drop, and real `SIGKILL` recovery at the four native boundaries. The operating system also releases the lease after a killed owner. Sudden physical power loss, storage-controller failure, and generic multi-host connector transactions remain unproven. |
 
 ### 21.3 Product choices required before public beta
 
 - Whether Synor ships full Qdrant query wrappers or only a filter/guard library.
   The recommendation is to ship a small guarded wrapper so the reference
   guarantee is testable end to end.
-- Default evidence retention and operator export format.
 - Supported Drive identity/delegation models.
 - Initial commercial SLOs after benchmarks.
 - Whether multi-process/multi-host control requires PostgreSQL or another
@@ -3417,9 +3474,10 @@ Suggested alpha claim:
 ### 22.3 Beta
 
 **Repository status (2026-07-30):** [ ] Not satisfied. The bounded public
-API/CLI and native local durability implementation exist. Multi-process
-durability decisions, Phase 6 certification, drift/restore assurance, cache
-recipients, measured SLOs, and external security review remain outstanding.
+API/CLI, locally certifiable Phase 6 durability work, native operations
+runbook, and same-database process lease exist. Generic multi-host durability,
+drift/restore assurance, cache recipients, measured SLOs, and external
+security review remain outstanding.
 
 Requires:
 
@@ -3436,8 +3494,8 @@ Requires:
 ### 22.4 General availability
 
 **Repository status (2026-07-30):** [ ] Not satisfied. Phases 3–6 have bounded
-implementation milestones, but the open Phase 6 certification work, Phases
-7–8, and every gate below must complete before a GA claim.
+implementation milestones, but the external Phase 6 certification work,
+Phases 7–8, and every gate below must complete before a GA claim.
 
 Requires all of:
 
@@ -3462,10 +3520,11 @@ production/GA feature. The Phase 5 public runtime, operator UX, and local
 flagship are complete, and the stable Drive-identity → Phase 2 runtime →
 Qdrant adapter path is proven through service-free reconstruction and guarded
 non-return tests. It is not yet wired and accepted as one live declarative
-Google Drive → Qdrant `App`; native durability certification, cross-process
-fencing, production drift/restore repair, and the remaining GA gates stay open. The
-bounded native implementation exists, but its process-kill, migration,
-live-race, distributed-fencing, scale, and performance certification does not.
+Google Drive → Qdrant `App`; physical power/storage certification, generic
+multi-host connector fencing, production drift/restore repair, and the
+remaining GA gates stay open. The bounded native process-kill, migration,
+same-database lease, deterministic race, scale, and performance work is
+complete.
 
 Implementation is complete only when this statement is true:
 
@@ -3501,7 +3560,7 @@ separate pull requests.
 | PR 7 — Qdrant strict target | **✅ Complete for the internal adapter scope** | Phase 4 governed lineage/content binding, Phase 2 state verifier, strict point/collection verification, ACL narrowing, durable operation-status receipts with operation IDs when exposed, compatibility tests, operator-gated live tests, docs, and bounded provider-batch benchmarks are implemented. Live execution, trusted principal-context issuance, public handler wiring, and end-to-end memory certification remain open. |
 | PR 8 — End-to-end flagship example | **✅ Complete for the bounded local/reference scope** | The two-tenant service-free example runs twice through real controlled engine commits and demonstrates ACL-only revocation, suppression, delayed verification, partial-scan safety, restore non-resurrection, receipts, and content-free evidence. Optional real mode is a non-certified configuration probe; live acceptance remains open. |
 | PR 9 — Public runtime/API/CLI | **✅ Complete for the bounded public scope** | Minimal public aliases, strict policy, startup repair/health, controlled finalization/recovery, conservative guarantee/status reporting, redacted versioned CLI, generated docs, and public compatibility tests are implemented. Automatic arbitrary-connector attestation is not claimed. |
-| PR 10 — Native durability | **✅ Implemented for the bounded native scope; certification open** | Schema-v3/effect-record-v2 evidence lineages, verified-sink integration, write-free preview, strict provider blockers and fresh-process recovery, retained evidence, rich tombstones, tracking-owner cleanup, and local live queue/generation fencing are implemented. Kill/power-loss, copied-real-database, complete live-race, multi-process/remote fencing, scale, native concurrency, and overhead gates remain open. |
+| PR 10 — Native durability | **✅ Complete for the locally certifiable native scope; external gates open** | Schema-v3/effect-record-v2 evidence lineages, verified-sink integration, preview, strict recovery, retained evidence, rich tombstones, tracking-owner cleanup, live generation/queueing, an OS-backed app lease, process-kill recovery, copied migration/downgrade, deterministic live/Qdrant races, million-action correlation, writer stress, and compatibility benchmarks are complete. Physical power/storage failure and generic connector-side multi-host fencing remain open. |
 | PR 11 — Drift, cache, and restore | **Not started** | Phase 7. |
 | PR 12 — Expansion and conformance kit | **Not started** | Phase 8. |
 
@@ -3584,8 +3643,11 @@ separate pull requests.
   drop-retention, strict legacy-sink, preview parity/purity, evidence
   redaction, Delete owner cleanup, fresh-process provider recovery, retry, and
   live transition-queue tests.
-- [ ] Add process-kill/power-loss, copied real database, deterministic complete
-  live-race, scale, performance, and dedicated native concurrency validation.
+- [x] Add process-kill, copied real database, deterministic complete
+  live/Qdrant races, scale, performance, downgrade, retention, and dedicated
+  native concurrency validation.
+- [ ] Run physical power/storage failure certification and connector-specific
+  multi-host generation/CAS conformance before broadening the bounded claim.
 
 ### PR 11 — Drift, cache, and restore
 
@@ -3610,11 +3672,11 @@ For each PR:
 
 ## 24. Start-development checklist
 
-**Status:** All Phase 0–5 checklist items and the bounded Phase 6 native
-implementation items are complete for their documented scopes. The next
-unchecked handoff is Phase 6 durability/live-race/migration/performance
-certification, followed by Phase 7 assurance work. The separate live Google
-Drive → Qdrant alpha acceptance gate also remains open.
+**Status:** All Phase 0–6 locally certifiable checklist items are complete for
+their documented scopes. The next unchecked handoff is external physical
+power/storage and generic multi-host connector certification, followed by
+Phase 7 assurance work. The separate live Google Drive → Qdrant alpha
+acceptance gate also remains open.
 
 The first maintainer can begin with this exact sequence:
 
@@ -3649,13 +3711,16 @@ The first maintainer can begin with this exact sequence:
   integration, strict provider blockers, retained evidence, rich tombstones,
   tracking-owner cleanup, write-free preview, fresh-process provider recovery,
   evidence lineages, and local live queue/generation fencing.
-- [ ] **Next Phase 6 gate:** run process-kill/power-loss injection, a copied
-  real pre-feature database drill, the complete live delete/reinsert race, the
-  million-action correlation run, compatibility-overhead benchmarks, and
-  dedicated concurrent-writer validation.
-- [ ] **Distributed safety:** add connector-side generation/CAS enforcement or
-  an explicit multi-process lease before claiming remote or multi-process live
-  fencing.
+- [x] ✅ Complete the locally certifiable Phase 6 gates: process `SIGKILL`,
+  copied real pre-feature databases, copy-only downgrade, archive-first
+  compaction, deterministic live/Qdrant delete-reinsert races, million-action
+  correlation, compatibility benchmarks, and native concurrent-writer stress.
+- [x] ✅ Add an OS-backed per-app lease across every update mode and drop;
+  prove second-process exclusion and automatic recovery after owner
+  `SIGKILL`.
+- [ ] **External distributed safety:** run physical power/storage failure
+  certification and add connector-specific multi-host generation/CAS
+  conformance before claiming universal distributed fencing.
 
 Do not start by:
 

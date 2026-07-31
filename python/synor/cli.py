@@ -1,42 +1,46 @@
+import asyncio
+import datetime
+import hashlib
+import json
 import logging
 import os
+import pathlib
+import shutil
 import signal
 import sys
-import json
 import tempfile
-import datetime
-from typing import Any, AsyncIterator, Mapping, NamedTuple, NoReturn
-import pathlib
+import uuid
+from collections.abc import AsyncIterator, Mapping
+from typing import Any, NamedTuple, NoReturn
 
 import click
 from dotenv import find_dotenv, load_dotenv
 
-from .user_app_loader import load_user_app, Error as UserAppLoaderError
-
-import asyncio
 import synor as syn
-from synor._internal.app import App
 from synor._internal import core as _core
+from synor._internal.app import App
 from synor._internal.environment import (
     Environment,
-    LazyEnvironment,
     EnvironmentInfo,
+    LazyEnvironment,
     default_env_lazy,
     get_registered_environment_infos,
 )
 from synor._internal.setting import get_default_db_path
+from synor._internal.stable_path import StablePath
 from synor.inspect import (
-    iter_stable_paths,
-    iter_stable_paths_by_name,
     iter_stable_path_details,
     iter_stable_path_details_by_name,
+    iter_stable_paths,
+    iter_stable_paths_by_name,
     iter_target_states,
     iter_target_states_by_name,
     query_stable_path_details,
     query_stable_path_details_by_name,
 )
-from synor._internal.stable_path import StablePath
 
+from .user_app_loader import Error as UserAppLoaderError
+from .user_app_loader import load_user_app
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -1030,6 +1034,330 @@ def _command_state_store() -> syn.StateStore:
         raise click.ClickException(str(error)) from error
 
 
+_NATIVE_EFFECT_ARCHIVE_SCHEMA_VERSION = 1
+
+
+def _native_effect_environment(db_path: pathlib.Path) -> Environment:
+    from synor._internal.setting import Settings
+
+    if not db_path.exists():
+        raise click.ClickException(f"Database path does not exist: {db_path}")
+    return Environment(
+        Settings(db_path=db_path),
+        event_loop=asyncio.get_running_loop(),
+    )
+
+
+def _resolve_operator_path_outside_database(
+    db_path: pathlib.Path,
+    path: pathlib.Path,
+    *,
+    kind: str,
+) -> pathlib.Path:
+    database = db_path.resolve()
+    resolved = path.resolve()
+    if resolved == database or resolved.is_relative_to(database):
+        raise click.ClickException(f"{kind} must be outside the source database")
+    return resolved
+
+
+def _native_effect_record_payload(record: _core._NativeEffectRecord) -> dict[str, Any]:
+    return {
+        "record_version": record.record_version,
+        "evidence_id": record.evidence_id,
+        "action_id": record.action_id,
+        "operation": record.operation,
+        "source_digest": record.source_digest,
+        "source_generation": record.source_generation,
+        "target_locator_digest": record.target_locator_digest,
+        "tracking_locator": record.tracking_locator,
+        "verification_policy": record.verification_policy,
+        "cause": record.cause,
+        "status": record.status,
+        "created_at_unix_ms": record.created_at_unix_ms,
+        "updated_at_unix_ms": record.updated_at_unix_ms,
+        "attempt_count": record.attempt_count,
+        "last_error_code": record.last_error_code,
+    }
+
+
+def _native_effect_app_payload(
+    app_name: str,
+    schema_version: int | None,
+    effects: list[_core._NativeEffectRecord],
+) -> dict[str, Any]:
+    records = [_native_effect_record_payload(effect) for effect in effects]
+    status_counts: dict[str, int] = {}
+    for record in records:
+        status = str(record["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "app_name": app_name,
+        "native_schema_version": schema_version,
+        "effect_count": len(records),
+        "status_counts": dict(sorted(status_counts.items())),
+        "effects": records,
+    }
+
+
+def _native_effect_archive_payload(
+    apps: list[dict[str, Any]],
+    *,
+    purpose: str,
+    retention: Mapping[str, Any],
+    compaction_candidate_evidence_ids: list[str] | None = None,
+    downgrade: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    canonical_apps = json.dumps(
+        apps,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    payload: dict[str, Any] = {
+        "schema": "synor.native-effects.archive",
+        "schema_version": _NATIVE_EFFECT_ARCHIVE_SCHEMA_VERSION,
+        "created_at": datetime.datetime.now(datetime.UTC)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "purpose": purpose,
+        "metadata_only": True,
+        "default_retention": "indefinite",
+        "retention": dict(retention),
+        "app_count": len(apps),
+        "effect_count": sum(int(app["effect_count"]) for app in apps),
+        "apps_sha256": hashlib.sha256(canonical_apps).hexdigest(),
+        "apps": apps,
+    }
+    if compaction_candidate_evidence_ids is not None:
+        payload["compaction_candidate_evidence_ids"] = sorted(
+            compaction_candidate_evidence_ids
+        )
+    if downgrade is not None:
+        payload["downgrade"] = dict(downgrade)
+    return payload
+
+
+def _fsync_directory(path: pathlib.Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_private_json_archive(
+    path: pathlib.Path,
+    payload: Mapping[str, Any],
+) -> str:
+    path = path.resolve()
+    if path.exists():
+        raise click.ClickException(f"Archive path already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            raise click.ClickException(f"Archive path already exists: {path}") from None
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_completed_before(value: str) -> tuple[datetime.datetime, int]:
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        raise click.ClickException(
+            "--completed-before must be an ISO-8601 timestamp with a timezone"
+        ) from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise click.ClickException(
+            "--completed-before must include Z or an explicit UTC offset"
+        )
+    parsed = parsed.astimezone(datetime.UTC)
+    milliseconds = int(parsed.timestamp() * 1000)
+    if milliseconds < 0:
+        raise click.ClickException("--completed-before must not predate Unix epoch")
+    return parsed, milliseconds
+
+
+async def _native_effect_export(
+    db_path: pathlib.Path,
+    app_name: str,
+    output: pathlib.Path,
+) -> tuple[dict[str, Any], str]:
+    output = _resolve_operator_path_outside_database(
+        db_path,
+        output,
+        kind="Archive path",
+    )
+    env = _native_effect_environment(db_path)
+    snapshot = _core.native_effect_snapshot_by_name(env._core_env, app_name)
+    if snapshot is None:
+        raise click.ClickException(f"App database does not exist: {app_name}")
+    app = _native_effect_app_payload(
+        app_name,
+        snapshot.schema_version,
+        snapshot.effects,
+    )
+    archive = _native_effect_archive_payload(
+        [app],
+        purpose="operator_export",
+        retention={"policy": "indefinite"},
+    )
+    digest = _write_private_json_archive(output, archive)
+    return archive, digest
+
+
+async def _native_effect_compact(
+    db_path: pathlib.Path,
+    app_name: str,
+    archive_path: pathlib.Path,
+    completed_before: str,
+) -> tuple[dict[str, Any], str, _core._NativeEffectCompactionResult]:
+    archive_path = _resolve_operator_path_outside_database(
+        db_path,
+        archive_path,
+        kind="Archive path",
+    )
+    cutoff, cutoff_ms = _parse_completed_before(completed_before)
+    env = _native_effect_environment(db_path)
+    snapshot = _core.native_effect_snapshot_by_name(env._core_env, app_name)
+    if snapshot is None:
+        raise click.ClickException(f"App database does not exist: {app_name}")
+    app = _native_effect_app_payload(
+        app_name,
+        snapshot.schema_version,
+        snapshot.effects,
+    )
+    candidates = sorted(
+        record["evidence_id"]
+        for record in app["effects"]
+        if record["status"] == "completed"
+        and int(record["updated_at_unix_ms"]) != 0
+        and int(record["updated_at_unix_ms"]) <= cutoff_ms
+    )
+    archive = _native_effect_archive_payload(
+        [app],
+        purpose="retention_compaction",
+        retention={
+            "policy": "explicit_completed_before",
+            "completed_before": cutoff.isoformat().replace("+00:00", "Z"),
+            "unknown_timestamp_records": "retained",
+            "cursor_referenced_records": "retained",
+        },
+        compaction_candidate_evidence_ids=candidates,
+    )
+    digest = _write_private_json_archive(archive_path, archive)
+    result = _core.compact_native_effects_by_name(
+        env._core_env,
+        app_name,
+        candidates,
+    )
+    return archive, digest, result
+
+
+async def _prepare_native_downgrade(
+    db_path: pathlib.Path,
+    output_db: pathlib.Path,
+    archive_path: pathlib.Path,
+) -> tuple[dict[str, Any], str, _core._NativeEffectDowngradeResult]:
+    source = db_path.resolve()
+    output = output_db.resolve()
+    archive = _resolve_operator_path_outside_database(
+        source,
+        archive_path,
+        kind="Archive path",
+    )
+    if output == source or output.is_relative_to(source):
+        raise click.ClickException(
+            "Downgrade output must be outside the source database"
+        )
+    if output.exists():
+        raise click.ClickException(f"Downgrade output already exists: {output}")
+    if archive.exists():
+        raise click.ClickException(f"Archive path already exists: {archive}")
+    if archive.is_relative_to(output):
+        raise click.ClickException("Archive path must be outside the downgrade output")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = output.parent / f".{output.name}.synor-staging-{uuid.uuid4().hex}"
+    publish_lock = output.parent / f".{output.name}.synor-publish.lock"
+    env = _native_effect_environment(source)
+    try:
+        result = _core.prepare_native_downgrade(env._core_env, str(staging))
+        apps = [
+            _native_effect_app_payload(
+                app.app_name,
+                app.schema_version,
+                app.effects,
+            )
+            for app in result.apps
+        ]
+        removed = {
+            "removed_schema_markers": result.removed_schema_markers,
+            "removed_effects": result.removed_effects,
+            "removed_obligation_cursors": result.removed_obligation_cursors,
+            "removed_lineage_cursors": result.removed_lineage_cursors,
+            "removed_live_generation_keys": result.removed_live_generation_keys,
+        }
+        archive_payload = _native_effect_archive_payload(
+            apps,
+            purpose="downgrade_preparation",
+            retention={"policy": "external_archive_before_native_metadata_strip"},
+            downgrade={
+                "source_database_modified": False,
+                "copy_native_metadata_removed": True,
+                **removed,
+            },
+        )
+        archive_digest = _write_private_json_archive(archive, archive_payload)
+        ready_payload = {
+            "schema": "synor.native-effects.downgrade-ready",
+            "schema_version": 1,
+            "archive_sha256": archive_digest,
+            **removed,
+        }
+        _write_private_json_archive(
+            staging / "DOWNGRADE_READY.json",
+            ready_payload,
+        )
+
+        lock_descriptor = os.open(
+            publish_lock,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            if output.exists():
+                raise click.ClickException(f"Downgrade output already exists: {output}")
+            os.rename(staging, output)
+            _fsync_directory(output.parent)
+        finally:
+            os.close(lock_descriptor)
+            publish_lock.unlink(missing_ok=True)
+        return archive_payload, archive_digest, result
+    except Exception:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+
+
 _REVOCATION_JSON_SCHEMA_VERSION = 1
 _REVOCATION_CONTROL_PREFIX = "revocation/v1/"
 _REVOCATION_SUPPRESSION_PREFIX = "revocation/v1/suppression/"
@@ -1968,6 +2296,216 @@ async def _scan_revocations(
             "scan operator returned a result for a different target"
         )
     return result, payload
+
+
+@cli.group("native-effects")
+def native_effects_group() -> None:
+    """Export, compact, and prepare downgrade copies of native evidence."""
+
+
+@native_effects_group.command("export")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="Source Synor database directory.",
+)
+@click.option("--app-name", required=True, help="Persisted app name.")
+@click.option(
+    "--output",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="New private JSON archive path.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit result JSON.")
+def native_effects_export(
+    db_path: pathlib.Path,
+    app_name: str,
+    output: pathlib.Path,
+    json_output: bool,
+) -> None:
+    """Export a metadata-only native-effect archive without mutation."""
+
+    try:
+        archive, digest = asyncio.run(_native_effect_export(db_path, app_name, output))
+    except click.ClickException:
+        raise
+    except Exception as error:  # noqa: BLE001 - translate the native boundary for Click
+        raise click.ClickException(f"native effect export failed: {error}") from None
+    result = {
+        "schema": "synor.native-effects.export-result",
+        "schema_version": 1,
+        "archive": str(output.resolve()),
+        "archive_sha256": digest,
+        "effect_count": archive["effect_count"],
+    }
+    if json_output:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        click.echo(f"Exported {result['effect_count']} native effect record(s).")
+        click.echo(f"Archive: {result['archive']}")
+        click.echo(f"SHA-256: {digest}")
+
+
+@native_effects_group.command("compact")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="Source Synor database directory.",
+)
+@click.option("--app-name", required=True, help="Persisted app name.")
+@click.option(
+    "--completed-before",
+    required=True,
+    help="ISO-8601 cutoff with Z or an explicit UTC offset.",
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="New private archive written and fsynced before compaction.",
+)
+@click.option(
+    "--confirm-compaction",
+    is_flag=True,
+    help="Confirm deletion of archived, unreferenced completed evidence.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit result JSON.")
+def native_effects_compact(
+    db_path: pathlib.Path,
+    app_name: str,
+    completed_before: str,
+    archive_path: pathlib.Path,
+    confirm_compaction: bool,
+    json_output: bool,
+) -> None:
+    """Archive, then compact eligible completed native-effect history."""
+
+    if not confirm_compaction:
+        raise click.ClickException(
+            "Pass --confirm-compaction to modify native evidence."
+        )
+    try:
+        archive, digest, compacted = asyncio.run(
+            _native_effect_compact(
+                db_path,
+                app_name,
+                archive_path,
+                completed_before,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as error:  # noqa: BLE001 - translate the native boundary for Click
+        raise click.ClickException(
+            f"native effect compaction failed: {error}"
+        ) from None
+    result = {
+        "schema": "synor.native-effects.compaction-result",
+        "schema_version": 1,
+        "archive": str(archive_path.resolve()),
+        "archive_sha256": digest,
+        "archived_effect_count": archive["effect_count"],
+        "requested": compacted.requested,
+        "deleted": compacted.deleted,
+        "protected": compacted.protected,
+        "already_absent": compacted.already_absent,
+    }
+    if json_output:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        click.echo(f"Archived {result['archived_effect_count']} record(s).")
+        click.echo(
+            f"Compaction: deleted={result['deleted']} "
+            f"protected={result['protected']} "
+            f"already_absent={result['already_absent']}"
+        )
+        click.echo(f"Archive: {result['archive']}")
+        click.echo(f"SHA-256: {digest}")
+
+
+@native_effects_group.command("prepare-downgrade")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, file_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="Source Synor database directory.",
+)
+@click.option(
+    "--output-db",
+    type=click.Path(file_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="New downgraded database directory.",
+)
+@click.option(
+    "--archive",
+    "archive_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="New private archive for metadata removed from the copy.",
+)
+@click.option(
+    "--confirm-downgrade",
+    is_flag=True,
+    help="Confirm creation of a pre-native compatibility copy.",
+)
+@click.option("--json", "json_output", is_flag=True, help="Emit result JSON.")
+def native_effects_prepare_downgrade(
+    db_path: pathlib.Path,
+    output_db: pathlib.Path,
+    archive_path: pathlib.Path,
+    confirm_downgrade: bool,
+    json_output: bool,
+) -> None:
+    """Archive evidence and publish a separate pre-native database copy."""
+
+    if not confirm_downgrade:
+        raise click.ClickException(
+            "Pass --confirm-downgrade to create a downgrade copy."
+        )
+    try:
+        archive, digest, prepared = asyncio.run(
+            _prepare_native_downgrade(
+                db_path,
+                output_db,
+                archive_path,
+            )
+        )
+    except click.ClickException:
+        raise
+    except Exception as error:  # noqa: BLE001 - translate the native boundary for Click
+        raise click.ClickException(
+            f"native downgrade preparation failed: {error}"
+        ) from None
+    result = {
+        "schema": "synor.native-effects.downgrade-result",
+        "schema_version": 1,
+        "output_database": str(output_db.resolve()),
+        "archive": str(archive_path.resolve()),
+        "archive_sha256": digest,
+        "app_count": archive["app_count"],
+        "archived_effect_count": archive["effect_count"],
+        "removed_schema_markers": prepared.removed_schema_markers,
+        "removed_effects": prepared.removed_effects,
+        "removed_obligation_cursors": prepared.removed_obligation_cursors,
+        "removed_lineage_cursors": prepared.removed_lineage_cursors,
+        "removed_live_generation_keys": prepared.removed_live_generation_keys,
+    }
+    if json_output:
+        click.echo(json.dumps(result, indent=2, sort_keys=True))
+    else:
+        click.echo(
+            f"Prepared downgrade copy for {result['app_count']} app(s); "
+            f"archived {result['archived_effect_count']} effect record(s)."
+        )
+        click.echo(f"Database copy: {result['output_database']}")
+        click.echo(f"Archive: {result['archive']}")
+        click.echo(f"SHA-256: {digest}")
 
 
 @cli.group("revocations")

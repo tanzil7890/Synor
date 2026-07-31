@@ -14,7 +14,11 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use synor_core::engine::runtime::get_runtime;
 use synor_core::inspect::db_inspect;
 use synor_core::inspect::db_inspect::StablePathNodeType;
-use synor_core::state::native_effect::NativeEffectCounts;
+use synor_core::state::native_effect::{
+    NativeEffectAppSnapshot, NativeEffectCause, NativeEffectCompactionResult, NativeEffectCounts,
+    NativeEffectDowngradeResult, NativeEffectErrorCode, NativeEffectIntent, NativeEffectOperation,
+    NativeEffectStatus, NativeVerificationPolicy,
+};
 use synor_core::state::stable_path::StableKey;
 
 #[pyclass(name = "StablePathNodeType", skip_from_py_object)]
@@ -207,6 +211,241 @@ pub fn native_effect_counts_by_name(
         })
         .into_py_result()?;
     Ok(counts.map(Into::into))
+}
+
+#[pyclass(name = "_NativeEffectRecord", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyNativeEffectRecord {
+    #[pyo3(get)]
+    pub record_version: u16,
+    #[pyo3(get)]
+    pub evidence_id: String,
+    #[pyo3(get)]
+    pub action_id: String,
+    #[pyo3(get)]
+    pub operation: String,
+    #[pyo3(get)]
+    pub source_digest: String,
+    #[pyo3(get)]
+    pub source_generation: u64,
+    #[pyo3(get)]
+    pub target_locator_digest: String,
+    #[pyo3(get)]
+    pub tracking_locator: String,
+    #[pyo3(get)]
+    pub verification_policy: String,
+    #[pyo3(get)]
+    pub cause: String,
+    #[pyo3(get)]
+    pub status: String,
+    #[pyo3(get)]
+    pub created_at_unix_ms: u64,
+    #[pyo3(get)]
+    pub updated_at_unix_ms: u64,
+    #[pyo3(get)]
+    pub attempt_count: u64,
+    #[pyo3(get)]
+    pub last_error_code: Option<String>,
+}
+
+impl From<NativeEffectIntent> for PyNativeEffectRecord {
+    fn from(effect: NativeEffectIntent) -> Self {
+        let evidence_id = effect
+            .evidence_id
+            .clone()
+            .unwrap_or_else(|| effect.descriptor.action_id.clone());
+        Self {
+            record_version: effect.record_version,
+            evidence_id,
+            action_id: effect.descriptor.action_id,
+            operation: match effect.descriptor.operation {
+                NativeEffectOperation::Delete => "delete",
+                NativeEffectOperation::Isolate => "isolate",
+                NativeEffectOperation::Cleanup => "cleanup",
+            }
+            .to_string(),
+            source_digest: effect.descriptor.source_digest,
+            source_generation: effect.descriptor.source_generation,
+            target_locator_digest: effect.descriptor.target_locator_digest,
+            tracking_locator: effect.tracking_locator.to_base64(),
+            verification_policy: match effect.verification_policy {
+                NativeVerificationPolicy::LegacyUnverified => "legacy_unverified",
+                NativeVerificationPolicy::QueryVerified => "query_verified",
+            }
+            .to_string(),
+            cause: match effect.cause {
+                NativeEffectCause::Undeclared => "undeclared",
+                NativeEffectCause::Explicit => "explicit",
+                NativeEffectCause::OrphanedComponent => "orphaned_component",
+                NativeEffectCause::ProviderMissing => "provider_missing",
+            }
+            .to_string(),
+            status: match effect.status {
+                NativeEffectStatus::Pending => "pending",
+                NativeEffectStatus::Verified => "verified",
+                NativeEffectStatus::Failed => "failed",
+                NativeEffectStatus::Blocked => "blocked",
+                NativeEffectStatus::Completed => "completed",
+            }
+            .to_string(),
+            created_at_unix_ms: effect.created_at_unix_ms,
+            updated_at_unix_ms: effect.updated_at_unix_ms,
+            attempt_count: effect.attempt_count,
+            last_error_code: effect.last_error_code.map(|code| {
+                match code {
+                    NativeEffectErrorCode::ProviderMissing => "provider_missing",
+                    NativeEffectErrorCode::LegacySinkRejected => "legacy_sink_rejected",
+                    NativeEffectErrorCode::SinkApplyFailed => "sink_apply_failed",
+                    NativeEffectErrorCode::VerificationFailed => "verification_failed",
+                    NativeEffectErrorCode::VerificationTimeout => "verification_timeout",
+                    NativeEffectErrorCode::FinalCommitFailed => "final_commit_failed",
+                    NativeEffectErrorCode::CleanupFailed => "cleanup_failed",
+                    NativeEffectErrorCode::UnsupportedCapability => "unsupported_capability",
+                    NativeEffectErrorCode::InternalState => "internal_state",
+                }
+                .to_string()
+            }),
+        }
+    }
+}
+
+#[pyclass(name = "_NativeEffectSnapshot", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyNativeEffectSnapshot {
+    #[pyo3(get)]
+    pub schema_version: Option<u32>,
+    #[pyo3(get)]
+    pub effects: Vec<PyNativeEffectRecord>,
+}
+
+#[pyclass(name = "_NativeEffectAppSnapshot", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyNativeEffectAppSnapshot {
+    #[pyo3(get)]
+    pub app_name: String,
+    #[pyo3(get)]
+    pub schema_version: Option<u32>,
+    #[pyo3(get)]
+    pub effects: Vec<PyNativeEffectRecord>,
+}
+
+impl From<NativeEffectAppSnapshot> for PyNativeEffectAppSnapshot {
+    fn from(snapshot: NativeEffectAppSnapshot) -> Self {
+        Self {
+            app_name: snapshot.app_name,
+            schema_version: snapshot.schema_version,
+            effects: snapshot.effects.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[pyclass(name = "_NativeEffectCompactionResult", frozen, skip_from_py_object)]
+#[derive(Clone, Copy)]
+pub struct PyNativeEffectCompactionResult {
+    #[pyo3(get)]
+    pub requested: u64,
+    #[pyo3(get)]
+    pub deleted: u64,
+    #[pyo3(get)]
+    pub protected: u64,
+    #[pyo3(get)]
+    pub already_absent: u64,
+}
+
+impl From<NativeEffectCompactionResult> for PyNativeEffectCompactionResult {
+    fn from(result: NativeEffectCompactionResult) -> Self {
+        Self {
+            requested: result.requested,
+            deleted: result.deleted,
+            protected: result.protected,
+            already_absent: result.already_absent,
+        }
+    }
+}
+
+#[pyclass(name = "_NativeEffectDowngradeResult", frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyNativeEffectDowngradeResult {
+    #[pyo3(get)]
+    pub apps: Vec<PyNativeEffectAppSnapshot>,
+    #[pyo3(get)]
+    pub removed_schema_markers: u64,
+    #[pyo3(get)]
+    pub removed_effects: u64,
+    #[pyo3(get)]
+    pub removed_obligation_cursors: u64,
+    #[pyo3(get)]
+    pub removed_lineage_cursors: u64,
+    #[pyo3(get)]
+    pub removed_live_generation_keys: u64,
+}
+
+impl From<NativeEffectDowngradeResult> for PyNativeEffectDowngradeResult {
+    fn from(result: NativeEffectDowngradeResult) -> Self {
+        Self {
+            apps: result.apps.into_iter().map(Into::into).collect(),
+            removed_schema_markers: result.removed_schema_markers,
+            removed_effects: result.removed_effects,
+            removed_obligation_cursors: result.removed_obligation_cursors,
+            removed_lineage_cursors: result.removed_lineage_cursors,
+            removed_live_generation_keys: result.removed_live_generation_keys,
+        }
+    }
+}
+
+#[pyfunction]
+pub fn native_effect_snapshot_by_name(
+    py: Python<'_>,
+    env: &PyEnvironment,
+    app_name: &str,
+) -> PyResult<Option<PyNativeEffectSnapshot>> {
+    let env = env.0.clone();
+    let app_name = app_name.to_string();
+    let snapshot = py
+        .detach(|| {
+            get_runtime().block_on(async move {
+                db_inspect::native_effect_snapshot_by_name(&env, &app_name).await
+            })
+        })
+        .into_py_result()?;
+    Ok(snapshot.map(|snapshot| PyNativeEffectSnapshot {
+        schema_version: snapshot.schema_version,
+        effects: snapshot.effects.into_iter().map(Into::into).collect(),
+    }))
+}
+
+#[pyfunction]
+pub fn compact_native_effects_by_name(
+    py: Python<'_>,
+    env: &PyEnvironment,
+    app_name: &str,
+    evidence_ids: Vec<String>,
+) -> PyResult<PyNativeEffectCompactionResult> {
+    let env = env.0.clone();
+    let app_name = app_name.to_string();
+    py.detach(|| {
+        get_runtime().block_on(async move {
+            db_inspect::compact_native_effects_by_name(&env, &app_name, &evidence_ids).await
+        })
+    })
+    .into_py_result()
+    .map(Into::into)
+}
+
+#[pyfunction]
+pub fn prepare_native_downgrade(
+    py: Python<'_>,
+    env: &PyEnvironment,
+    staging_path: std::path::PathBuf,
+) -> PyResult<PyNativeEffectDowngradeResult> {
+    let env = env.0.clone();
+    py.detach(|| {
+        get_runtime().block_on(async move {
+            db_inspect::prepare_native_downgrade(&env, &staging_path).await
+        })
+    })
+    .into_py_result()
+    .map(Into::into)
 }
 
 #[pyclass(name = "TargetStateVersion", skip_from_py_object)]

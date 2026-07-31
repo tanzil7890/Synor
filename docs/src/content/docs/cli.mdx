@@ -250,6 +250,97 @@ synor ls [OPTIONS] [APP_TARGET]
 
 ---
 
+### `native-effects`
+
+Export, compact, and prepare downgrade copies of native evidence.
+
+
+**Usage:**
+
+```bash
+synor native-effects [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--help` | Show this message and exit. |
+
+---
+
+### `native-effects compact`
+
+Archive, then compact eligible completed native-effect history.
+
+
+**Usage:**
+
+```bash
+synor native-effects compact [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--db DIRECTORY` | Source Synor database directory.  [required] |
+| `--app-name TEXT` | Persisted app name.  [required] |
+| `--completed-before TEXT` | ISO-8601 cutoff with Z or an explicit UTC offset. [required] |
+| `--archive FILE` | New private archive written and fsynced before compaction.  [required] |
+| `--confirm-compaction` | Confirm deletion of archived, unreferenced completed evidence. |
+| `--json` | Emit result JSON. |
+| `--help` | Show this message and exit. |
+
+---
+
+### `native-effects export`
+
+Export a metadata-only native-effect archive without mutation.
+
+
+**Usage:**
+
+```bash
+synor native-effects export [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--db DIRECTORY` | Source Synor database directory.  [required] |
+| `--app-name TEXT` | Persisted app name.  [required] |
+| `--output FILE` | New private JSON archive path.  [required] |
+| `--json` | Emit result JSON. |
+| `--help` | Show this message and exit. |
+
+---
+
+### `native-effects prepare-downgrade`
+
+Archive evidence and publish a separate pre-native database copy.
+
+
+**Usage:**
+
+```bash
+synor native-effects prepare-downgrade [OPTIONS]
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--db DIRECTORY` | Source Synor database directory.  [required] |
+| `--output-db DIRECTORY` | New downgraded database directory.  [required] |
+| `--archive FILE` | New private archive for metadata removed from the copy.  [required] |
+| `--confirm-downgrade` | Confirm creation of a pre-native compatibility copy. |
+| `--json` | Emit result JSON. |
+| `--help` | Show this message and exit. |
+
+---
+
 ### `package`
 
 Build a deterministic local pipeline package and lockfile.
