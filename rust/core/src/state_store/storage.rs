@@ -147,10 +147,25 @@ pub struct AppOperationLease {
     _app_file: File,
 }
 
+impl Drop for AppOperationLease {
+    fn drop(&mut self) {
+        // Explicit unlock prevents a duplicated descriptor from extending the
+        // lease lifetime; closing each owner file remains the fallback.
+        let _ = self._app_file.unlock();
+        let _ = self._environment_file.unlock();
+    }
+}
+
 /// Exclusive lease for a whole-environment administrative snapshot.
 #[derive(Debug)]
 struct EnvironmentOperationLease {
     _file: File,
+}
+
+impl Drop for EnvironmentOperationLease {
+    fn drop(&mut self) {
+        let _ = self._file.unlock();
+    }
 }
 
 /// Type-erased body for a batched write transaction. Each body returns a
@@ -1308,6 +1323,12 @@ mod tests {
         let lease = storage
             .try_acquire_app_operation_lease("lease-app")
             .unwrap();
+        // Simulate descriptors inherited across fork while the owner is dropped.
+        #[cfg(unix)]
+        let duplicated_lease_files = (
+            lease._environment_file.try_clone().unwrap(),
+            lease._app_file.try_clone().unwrap(),
+        );
         let error = storage
             .try_acquire_app_operation_lease("lease-app")
             .expect_err("a second owner must be rejected");
@@ -1335,13 +1356,17 @@ mod tests {
             .try_acquire_environment_operation_lease_once()
             .unwrap()
             .expect("the environment lease must become available");
+        #[cfg(unix)]
+        let duplicated_environment_lease_file = environment_lease._file.try_clone().unwrap();
         storage
             .try_acquire_app_operation_lease("lease-app")
             .expect_err("the environment snapshot must block new app operations");
         drop(environment_lease);
         storage
             .try_acquire_app_operation_lease("lease-app")
-            .expect("closing the owner file must release the OS lock");
+            .expect("dropping the owner must release the OS lock");
+        #[cfg(unix)]
+        drop((duplicated_lease_files, duplicated_environment_lease_file));
     }
 
     #[cfg(unix)]
