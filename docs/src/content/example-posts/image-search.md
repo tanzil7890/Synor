@@ -95,7 +95,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 `process_file` runs once per image: read the bytes, embed with CLIP, and declare a Qdrant point keyed by a stable id derived from the path, with the filename in the payload.
 
 ```python title="pipeline.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     content = await file.read()
     embedding = embed_image_bytes(content)
@@ -107,14 +107,14 @@ async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     target.declare_point(point)
 ```
 
-`@syn.fn(memo=True)` makes it incremental: an unchanged image is never re-embedded. Each image runs as its own processing component, so the engine tracks them independently — delete an image and its point is removed from Qdrant automatically. `declare_point` declares the point as a target state; Synor upserts or deletes to match.
+`@syn.task(cache=True)` makes it incremental: an unchanged image is never re-embedded. Each image runs as its own processing component, so the engine tracks them independently — delete an image and its point is removed from Qdrant automatically. `declare_point` declares the point as a target state; Synor upserts or deletes to match.
 
 ## Define the main function
 
 `app_main` mounts the Qdrant collection — sizing the vector to CLIP's projection dimension and using cosine distance — then walks the image folder and mounts one component per file:
 
 ```python title="pipeline.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     model, _ = get_clip_model()
     dim = model.config.projection_dim   # 768 for ViT-L/14
@@ -138,7 +138,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         ),
         live=True,   # api.py runs the app with live=True
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 
 
 app = syn.App(

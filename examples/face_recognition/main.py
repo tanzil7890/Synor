@@ -69,7 +69,7 @@ class Face:
     image: bytes
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def extract_faces(content: bytes) -> list[Face]:
     """Detect faces in an image and return each as a (bounding box, cropped PNG)."""
     orig = Image.open(io.BytesIO(content)).convert("RGB")
@@ -104,7 +104,7 @@ def extract_faces(content: bytes) -> list[Face]:
     return faces
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def embed_face(face_png: bytes) -> list[float]:
     """Embed a single cropped face into a 128-d vector."""
     img = Image.open(io.BytesIO(face_png)).convert("RGB")
@@ -125,7 +125,7 @@ def _face_id(filename: str, rect: ImageRect) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
-@syn.fn
+@syn.task
 async def process_face(
     face: Face,
     filename: str,
@@ -148,7 +148,7 @@ async def process_face(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     """Detect every face in one image and index each one."""
     faces = await extract_faces(await file.read())
@@ -162,7 +162,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_collection = await qdrant.mount_collection_target(
         QDRANT_DB,
@@ -183,7 +183,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         ),
         live=True,  # api supports live watch; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 
 
 app = syn.App(

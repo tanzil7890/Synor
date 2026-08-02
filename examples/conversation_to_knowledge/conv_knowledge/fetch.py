@@ -12,7 +12,7 @@ import synor as syn
 from .models import SessionTranscript, Utterance
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def fetch_transcript(youtube_id: str) -> SessionTranscript:
     """Download audio via yt-dlp, transcribe with speaker diarization via AssemblyAI."""
     import yt_dlp

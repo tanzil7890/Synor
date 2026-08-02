@@ -11,7 +11,7 @@ available transcriptions.
 | Concern          | Python                                   | Rust (this example)                                  |
 | ---------------- | ---------------------------------------- | ---------------------------------------------------- |
 | Source           | `localfs.walk_dir`                       | `synor::fs::walk`                                |
-| Per-file compute | `@syn.fn(memo=True) process_file`       | `#[synor::function(memo)] transcribe`            |
+| Per-file compute | `@syn.task(cache=True) process_file`       | `#[synor::function(memo)] transcribe`            |
 | Transcription    | `LiteLLMTranscriber("whisper-1")`        | OpenAI `/v1/audio/transcriptions` (`whisper-1`)      |
 | Target           | `postgres.mount_table_target`            | `postgres::mount_table_target`                       |
 

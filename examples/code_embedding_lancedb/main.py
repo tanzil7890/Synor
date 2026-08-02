@@ -63,14 +63,14 @@ async def synor_lifespan(
     yield
 
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
     id_gen: IdGenerator,
     table: lancedb.TableTarget[CodeEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=CodeEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=str(filename),
@@ -82,7 +82,7 @@ async def process_chunk(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: lancedb.TableTarget[CodeEmbedding],
@@ -100,7 +100,7 @@ async def process_file(
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await lancedb.mount_table_target(
         LANCE_DB,
@@ -125,7 +125,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         ),
         live=True,  # source supports live watch; pass -L to `synor update` to actually run live
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 
 
 app = syn.App(

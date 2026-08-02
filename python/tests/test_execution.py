@@ -134,9 +134,9 @@ async def test_runtime_plan_run_and_explain(tmp_path: pathlib.Path) -> None:
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
     output_path = tmp_path / "out.txt"
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def build() -> None:
-        localfs.declare_file(
+        localfs.ensure_file(
             output_path,
             "local result\n",
             create_parent_dirs=True,
@@ -173,7 +173,7 @@ async def test_runtime_plan_run_and_explain(tmp_path: pathlib.Path) -> None:
 async def test_runtime_records_failed_policy_run(tmp_path: pathlib.Path) -> None:
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
 
-    @syn.fn
+    @syn.task
     def build() -> None:
         syn.authorize_egress(
             syn.EgressRequest(destination="example.test", purpose="test")
@@ -225,17 +225,17 @@ async def test_strict_runtime_and_plan_reject_legacy_cleanup_before_apply(
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[str, str] | None:
             del key
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return syn.TargetReconcileOutput(
                     action="delete",
                     sink=sink,
-                    tracking_record=syn.NON_EXISTENCE,
+                    tracking_record=syn.ABSENT,
                 )
             if desired_state in prev_possible_records and not prev_may_be_missing:
                 return None
@@ -250,10 +250,10 @@ async def test_strict_runtime_and_plan_reject_legacy_cleanup_before_apply(
         Handler(),
     )
 
-    @syn.fn
+    @syn.task
     def build() -> None:
         if should_declare:
-            syn.declare_target_state(provider.target_state("artifact", "owned"))
+            syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     app = syn.App(
         syn.AppConfig(
@@ -303,7 +303,7 @@ async def test_strict_runtime_reports_open_revocations_without_plain_success(
 
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
 
-    @syn.fn
+    @syn.task
     def build() -> None:
         return None
 
@@ -343,7 +343,7 @@ async def test_strict_runtime_reports_blocked_cases_as_degraded(
 
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
 
-    @syn.fn
+    @syn.task
     def build() -> None:
         return None
 
@@ -371,9 +371,9 @@ async def test_corrupt_revocation_state_stops_strict_apply(
     output = tmp_path / "must-not-exist.txt"
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
 
-    @syn.fn
+    @syn.task
     def build() -> None:
-        localfs.declare_file(
+        localfs.ensure_file(
             output,
             "unsafe",
             create_parent_dirs=True,
@@ -398,7 +398,7 @@ async def test_strict_startup_error_survives_state_evidence_outage(
 ) -> None:
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
 
-    @syn.fn
+    @syn.task
     def build() -> None:
         raise AssertionError("the app must not run")
 
@@ -436,7 +436,7 @@ async def test_strict_runtime_closes_verified_case_after_engine_commit(
     observed_stages: list[revocation.RevocationStage] = []
     env = syn.Environment(syn.Settings(db_path=tmp_path / "state"))
 
-    @syn.fn
+    @syn.task
     async def build() -> None:
         controller = runtime.revocation_controller
         planned = await controller.begin_case(request)
@@ -470,7 +470,7 @@ async def test_strict_runtime_recovers_verified_case_after_failed_engine_commit(
     )
     failing_env = syn.Environment(syn.Settings(db_path=tmp_path / "failed-state"))
 
-    @syn.fn
+    @syn.task
     async def verify_then_fail() -> None:
         controller = failing_runtime.revocation_controller
         await controller.begin_case(request)
@@ -496,7 +496,7 @@ async def test_strict_runtime_recovers_verified_case_after_failed_engine_commit(
     )
     recovered_env = syn.Environment(syn.Settings(db_path=tmp_path / "recovered-state"))
 
-    @syn.fn
+    @syn.task
     async def recover() -> None:
         case = await recovered_runtime.revocation_controller.begin_case(request)
         assert case.stage is revocation.RevocationStage.VERIFIED

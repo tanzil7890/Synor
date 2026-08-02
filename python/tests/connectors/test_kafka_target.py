@@ -111,13 +111,13 @@ class TestTopicHandler:
 
         result = handler.reconcile(
             ("producer_key", "my-topic"),
-            syn.NON_EXISTENCE,
+            syn.ABSENT,
             [],
             False,
         )
 
         assert result is not None
-        assert syn.is_non_existence(result.tracking_record)
+        assert syn.is_absent(result.tracking_record)
 
     @pytest.mark.asyncio
     async def test_sink_creates_child_handler(self, producer: MockAIOProducer) -> None:
@@ -140,7 +140,7 @@ class TestTopicHandler:
     async def test_sink_returns_none_for_deletion(self) -> None:
         handler = _TopicHandler()
         key = _TopicKey(producer_key="pk", topic="my-topic")
-        action = _TopicAction(key=key, spec=syn.NON_EXISTENCE)
+        action = _TopicAction(key=key, spec=syn.ABSENT)
 
         context_provider = MagicMock(spec=ContextProvider)
         children = await handler._apply_actions(context_provider, [action])
@@ -195,18 +195,18 @@ class TestMessageHandlerReconcile:
         assert result2 is not None
 
     def test_delete_without_callback(self, message_handler: _MessageHandler) -> None:
-        result = message_handler.reconcile(b"k1", syn.NON_EXISTENCE, [b"fp"], False)
+        result = message_handler.reconcile(b"k1", syn.ABSENT, [b"fp"], False)
 
         assert result is not None
         assert result.action.key == b"k1"
         assert result.action.value is None  # Tombstone
-        assert syn.is_non_existence(result.tracking_record)
+        assert syn.is_absent(result.tracking_record)
 
     def test_delete_with_callback(
         self, message_handler_with_deletion: _MessageHandler
     ) -> None:
         result = message_handler_with_deletion.reconcile(
-            b"k1", syn.NON_EXISTENCE, [b"fp"], False
+            b"k1", syn.ABSENT, [b"fp"], False
         )
 
         assert result is not None
@@ -216,7 +216,7 @@ class TestMessageHandlerReconcile:
     def test_delete_no_prev_no_missing_skips(
         self, message_handler: _MessageHandler
     ) -> None:
-        result = message_handler.reconcile(b"k1", syn.NON_EXISTENCE, [], False)
+        result = message_handler.reconcile(b"k1", syn.ABSENT, [], False)
         assert result is None
 
     def test_str_key_and_value(self, message_handler: _MessageHandler) -> None:

@@ -58,7 +58,7 @@ def pdf_converter() -> DocumentConverter:
     )
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def pdf_to_markdown(content: bytes) -> str:
     source = DocumentStream(name="manual.pdf", stream=io.BytesIO(content))
     return pdf_converter().convert(source).document.export_to_markdown()
@@ -100,7 +100,7 @@ EXTRACT_PROMPT = (
 )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_module(markdown: str) -> ModuleInfo:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -129,14 +129,14 @@ class ModuleRecord:
     module_info: str  # the full ModuleInfo as JSON
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: postgres.TableTarget[ModuleRecord],
 ) -> None:
     markdown = await pdf_to_markdown(await file.read())
     info = await extract_module(markdown)
-    table.declare_row(
+    table.ensure_row(
         row=ModuleRecord(
             filename=file.file_path.path.name,
             title=info.title,
@@ -156,7 +156,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
         yield
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     table = await postgres.mount_table_target(
         PG_DB,
@@ -173,7 +173,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), table)
+    await syn.spawn_each(process_file, files.items(), table)
 
 
 app = syn.App(

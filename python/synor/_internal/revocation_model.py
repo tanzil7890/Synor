@@ -18,9 +18,9 @@ from typing import Any, Generic, Literal, Mapping, NamedTuple, TypeVar, cast
 
 from .typing import (
     MemoStateOutcome,
-    NonExistenceType,
+    AbsentType,
     StableKey,
-    is_non_existence,
+    is_absent,
 )
 
 
@@ -547,7 +547,7 @@ class GovernedSourceItem(Generic[_T]):
         return self.identity.component_key()
 
     async def __synor_memo_state__(
-        self, previous: GovernedMemoState | NonExistenceType
+        self, previous: GovernedMemoState | AbsentType
     ) -> MemoStateOutcome:
         access = self.access
         current = GovernedMemoState(
@@ -572,7 +572,7 @@ class GovernedSourceItem(Generic[_T]):
         )
         return MemoStateOutcome(
             state=current,
-            memo_valid=not is_non_existence(previous) and previous == current,
+            memo_valid=not is_absent(previous) and previous == current,
         )
 
     def __synor_audit_metadata__(self) -> dict[str, object]:

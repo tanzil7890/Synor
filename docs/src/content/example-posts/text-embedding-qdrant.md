@@ -64,10 +64,10 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 
 ## Mount the collection
 
-`app_main` wires the source to the target. The one Qdrant-specific call is `mount_collection_target`: it creates and manages the collection, deriving the vector dimensions straight from the embedder via `QdrantVectorDef(schema=EMBEDDER)` — no hardcoded `384`. The rest is the same `walk_dir` → `mount_each` shape as the base example.
+`app_main` wires the source to the target. The one Qdrant-specific call is `mount_collection_target`: it creates and manages the collection, deriving the vector dimensions straight from the embedder via `QdrantVectorDef(schema=EMBEDDER)` — no hardcoded `384`. The rest is the same `walk_dir` → `spawn_each` shape as the base example.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_collection = await qdrant.mount_collection_target(
         QDRANT_DB,
@@ -82,7 +82,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 ```
 
 `mount_collection_target` handles collection creation, idempotent point upserts, and orphan cleanup when a file disappears — the same managed-target guarantees pgvector gets in the base example.
@@ -92,7 +92,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
 `process_file` chunks the text and maps each chunk to `process_chunk` (identical to the base walkthrough). The only difference is the target state: instead of a typed table row, each chunk becomes a Qdrant `PointStruct`. The chunk text and offsets go in the `payload`, the embedding is the `vector`, and `id_gen` derives a stable point id from the chunk text so re-runs upsert in place.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
@@ -138,7 +138,7 @@ You can also browse the collection in the Qdrant dashboard at <http://localhost:
 
 ## Incremental updates
 
-Synor keeps the Qdrant collection in sync and does the **minimum work** to get there — exactly as in the base example, just against Qdrant. `@syn.fn(memo=True)` on `process_file` decides what to *recompute* (a file is skipped when its content and code are unchanged), and each point's `id` is derived from its chunk's text, so `mount_collection_target` upserts only the points that changed and deletes points whose source is gone. Add a file and only it is embedded; edit one and unchanged chunks keep their id while new chunks are upserted and vanished chunks deleted; delete a file and its points are removed automatically. Swap the embedding model and `detect_change=True` re-embeds everything. A catch-up run applies the difference once and exits; live mode keeps watching.
+Synor keeps the Qdrant collection in sync and does the **minimum work** to get there — exactly as in the base example, just against Qdrant. `@syn.task(cache=True)` on `process_file` decides what to *recompute* (a file is skipped when its content and code are unchanged), and each point's `id` is derived from its chunk's text, so `mount_collection_target` upserts only the points that changed and deletes points whose source is gone. Add a file and only it is embedded; edit one and unchanged chunks keep their id while new chunks are upserted and vanished chunks deleted; delete a file and its points are removed automatically. Swap the embedding model and `detect_change=True` re-embeds everything. A catch-up run applies the difference once and exits; live mode keeps watching.
 
 ## Run it
 

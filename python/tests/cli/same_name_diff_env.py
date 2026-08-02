@@ -18,7 +18,7 @@ import pathlib
 from typing import Iterator
 
 import synor as syn
-from synor.connectors.localfs import declare_dir_target
+from synor.connectors.localfs import ensure_dir_target
 
 _HERE = pathlib.Path(__file__).resolve().parent
 
@@ -42,24 +42,24 @@ def _lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     yield
 
 
-@syn.fn
+@syn.task
 async def build_alpha() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         OUT_DIR_ALPHA,
     )
-    dir_target.declare_file("output.txt", "From Alpha env\n")
+    dir_target.ensure_file("output.txt", "From Alpha env\n")
 
 
-@syn.fn
+@syn.task
 async def build_default() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         OUT_DIR_DEFAULT,
     )
-    dir_target.declare_file("output.txt", "From Default env\n")
+    dir_target.ensure_file("output.txt", "From Default env\n")
 
 
 # Two apps with THE SAME NAME but in different environments

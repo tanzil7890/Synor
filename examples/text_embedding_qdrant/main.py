@@ -53,7 +53,7 @@ async def synor_lifespan(
     yield
 
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
@@ -75,7 +75,7 @@ async def process_chunk(
     target.declare_point(point)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     target: qdrant.CollectionTarget,
@@ -88,7 +88,7 @@ async def process_file(
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, target)
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_collection = await qdrant.mount_collection_target(
         QDRANT_DB,
@@ -103,7 +103,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # source supports live watch; pass -L to `synor update` to actually run live
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 
 
 app = syn.App(

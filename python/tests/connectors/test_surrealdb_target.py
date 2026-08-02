@@ -337,8 +337,8 @@ async def declare_table_and_rows() -> None:
     else:
         schema = None
 
-    table: Any = await syn.use_mount(  # type: ignore[call-overload]
-        syn.component_subpath("setup", "table"),
+    table: Any = await syn.call(  # type: ignore[call-overload]
+        syn.unit_path("setup", "table"),
         surrealdb.mount_table_target,  # type: ignore[arg-type]
         SURREAL_DB_KEY,
         _table_name,
@@ -352,8 +352,8 @@ async def declare_table_and_rows() -> None:
 
 async def declare_schemaless_rows() -> None:
     """Declare schemaless table with dict rows."""
-    table = await syn.use_mount(  # type: ignore[call-overload]
-        syn.component_subpath("setup", "table"),
+    table = await syn.call(  # type: ignore[call-overload]
+        syn.unit_path("setup", "table"),
         surrealdb.mount_table_target,
         SURREAL_DB_KEY,
         _table_name,
@@ -817,8 +817,8 @@ async def test_relation_basic(
 
     async def declare_with_relations() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -828,8 +828,8 @@ async def test_relation_basic(
             person_target.declare_record(row=r)
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -839,8 +839,8 @@ async def test_relation_basic(
             post_target.declare_record(row=r)  # type: ignore[arg-type]
 
         likes_schema = await surrealdb.TableSchema.from_class(Likes)
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -896,8 +896,8 @@ async def test_relation_delete(
 
     async def declare_with_relations() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -907,8 +907,8 @@ async def test_relation_delete(
             person_target.declare_record(row=r)
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -918,8 +918,8 @@ async def test_relation_delete(
             post_target.declare_record(row=r)  # type: ignore[arg-type]
 
         likes_schema = await surrealdb.TableSchema.from_class(Likes)
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -984,8 +984,8 @@ async def test_relation_without_schema(
 
     async def declare_schemaless_relation() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -995,8 +995,8 @@ async def test_relation_without_schema(
             person_target.declare_record(row=r)
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -1006,8 +1006,8 @@ async def test_relation_without_schema(
             post_target.declare_record(row=r)  # type: ignore[arg-type]
 
         # No schema for the relation table
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -1069,8 +1069,8 @@ async def test_relation_polymorphic(
 
     async def declare_polymorphic() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -1080,8 +1080,8 @@ async def test_relation_polymorphic(
             person_target.declare_record(row=r)
 
         org_schema = await surrealdb.TableSchema.from_class(Org)
-        org_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "org"),
+        org_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "org"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "org",
@@ -1091,8 +1091,8 @@ async def test_relation_polymorphic(
             org_target.declare_record(row=r)  # type: ignore[arg-type]
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -1103,8 +1103,8 @@ async def test_relation_polymorphic(
 
         # Polymorphic: from_table can be person or org
         likes_schema = await surrealdb.TableSchema.from_class(Likes)
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -1176,8 +1176,8 @@ async def test_relation_auto_id_with_update(
 
     async def declare_auto_id_relation() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -1187,8 +1187,8 @@ async def test_relation_auto_id_with_update(
             person_target.declare_record(row=r)
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -1197,8 +1197,8 @@ async def test_relation_auto_id_with_update(
         for r in post_rows:  # type: ignore[assignment]
             post_target.declare_record(row=r)  # type: ignore[arg-type]
 
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -1261,8 +1261,8 @@ async def test_relation_schema_without_id(
 
     async def declare_schema_no_id() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -1272,8 +1272,8 @@ async def test_relation_schema_without_id(
             person_target.declare_record(row=r)
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -1284,8 +1284,8 @@ async def test_relation_schema_without_id(
 
         # Schema without id field
         likes_schema = await surrealdb.TableSchema.from_class(LikeData)
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -1346,8 +1346,8 @@ async def test_transaction_ordering(
 
     async def declare_persons_and_follows() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -1356,8 +1356,8 @@ async def test_transaction_ordering(
         for r in person_rows:
             person_target.declare_record(row=r)
 
-        follows_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "follows"),
+        follows_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "follows"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "follows",
@@ -1427,8 +1427,8 @@ async def test_table_level_ordering(
 
     async def declare_tables_and_relation() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -1436,8 +1436,8 @@ async def test_table_level_ordering(
         )
         person_target.declare_record(row=Person(id="alice", name="Alice"))
 
-        follows_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "follows"),
+        follows_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "follows"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "follows",
@@ -1489,8 +1489,8 @@ async def test_multiple_tables_shared_sink(
 
     async def declare_multi() -> None:
         person_schema = await surrealdb.TableSchema.from_class(Person)
-        person_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "person"),
+        person_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "person"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "person",
@@ -1500,8 +1500,8 @@ async def test_multiple_tables_shared_sink(
             person_target.declare_record(row=r)
 
         post_schema = await surrealdb.TableSchema.from_class(Post)
-        post_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "post"),
+        post_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "post"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "post",
@@ -1510,8 +1510,8 @@ async def test_multiple_tables_shared_sink(
         for r in post_rows:  # type: ignore[assignment]
             post_target.declare_record(row=r)  # type: ignore[arg-type]
 
-        likes_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "likes"),
+        likes_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "likes"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "likes",
@@ -1525,8 +1525,8 @@ async def test_multiple_tables_shared_sink(
                 to_id=rel["to_id"],
             )
 
-        authored_target = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "authored"),
+        authored_target = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "authored"),
             surrealdb.mount_relation_target,
             SURREAL_DB_KEY,
             "authored",
@@ -1599,8 +1599,8 @@ async def test_vector_index_mtree(
 
     async def declare_vec_table() -> None:
         schema = await surrealdb.TableSchema.from_class(VecRow)
-        table = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "table"),
+        table = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "table"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "vec_docs",
@@ -1663,8 +1663,8 @@ async def test_vector_index_hnsw(
 
     async def declare_vec_table() -> None:
         schema = await surrealdb.TableSchema.from_class(VecRow)
-        table = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "table"),
+        table = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "table"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "vec_hnsw",
@@ -1724,8 +1724,8 @@ async def test_vector_index_update(
 
     async def declare_vec_table() -> None:
         schema = await surrealdb.TableSchema.from_class(VecRow)
-        table = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "table"),
+        table = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "table"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "vec_update",
@@ -1844,15 +1844,15 @@ async def test_declare_row_alias(
 
     async def declare_with_alias() -> None:
         schema = await surrealdb.TableSchema.from_class(SimpleRow)
-        table = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "table"),
+        table = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "table"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "test_alias",
             schema,
         )
         # Use declare_row (the alias)
-        table.declare_row(row=SimpleRow(id="1", name="Alice", value=100))
+        table.ensure_row(row=SimpleRow(id="1", name="Alice", value=100))
 
     app = syn.App(
         syn.AppConfig(name="test_alias", environment=synor_env),
@@ -1886,8 +1886,8 @@ async def test_schemaless_struct_input(
     )
 
     async def declare_schemaless_struct() -> None:
-        table = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "table"),
+        table = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "table"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "test_struct",
@@ -1929,8 +1929,8 @@ async def test_type_mapping(
 
     async def declare_types_table() -> None:
         schema = await surrealdb.TableSchema.from_class(TypesRow)
-        table = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "table"),
+        table = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "table"),
             surrealdb.mount_table_target,
             SURREAL_DB_KEY,
             "test_types",

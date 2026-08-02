@@ -14,16 +14,16 @@ synor_env = common.create_test_env(__file__)
 _source_data: dict[str, dict[str, object]] = {}
 
 
-@syn.fn
+@syn.task
 async def _process_component(name: str) -> None:
     for key, value in _source_data.get(name, {}).items():
-        syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
-@syn.fn
+@syn.task
 async def _app_main() -> None:
     for name in sorted(_source_data):
-        await syn.mount(syn.component_subpath(name), _process_component, name)
+        await syn.spawn(syn.unit_path(name), _process_component, name)
 
 
 def test_ownership_transfer_basic() -> None:
@@ -185,13 +185,13 @@ def test_ownership_transfer_chain() -> None:
     assert GlobalDictTarget.store.data["x"].data == 3
 
 
-@syn.fn
+@syn.task
 async def _app_main_await_ready() -> None:
     """Like _app_main but awaits ready() on all children, guaranteeing
     children submit before the root (so preempt always happens before GC delete)."""
     handles = []
     for name in sorted(_source_data):
-        h = await syn.mount(syn.component_subpath(name), _process_component, name)
+        h = await syn.spawn(syn.unit_path(name), _process_component, name)
         handles.append(h)
     for h in handles:
         await h.ready()

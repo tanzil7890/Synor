@@ -20,11 +20,11 @@ class _FlatStore:
     def _sink(
         self,
         context_provider: syn.ContextProvider,
-        actions: Collection[tuple[str, Any | syn.NonExistenceType]],
+        actions: Collection[tuple[str, Any | syn.AbsentType]],
         /,
     ) -> None:
         for key, value in actions:
-            if syn.is_non_existence(value):
+            if syn.is_absent(value):
                 self.data.pop(key, None)
             else:
                 self.data[key] = value
@@ -32,10 +32,10 @@ class _FlatStore:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
-    ) -> syn.TargetReconcileOutput[tuple[str, Any | syn.NonExistenceType], Any] | None:
+    ) -> syn.TargetReconcileOutput[tuple[str, Any | syn.AbsentType], Any] | None:
         assert isinstance(key, str)
         return syn.TargetReconcileOutput(
             action=(key, desired_state),
@@ -50,9 +50,9 @@ _provider = syn.register_root_target_states_provider(
 )
 
 
-@syn.fn
+@syn.task
 def build() -> None:
-    syn.declare_target_state(_provider.target_state("x", 42))
+    syn.ensure_target_state(_provider.target_state("x", 42))
 
 
 app = syn.App(syn.AppConfig(name="FlatPreviewApp", environment=env), build)

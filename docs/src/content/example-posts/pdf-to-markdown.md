@@ -82,16 +82,16 @@ from docling.document_converter import DocumentConverter, PdfFormatOption
 In the main function, we walk through each file in the source directory and process it.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir,
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 ```
-For each file, `syn.mount_each()` mounts a processing component. It's up to
+For each file, `syn.spawn_each()` mounts a processing component. It's up to
 you to pick the process granularity, for example it can be at directory level,
 file level, or page level.
 
@@ -121,7 +121,7 @@ _converter = DocumentConverter(
     }
 )
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def process_file(
     file: localfs.File,
     outdir: pathlib.Path,
@@ -130,10 +130,10 @@ def process_file(
         file.file_path.resolve()
     ).document.export_to_markdown()
     outname = file.file_path.path.stem + ".md"
-    localfs.declare_file(outdir / outname, markdown, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, markdown, create_parent_dirs=True)
 ```
 
-We use `@syn.fn` with `memo=True` to create a memoized function that processes each file.
+We use `@syn.task` with `cache=True` to create a memoized function that processes each file.
 
 [→ Function](/docs/programming_guide/function)
 

@@ -23,14 +23,14 @@ _source_data: dict[str, dict[str, Any]] = {}
 
 async def _declare_with_attachments() -> None:
     for name, att_data in _source_data.items():
-        dict_provider = await syn.use_mount(
-            syn.component_subpath(name),
+        dict_provider = await syn.call(
+            syn.unit_path(name),
             AttachmentDictsTarget.declare_dict_target,
             name,
         )
         att_provider = dict_provider.attachment("items")
         for key, value in att_data.items():
-            syn.declare_target_state(att_provider.target_state(key, value))
+            syn.ensure_target_state(att_provider.target_state(key, value))
 
 
 def test_attachment_basic_lifecycle() -> None:
@@ -98,15 +98,15 @@ def test_attachment_idempotent_provider() -> None:
     _source_data.clear()
 
     async def _declare_idempotent() -> None:
-        dict_provider = await syn.use_mount(
-            syn.component_subpath("D1"),
+        dict_provider = await syn.call(
+            syn.unit_path("D1"),
             AttachmentDictsTarget.declare_dict_target,
             "D1",
         )
         att1 = dict_provider.attachment("items")
         att2 = dict_provider.attachment("items")
-        syn.declare_target_state(att1.target_state("a", 1))
-        syn.declare_target_state(att2.target_state("b", 2))
+        syn.ensure_target_state(att1.target_state("a", 1))
+        syn.ensure_target_state(att2.target_state("b", 2))
 
     app = syn.App(
         syn.AppConfig(
@@ -132,19 +132,19 @@ _multi_source_tags: dict[str, dict[str, Any]] = {}
 
 async def _declare_with_multi_attachments() -> None:
     for name in set(_multi_source_items) | set(_multi_source_tags):
-        dict_provider = await syn.use_mount(
-            syn.component_subpath(name),
+        dict_provider = await syn.call(
+            syn.unit_path(name),
             MultiAttachmentDictsTarget.declare_dict_target,
             name,
         )
         if name in _multi_source_items:
             items_provider = dict_provider.attachment("items")
             for key, value in _multi_source_items[name].items():
-                syn.declare_target_state(items_provider.target_state(key, value))
+                syn.ensure_target_state(items_provider.target_state(key, value))
         if name in _multi_source_tags:
             tags_provider = dict_provider.attachment("tags")
             for key, value in _multi_source_tags[name].items():
-                syn.declare_target_state(tags_provider.target_state(key, value))
+                syn.ensure_target_state(tags_provider.target_state(key, value))
 
 
 def test_attachment_independent_types() -> None:
@@ -189,8 +189,8 @@ def test_attachment_no_support_returns_none() -> None:
     DictsTarget.store.clear()
 
     async def _declare_unsupported() -> None:
-        dict_provider = await syn.use_mount(
-            syn.component_subpath("D1"),
+        dict_provider = await syn.call(
+            syn.unit_path("D1"),
             DictsTarget.declare_dict_target,
             "D1",
         )
@@ -209,7 +209,7 @@ def test_attachment_no_support_returns_none() -> None:
 _memo_exec_count: int = 0
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _insert_attachment_rows_memo(
     dict_provider: Any, data: dict[str, Any]
 ) -> None:
@@ -217,23 +217,23 @@ async def _insert_attachment_rows_memo(
     _memo_exec_count += 1
     att_provider = dict_provider.attachment("items")
     for key, value in data.items():
-        syn.declare_target_state(att_provider.target_state(key, value))
+        syn.ensure_target_state(att_provider.target_state(key, value))
 
 
 _memo_source_data: dict[str, dict[str, Any]] = {}
 
 
 async def _declare_with_attachments_memo() -> None:
-    with syn.component_subpath("dict"):
+    with syn.unit_path("dict"):
         for name, data in _memo_source_data.items():
-            with syn.component_subpath(name):
-                dict_provider = await syn.use_mount(
-                    syn.component_subpath("setup"),
+            with syn.unit_path(name):
+                dict_provider = await syn.call(
+                    syn.unit_path("setup"),
                     AttachmentDictsTarget.declare_dict_target,
                     name,
                 )
-                await syn.use_mount(  # type: ignore[call-overload]
-                    syn.component_subpath("rows"),
+                await syn.call(  # type: ignore[call-overload]
+                    syn.unit_path("rows"),
                     _insert_attachment_rows_memo,
                     dict_provider,
                     data,

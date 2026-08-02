@@ -58,7 +58,7 @@ class SlidePage:
     image: bytes
 
 
-@syn.fn.as_async(runner=syn.GPU, memo=True)
+@syn.task.as_async(runner=syn.GPU, cache=True)
 def pdf_to_slides(content: bytes) -> list[SlidePage]:
     import pymupdf
 
@@ -94,7 +94,7 @@ def _get_lm(model: str) -> dspy.LM:
     return dspy.LM(model, max_tokens=8192)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_speaker_notes(image: bytes) -> str:
     data_url = "data:image/png;base64," + base64.b64encode(image).decode()
     with dspy.context(lm=_get_lm(syn.use_context(LLM_MODEL))):
@@ -120,7 +120,7 @@ def get_voice_state(voice: str) -> dict:
     return get_tts_model().get_state_for_audio_prompt(voice)
 
 
-@syn.fn.as_async(runner=syn.GPU, memo=True)
+@syn.task.as_async(runner=syn.GPU, cache=True)
 def text_to_speech(text: str, voice: str) -> bytes:
     model = get_tts_model()
     # Pocket TTS is not thread-safe; the syn.GPU runner serializes calls so the one
@@ -152,7 +152,7 @@ class SlideRecord:
     embedding: Annotated[NDArray, EMBEDDER]
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_slide(
     slide: SlidePage, filename: str, table: lancedb.TableTarget[SlideRecord]
 ) -> None:
@@ -161,7 +161,7 @@ async def process_slide(
         text_to_speech(notes, syn.use_context(TTS_VOICE)),
         syn.use_context(EMBEDDER).embed(notes),
     )
-    table.declare_row(
+    table.ensure_row(
         row=SlideRecord(
             id=f"{filename}#{slide.page_number}",
             filename=filename,
@@ -173,10 +173,10 @@ async def process_slide(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: lancedb.TableTarget[SlideRecord]) -> None:
     slides = await pdf_to_slides(await file.read())
-    await syn.mount_each(
+    await syn.spawn_each(
         process_slide,
         ((slide.page_number, slide) for slide in slides),
         str(file.file_path.path),
@@ -194,7 +194,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     table = await lancedb.mount_table_target(
         LANCE_DB,
@@ -209,7 +209,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), table)
+    await syn.spawn_each(process_file, files.items(), table)
 
 
 app = syn.App(

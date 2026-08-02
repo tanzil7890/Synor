@@ -37,7 +37,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_csv(file: FileLike, topic_target: kafka.KafkaTopicTarget) -> None:
     text = await file.read_text()
     reader = csv.DictReader(io.StringIO(text))
@@ -51,10 +51,10 @@ async def process_csv(file: FileLike, topic_target: kafka.KafkaTopicTarget) -> N
         key_value = row.get(first_col, None)
         if key_value is not None:
             value = json.dumps(row)
-            topic_target.declare_target_state(key=key_value, value=value)
+            topic_target.ensure_target_state(key=key_value, value=value)
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     topic_target = await kafka.mount_kafka_topic_target(KAFKA_PRODUCER, KAFKA_TOPIC)
 
@@ -63,7 +63,7 @@ async def app_main() -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.csv"]),
         live=True,
     )
-    await syn.mount_each(process_csv, files.items(), topic_target)
+    await syn.spawn_each(process_csv, files.items(), topic_target)
 
 
 app = syn.App(

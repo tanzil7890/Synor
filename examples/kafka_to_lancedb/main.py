@@ -57,7 +57,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn
+@syn.task
 async def process_message(
     msg: Message,
     products_table: lancedb.TableTarget[Product],
@@ -70,14 +70,14 @@ async def process_message(
     row = json.loads(text)
 
     if "sku" in row:
-        products_table.declare_row(
+        products_table.ensure_row(
             row=Product(**{**row, "price": float(row["price"])}),
         )
     elif "emp_id" in row:
-        employees_table.declare_row(row=Employee(**row))
+        employees_table.ensure_row(row=Employee(**row))
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     products_table = await lancedb.mount_table_target(
         LANCE_DB,
@@ -111,7 +111,7 @@ async def app_main() -> None:
 
     consumer = AIOConsumer(config)
     items = kafka.topic_as_map(consumer, [KAFKA_TOPIC])
-    await syn.mount_each(process_message, items, products_table, employees_table)
+    await syn.spawn_each(process_message, items, products_table, employees_table)
 
 
 app = syn.App(

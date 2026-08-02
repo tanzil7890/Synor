@@ -10,7 +10,7 @@ operations as the component count grows:
 | `drop` | `synor drop -f` against the populated state | drop cascade + tombstone GC + final clear |
 
 The pipeline ([main.py](main.py)) is a single `app_main` that
-`mount_each`'s `N` child components, each running a memoized function that
+`spawn_each`'s `N` child components, each running a memoized function that
 declares `M` target states against a no-op fake target. The engine still
 runs the full pre_commit / commit lifecycle and writes the per-target
 tracking records, but the user-facing sink does nothing — so the only work

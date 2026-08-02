@@ -17,7 +17,7 @@ A live component is a class with three methods:
 ```python
 class MyLiveComponent:
     def __init__(self, folder: pathlib.Path, target: localfs.DirTarget) -> None:
-        """Receive arguments from the mount() call."""
+        """Receive arguments from the spawn() call."""
         self.folder = folder
         self.target = target
 
@@ -30,8 +30,8 @@ class MyLiveComponent:
         ...
 ```
 
-- **`__init__`** receives arguments passed to `syn.mount()`.
-- **`process()`** does a full scan — mounts children via `syn.mount()` and declares target states, just like a traditional component function. Called indirectly via `operator.update_full()`.
+- **`__init__`** receives arguments passed to `syn.spawn()`.
+- **`process()`** does a full scan — mounts children via `syn.spawn()` and declares target states, just like a traditional component function. Called indirectly via `operator.update_full()`.
 - **`process_live(operator)`** is the long-running entry point. It orchestrates full and incremental updates using the operator.
 
 Synor detects a live component by checking if the class has both `process` and `process_live` methods.
@@ -52,7 +52,7 @@ The `operator` passed to `process_live()` provides five methods:
 
 Triggers a full processing cycle: calls `process()`, submits target states, waits for all children to be ready, and garbage-collects children that are no longer mounted. This is the same mechanism as a traditional component's update cycle.
 
-Exceptions raised inside `process()` (or its descendants) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) — same as background `syn.mount()` failures — and **do not propagate** to the caller. This lets long-running `process_live` loops (such as periodic refreshers) keep going across transient cycle failures while still surfacing the failure to operators.
+Exceptions raised inside `process()` (or its descendants) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) — same as background `syn.spawn()` failures — and **do not propagate** to the caller. This lets long-running `process_live` loops (such as periodic refreshers) keep going across transient cycle failures while still surfacing the failure to operators.
 
 ### `update()` and `delete()`
 
@@ -60,7 +60,7 @@ Mount or delete individual child components without a full scan. These are concu
 
 When multiple operations target the same subpath, only the latest one (by invocation order) takes effect.
 
-Failures in the mounted child (or in the delete itself) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) with `mount_kind="process_live"` and `stable_path` set to the *child's* path — same shape as background `syn.mount` failures, never propagated to `handle.ready()`. The live loop is unaffected by child failures.
+Failures in the mounted child (or in the delete itself) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) with `mount_kind="process_live"` and `stable_path` set to the *child's* path — same shape as background `syn.spawn` failures, never propagated to `handle.ready()`. The live loop is unaffected by child failures.
 
 ### `mark_ready()`
 
@@ -104,8 +104,8 @@ class FolderWatcher:
         """Full scan — mount a child for every file in the folder."""
         for path in self.folder.iterdir():
             if path.is_file():
-                await syn.mount(
-                    syn.component_subpath(path.name),
+                await syn.spawn(
+                    syn.unit_path(path.name),
                     process_file,
                     path,
                     self.target,
@@ -123,7 +123,7 @@ class FolderWatcher:
 
         # 4. React to changes.
         async for event in watcher.events():
-            subpath = syn.component_subpath(event.filename)
+            subpath = syn.unit_path(event.filename)
             if event.is_update:
                 await operator.update(subpath, process_file, event.path, self.target)
             elif event.is_delete:
@@ -133,12 +133,12 @@ class FolderWatcher:
 The parent mounts it like any other component:
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(folder: pathlib.Path, outdir: pathlib.Path) -> None:
-    # Set up the target in the parent (use_mount is not allowed inside process()).
+    # Set up the target in the parent (call is not allowed inside process()).
     target = await localfs.mount_dir_target(outdir)
     # Mount the live component.
-    await syn.mount(FolderWatcher, folder, target)
+    await syn.spawn(FolderWatcher, folder, target)
 ```
 
 ## Example: traditional component equivalent
@@ -146,10 +146,10 @@ async def app_main(folder: pathlib.Path, outdir: pathlib.Path) -> None:
 A traditional single-function component:
 
 ```python
-@syn.fn
+@syn.task
 async def process_all(data) -> None:
     for key, value in data.items():
-        syn.declare_target_state(target.target_state(key, value))
+        syn.ensure_target_state(target.target_state(key, value))
 ```
 
 is equivalent to this LiveComponent:
@@ -161,7 +161,7 @@ class ProcessAll:
 
     async def process(self) -> None:
         for key, value in self.data.items():
-            syn.declare_target_state(target.target_state(key, value))
+            syn.ensure_target_state(target.target_state(key, value))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
@@ -181,11 +181,11 @@ import synor as syn
 async def sync_users(db, target) -> None:
     rows = await db.fetch_all_users()
     for row in rows:
-        target.declare_row(row=UserRow(...))
+        target.ensure_row(row=UserRow(...))
 
-@syn.fn
+@syn.task
 async def app_main(db, target) -> None:
-    await syn.mount(
+    await syn.spawn(
         syn.auto_refresh(sync_users, interval=datetime.timedelta(minutes=5)),
         db, target,
     )
@@ -196,16 +196,16 @@ Behavior:
 - In live mode, the loop continues: `sleep(interval) → run process_fn → ...` with a **fixed delay** between cycles (cycles never overlap; a slow cycle just stretches the gap).
 - In catch-up mode, the first cycle runs and `auto_refresh` terminates — observationally identical to mounting `process_fn` directly. The interval is ignored.
 - Cycle failures are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) (see `update_full()` above); the loop keeps going.
-- **Each cycle reconciles target states against the previous cycle.** If `process_fn` no longer declares some target state (e.g. a row that vanished from your source table), Synor automatically deletes the corresponding target — same garbage-collection model as a regular `syn.mount` re-run. You write the function as if processing from scratch each time; the framework handles the diff. See [Target State](../programming_guide/target_state) for the underlying model.
+- **Each cycle reconciles target states against the previous cycle.** If `process_fn` no longer declares some target state (e.g. a row that vanished from your source table), Synor automatically deletes the corresponding target — same garbage-collection model as a regular `syn.spawn` re-run. You write the function as if processing from scratch each time; the framework handles the diff. See [Target State](../programming_guide/target_state) for the underlying model.
 
-The returned class's `__init__` accepts the same positional and keyword arguments as `process_fn` — anything you'd pass to `syn.mount(process_fn, ...)` you can pass to `syn.mount(syn.auto_refresh(process_fn, interval=...), ...)`.
+The returned class's `__init__` accepts the same positional and keyword arguments as `process_fn` — anything you'd pass to `syn.spawn(process_fn, ...)` you can pass to `syn.spawn(syn.auto_refresh(process_fn, interval=...), ...)`.
 
 ## LiveMapFeed and LiveMapView
 :::tip
 For a user-facing introduction to live mode and when to use it, see [Live Mode](../programming_guide/live_mode). This section covers the protocol details for connector authors and advanced use cases.
 :::
 
-Two protocols represent live keyed collections that `mount_each()` can consume. Choose based on whether your source can enumerate its current state:
+Two protocols represent live keyed collections that `spawn_each()` can consume. Choose based on whether your source can enumerate its current state:
 
 - **`LiveMapView`** — the source has enumerable current state that can be scanned (e.g., a directory listing, database table). Supports both full scans via `__aiter__()` and incremental changes via `watch()`.
 - **`LiveMapFeed`** — the source only streams changes, with no "current state" to scan (e.g., a Kafka consumer, a webhook event stream). Provides only `watch()`.
@@ -218,7 +218,7 @@ class LiveMapView(LiveMapFeed[K, V], Protocol[K, V]):
     def __aiter__(self) -> AsyncIterator[tuple[K, V]]: ...
 ```
 
-`LiveMapView` extends `LiveMapFeed` — any `LiveMapView` is also a valid `LiveMapFeed`. When `mount_each()` receives either protocol as its `items` argument, it automatically creates an internal `LiveComponent`:
+`LiveMapView` extends `LiveMapFeed` — any `LiveMapView` is also a valid `LiveMapFeed`. When `spawn_each()` receives either protocol as its `items` argument, it automatically creates an internal `LiveComponent`:
 
 - **`LiveMapView`**: `__aiter__()` yields all `(key, value)` pairs for full scans (called inside the internal `process()`). `watch()` handles the full lifecycle.
 - **`LiveMapFeed`**: `process()` is a no-op (no snapshot to scan). All work happens in `watch()`.
@@ -231,8 +231,8 @@ The `subscriber` passed to `watch()` mirrors `LiveComponentOperator`:
 |---|---|---|
 | `await subscriber.update_all()` | `await operator.update_full()` | Full re-scan of all items |
 | `await subscriber.mark_ready()` | `await operator.mark_ready()` | Signal readiness |
-| `await subscriber.update(key, value)` | `await operator.update(subpath, fn, ...)` | Incremental update; returns `ComponentMountHandle` |
-| `await subscriber.delete(key)` | `await operator.delete(subpath)` | Incremental delete; returns `ComponentMountHandle` |
+| `await subscriber.update(key, value)` | `await operator.update(subpath, fn, ...)` | Incremental update; returns `SpawnHandle` |
+| `await subscriber.delete(key)` | `await operator.delete(subpath)` | Incremental delete; returns `SpawnHandle` |
 
 A typical `watch()` implementation for a `LiveMapView`:
 
@@ -252,7 +252,7 @@ To add live support to a source connector, make your source return an object tha
 
 ### Single-subscriber contract
 
-A live feed — `LiveMapView`, `LiveMapFeed`, or `LiveStream` — is **single-subscriber**. Its `watch()` typically owns an exclusive underlying resource (a consumer subscription, an OS file watch, a single in-memory change channel) that can't be fanned out to two concurrent callers — e.g. two subscriptions would race one consumer's offset commits. So a given feed instance supports **one active `watch()` (one `mount_each`) at a time**; consuming it from two places concurrently is unsupported. Fan-out to multiple subscribers, if ever needed, belongs in a layer above the feed.
+A live feed — `LiveMapView`, `LiveMapFeed`, or `LiveStream` — is **single-subscriber**. Its `watch()` typically owns an exclusive underlying resource (a consumer subscription, an OS file watch, a single in-memory change channel) that can't be fanned out to two concurrent callers — e.g. two subscriptions would race one consumer's offset commits. So a given feed instance supports **one active `watch()` (one `spawn_each`) at a time**; consuming it from two places concurrently is unsupported. Fan-out to multiple subscribers, if ever needed, belongs in a layer above the feed.
 
 Enforce this in your `watch()` with `synor.connectorkits.SingleWatcherGuard`, which raises `RuntimeError` on a second concurrent call:
 
@@ -309,16 +309,16 @@ This lets you use the same `LiveComponent` class in both modes without code chan
 
 ## Restrictions
 
-### No `use_mount()` inside `process()`
+### No `call()` inside `process()`
 
-`process()` may only call `syn.mount()` (background child mounts). Any setup that requires `use_mount()` — such as declaring target tables — must be done in the **parent** component before mounting the LiveComponent. This keeps the controller's provider set stable across full and incremental updates.
+`process()` may only call `syn.spawn()` (background child mounts). Any setup that requires `call()` — such as declaring target tables — must be done in the **parent** component before mounting the LiveComponent. This keeps the controller's provider set stable across full and incremental updates.
 
-### Not allowed in `use_mount()`
+### Not allowed in `call()`
 
-LiveComponent classes can only be used with `syn.mount()` and `operator.update()`. Passing a LiveComponent class to `syn.use_mount()` raises a `TypeError`.
+LiveComponent classes can only be used with `syn.spawn()` and `operator.update()`. Passing a LiveComponent class to `syn.call()` raises a `TypeError`.
 
 :::tip
-While LiveComponent classes cannot be passed to `mount_each()`, you can get live watching behavior more easily using a [`LiveMapFeed` or `LiveMapView`](#livemapfeed-and-livemapview) — `mount_each()` automatically creates an internal LiveComponent when it detects one.
+While LiveComponent classes cannot be passed to `spawn_each()`, you can get live watching behavior more easily using a [`LiveMapFeed` or `LiveMapView`](#livemapfeed-and-livemapview) — `spawn_each()` automatically creates an internal LiveComponent when it detects one.
 :::
 
 ## Readiness
@@ -332,7 +332,7 @@ sequenceDiagram
     participant Op as Operator
     participant Children
 
-    Parent->>LC: mount()
+    Parent->>LC: spawn()
     activate LC
     Note over LC: process_live(operator)
 
@@ -340,7 +340,7 @@ sequenceDiagram
     activate Op
     Op->>LC: process()
     activate LC
-    LC->>Children: mount(A), mount(B), ...
+    LC->>Children: spawn(A), spawn(B), ...
     deactivate LC
     Note over Op: submit + GC<br/>wait children ready
     Op-->>LC: done

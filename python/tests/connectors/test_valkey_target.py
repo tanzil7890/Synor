@@ -280,8 +280,8 @@ async def test_create_index_and_insert_documents(valkey_env: _ValkeyEnv) -> None
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -332,8 +332,8 @@ async def test_numpy_vector(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -366,8 +366,8 @@ async def test_document_without_payload(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -402,8 +402,8 @@ async def test_update_document(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -449,8 +449,8 @@ async def test_update_document_removes_stale_fields(valkey_env: _ValkeyEnv) -> N
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -507,8 +507,8 @@ async def test_delete_document(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -558,8 +558,8 @@ async def test_no_change_optimization(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -598,8 +598,8 @@ async def test_flat_algorithm(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -636,8 +636,8 @@ async def test_ip_distance_metric(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -670,8 +670,8 @@ async def test_drop_index_when_not_declared(valkey_env: _ValkeyEnv) -> None:
     async def declare_fn() -> None:
         if not declare_index:
             return
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -715,8 +715,8 @@ async def test_schema_change_triggers_index_recreation(valkey_env: _ValkeyEnv) -
 
     async def declare_fn() -> None:
         dist: Any = "l2" if use_l2 else "cosine"
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -759,8 +759,8 @@ async def test_text_field_search(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -814,8 +814,8 @@ async def test_tag_field_filter(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -868,8 +868,8 @@ async def test_numeric_field_range_filter(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -922,8 +922,8 @@ async def test_combined_field_filters(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -982,8 +982,8 @@ async def test_vector_knn_search(valkey_env: _ValkeyEnv) -> None:
     source_docs: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,
@@ -1034,8 +1034,8 @@ async def test_multiple_indexes(valkey_env: _ValkeyEnv) -> None:
     docs2: list[valkey.Document] = []
 
     async def declare_fn() -> None:
-        index1 = await syn.use_mount(
-            syn.component_subpath("setup", "index1"),
+        index1 = await syn.call(
+            syn.unit_path("setup", "index1"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             idx1,
@@ -1043,8 +1043,8 @@ async def test_multiple_indexes(valkey_env: _ValkeyEnv) -> None:
                 vectors=valkey.VectorDef(schema=_VECTOR_SCHEMA, distance="cosine"),
             ),
         )
-        index2 = await syn.use_mount(
-            syn.component_subpath("setup", "index2"),
+        index2 = await syn.call(
+            syn.unit_path("setup", "index2"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             idx2,
@@ -1089,8 +1089,8 @@ async def test_field_schema_change_recreates_index(valkey_env: _ValkeyEnv) -> No
 
     async def declare_fn() -> None:
         fields = [valkey.FieldDef("category", "tag")] if use_fields else None
-        index = await syn.use_mount(
-            syn.component_subpath("setup", "index"),
+        index = await syn.call(
+            syn.unit_path("setup", "index"),
             valkey.declare_index_target,
             _VALKEY_DB_KEY,
             index_name,

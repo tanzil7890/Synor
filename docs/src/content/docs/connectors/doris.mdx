@@ -110,7 +110,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
 Declares a table as a target state. Returns a `DorisTableTarget` for declaring rows.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[ManagedConnection],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -137,7 +137,7 @@ def declare_table_target(
 Once a `DorisTableTarget` is resolved, declare rows to be upserted:
 
 ```python
-def DorisTableTarget.declare_row(
+def DorisTableTarget.ensure_row(
     self,
     *,
     row: RowT,
@@ -331,7 +331,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     builder.provide(DORIS_DB, conn)
     yield
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     table = await doris.mount_table_target(
         DORIS_DB,
@@ -351,5 +351,5 @@ async def app_main() -> None:
 
     # Declare rows
     for doc in documents:
-        table.declare_row(row=doc)
+        table.ensure_row(row=doc)
 ```

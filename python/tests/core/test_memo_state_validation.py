@@ -39,7 +39,7 @@ class Entry:
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         # State changed → not reusable (simple case matching prior behavior)
         memo_valid = (
-            not syn.is_non_existence(prev_state) and self.state_value == prev_state
+            not syn.is_absent(prev_state) and self.state_value == prev_state
         )
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
@@ -52,17 +52,17 @@ _source_data: dict[str, Entry] = {}
 _metrics = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_entry(entry: Entry) -> str:
     _metrics.increment("call.transform_entry")
     return f"processed: {entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_data() -> None:
     for key, value in _source_data.items():
         transformed = _transform_entry(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_state_validation_sync() -> None:
@@ -118,17 +118,17 @@ def test_state_validation_sync() -> None:
 # ============================================================================
 
 
-@syn.fn.as_async(memo=True)
+@syn.task.as_async(cache=True)
 def _transform_entry_async(entry: Entry) -> str:
     _metrics.increment("call.transform_entry_async")
     return f"processed_async: {entry.content}"
 
 
-@syn.fn
+@syn.task
 async def _process_data_async() -> None:
     for key, value in _source_data.items():
         transformed = await _transform_entry_async(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_state_validation_async() -> None:
@@ -184,15 +184,15 @@ def test_state_validation_async() -> None:
 # ============================================================================
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_entry(key: str, entry: Entry) -> None:
     _metrics.increment("call.declare_entry")
-    syn.declare_target_state(
+    syn.ensure_target_state(
         GlobalDictTarget.target_state(key, f"comp: {entry.content}")
     )
 
 
-@syn.fn
+@syn.task
 def _declare_data() -> None:
     for key, value in _source_data.items():
         _declare_entry(key, value)
@@ -267,7 +267,7 @@ class MultiEntry:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         memo_valid = (
-            not syn.is_non_existence(prev_state) and self.state_value == prev_state
+            not syn.is_absent(prev_state) and self.state_value == prev_state
         )
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
@@ -275,14 +275,14 @@ class MultiEntry:
 _multi_source_data: dict[str, MultiEntry] = {}
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_multi(entry: MultiEntry) -> None:
     _metrics.increment("call.declare_multi")
     for key, content in entry.items.items():
-        syn.declare_target_state(GlobalDictTarget.target_state(key, content))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, content))
 
 
-@syn.fn
+@syn.task
 def _declare_multi_data() -> None:
     for value in _multi_source_data.values():
         _declare_multi(value)
@@ -347,14 +347,14 @@ def test_state_validation_target_state_cleanup_sync() -> None:
 # ============================================================================
 
 
-@syn.fn.as_async(memo=True)
+@syn.task.as_async(cache=True)
 def _declare_multi_async(entry: MultiEntry) -> None:
     _metrics.increment("call.declare_multi_async")
     for key, content in entry.items.items():
-        syn.declare_target_state(GlobalDictTarget.target_state(key, content))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, content))
 
 
-@syn.fn
+@syn.task
 async def _declare_multi_data_async() -> None:
     for value in _multi_source_data.values():
         await _declare_multi_async(value)
@@ -419,15 +419,15 @@ def test_state_validation_target_state_cleanup_async() -> None:
 # ============================================================================
 
 
-@syn.fn.as_async(memo=True)
+@syn.task.as_async(cache=True)
 def _declare_entry_async(key: str, entry: Entry) -> None:
     _metrics.increment("call.declare_entry_async")
-    syn.declare_target_state(
+    syn.ensure_target_state(
         GlobalDictTarget.target_state(key, f"comp_async: {entry.content}")
     )
 
 
-@syn.fn
+@syn.task
 async def _declare_data_async() -> None:
     for key, value in _source_data.items():
         await _declare_entry_async(key, value)
@@ -508,7 +508,7 @@ class TwoLevelEntry:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         new_state = (self.mtime, self.fingerprint)
-        if syn.is_non_existence(prev_state):
+        if syn.is_absent(prev_state):
             return syn.MemoStateOutcome(state=new_state, memo_valid=True)
         prev_mtime, prev_fp = prev_state
         if self.mtime == prev_mtime:
@@ -523,17 +523,17 @@ class TwoLevelEntry:
 _two_level_source: dict[str, TwoLevelEntry] = {}
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _process_two_level(entry: TwoLevelEntry) -> str:
     _metrics.increment("call.process_two_level")
     return f"result: {entry.content}"
 
 
-@syn.fn
+@syn.task
 def _run_two_level() -> None:
     for key, value in _two_level_source.items():
         result = _process_two_level(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result))
 
 
 def test_state_changed_but_reusable_sync() -> None:
@@ -605,17 +605,17 @@ def test_state_changed_but_reusable_sync() -> None:
 # ============================================================================
 
 
-@syn.fn.as_async(memo=True)
+@syn.task.as_async(cache=True)
 def _process_two_level_async(entry: TwoLevelEntry) -> str:
     _metrics.increment("call.process_two_level_async")
     return f"result_async: {entry.content}"
 
 
-@syn.fn
+@syn.task
 async def _run_two_level_async() -> None:
     for key, value in _two_level_source.items():
         result = await _process_two_level_async(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result))
 
 
 def test_state_changed_but_reusable_async() -> None:
@@ -662,15 +662,15 @@ def test_state_changed_but_reusable_async() -> None:
 # ============================================================================
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_two_level(entry: TwoLevelEntry) -> None:
     _metrics.increment("call.declare_two_level")
-    syn.declare_target_state(
+    syn.ensure_target_state(
         GlobalDictTarget.target_state(entry.name, f"comp: {entry.content}")
     )
 
 
-@syn.fn
+@syn.task
 def _run_two_level_comp() -> None:
     for value in _two_level_source.values():
         _declare_two_level(value)

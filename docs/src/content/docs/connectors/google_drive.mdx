@@ -323,7 +323,7 @@ async for file in source.files():
 
 ### Keyed iteration with `items()`
 
-`items()` yields `(str, DriveFile)` pairs, where the key is the file's name path. This is useful with `mount_each()`:
+`items()` yields `(str, DriveFile)` pairs, where the key is the file's name path. This is useful with `spawn_each()`:
 
 ```python
 async for key, file in source.items():
@@ -458,7 +458,7 @@ if snapshot.result.status != "complete":
     # cleanup. Surface snapshot.result.inaccessible_scope_digests instead.
     raise RuntimeError("Drive inventory is not authoritative")
 
-handle = await syn.mount_each(process_governed_file, snapshot.items(), target)
+handle = await syn.spawn_each(process_governed_file, snapshot.items(), target)
 await handle.ready()
 
 # Call only after the downstream handler's durable boundary.
@@ -483,7 +483,7 @@ After one complete snapshot has been acknowledged:
 
 ```python
 changes = await source.open_change_session()
-handle = await syn.mount_each(process_governed_file, changes.items(), target)
+handle = await syn.spawn_each(process_governed_file, changes.items(), target)
 await handle.ready()
 await changes.commit_after_downstream_ready()
 ```
@@ -525,7 +525,7 @@ import datetime
 deadline = await source.next_permission_expiry()
 now = datetime.datetime.now(datetime.timezone.utc)
 expiry = source.open_permission_expiry_session(now=now)
-handle = await syn.mount_each(process_governed_file, expiry.items(), target)
+handle = await syn.spawn_each(process_governed_file, expiry.items(), target)
 await handle.ready()
 await expiry.commit_after_downstream_ready()
 ```
@@ -608,22 +608,22 @@ import synor as syn
 from synor.connectors import google_drive
 from synor.resources.file import FileLike
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike) -> None:
     text = await file.read_text()
     # ... process the file content ...
 
-@syn.fn
+@syn.task
 async def app_main(credential_path: str, folder_ids: list[str]) -> None:
     source = google_drive.GoogleDriveSource(
         service_account_credential_path=credential_path,
         root_folder_ids=folder_ids,
     )
 
-    with syn.component_subpath("file"):
+    with syn.unit_path("file"):
         async for key, file in source.items():
-            await syn.mount(
-                syn.component_subpath(key),
+            await syn.spawn(
+                syn.unit_path(key),
                 process_file,
                 file,
             )

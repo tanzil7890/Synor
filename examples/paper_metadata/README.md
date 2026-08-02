@@ -20,7 +20,7 @@ One PDF flows through three small functions and fans into three tables:
 Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     metadata_table: postgres.TableTarget[PaperMetadataRow],
@@ -31,34 +31,34 @@ async def process_file(
     basic_info = extract_basic_info(content)
     metadata = extract_metadata(pdf_to_markdown(basic_info.first_page))
 
-    metadata_table.declare_row(row=PaperMetadataRow(
+    metadata_table.ensure_row(row=PaperMetadataRow(
         filename=str(file.file_path.path), title=metadata.title,
         authors=[a.model_dump() for a in metadata.authors],
         abstract=metadata.abstract, num_pages=basic_info.num_pages,
     ))
     for author in metadata.authors:
         if author.name:
-            author_table.declare_row(row=AuthorPaperRow(
+            author_table.ensure_row(row=AuthorPaperRow(
                 author_name=author.name, filename=str(file.file_path.path)))
 
     title_embedding = await syn.use_context(EMBEDDER).embed(metadata.title)
-    embedding_table.declare_row(row=MetadataEmbeddingRow(
+    embedding_table.ensure_row(row=MetadataEmbeddingRow(
         id=uuid.uuid4(), filename=str(file.file_path.path),
         location="title", text=metadata.title, embedding=title_embedding))
     for chunk in _abstract_splitter.split(metadata.abstract, chunk_size=500, ...):
-        embedding_table.declare_row(row=MetadataEmbeddingRow(
+        embedding_table.ensure_row(row=MetadataEmbeddingRow(
             id=uuid.uuid4(), filename=str(file.file_path.path), location="abstract",
             text=chunk.text, embedding=await syn.use_context(EMBEDDER).embed(chunk.text)))
 ```
 
-`embedding: Annotated[NDArray, EMBEDDER]` ties the vector column to the embedder, so its dimensions are inferred automatically. `app_main` mounts the three tables (with different primary keys), walks the source for `*.pdf`, and runs one `process_file` component per file with `mount_each`.
+`embedding: Annotated[NDArray, EMBEDDER]` ties the vector column to the embedder, so its dimensions are inferred automatically. `app_main` mounts the three tables (with different primary keys), walks the source for `*.pdf`, and runs one `process_file` component per file with `spawn_each`.
 
 ## Why this example is useful
 
 - **One file, three tables, kept in sync.** Paper metadata, an author-to-paper index, and embeddings — `mount_table_target` upserts only what changed and removes rows whose PDF is gone, across all three.
 - **First page only, capped at 4000 chars.** That's almost always enough for the title block and abstract, and it keeps token cost flat regardless of paper length.
 - **Typed extraction, validated loud.** `gpt-4o` returns JSON, `PaperMetadataModel.model_validate_json` rejects anything off-schema — junk never reaches Postgres.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a PDF entirely when its bytes and the function's code are unchanged, so you never re-pay for the LLM call or the embeddings on a file you've seen.
+- **Incremental by default.** `@syn.task(cache=True)` skips a PDF entirely when its bytes and the function's code are unchanged, so you never re-pay for the LLM call or the embeddings on a file you've seen.
 - **Honest cache busting.** `EMBEDDER` is declared with `detect_change=True`, so swapping the embedding model re-embeds everything with no cache to clear by hand.
 
 ## Run it

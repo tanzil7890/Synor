@@ -117,7 +117,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 `process_file` runs once per file. It reads the file, detects the language so Tree-sitter can parse it, splits the code along the syntax tree, and maps each chunk to `process_chunk`.
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: postgres.TableTarget[CodeEmbedding],
@@ -137,7 +137,7 @@ async def process_file(
 
 Synor uses Tree-sitter to chunk code along its actual syntax structure rather than arbitrary line breaks. Because each chunk is a coherent syntactic unit, retrieval returns whole functions or blocks instead of fragments cut mid-statement. All major languages are supported; unknown types fall back to plain text.
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run. `syn.map` fans out to one `process_chunk` call per chunk.
+`@syn.task` with `cache=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run. `syn.map` fans out to one `process_chunk` call per chunk.
 
 Here is what chunking produces: each file is split into syntactic chunks, each with its own location and text.
 
@@ -148,7 +148,7 @@ Here is what chunking produces: each file is split into syntactic chunks, each w
 `process_chunk` embeds the chunk with the shared embedder and declares the target row.
 
 ```python
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
@@ -156,7 +156,7 @@ async def process_chunk(
     table: postgres.TableTarget[CodeEmbedding],
 ) -> None:
     embedding = await syn.use_context(EMBEDDER).embed(chunk.text)
-    table.declare_row(
+    table.ensure_row(
         row=CodeEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=str(filename),
@@ -177,7 +177,7 @@ We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2`; there are 12k+ sen
 `app_main` wires the source to the target. It mounts the Postgres table (with a vector index), walks the codebase, and mounts one processing component per file.
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -197,10 +197,10 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         ),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
-`mount_table_target` creates and manages the Postgres table for you: schema, the pgvector index, idempotent upserts, and orphan cleanup when a file disappears. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update them independently.
+`mount_table_target` creates and manages the Postgres table for you: schema, the pgvector index, idempotent upserts, and orphan cleanup when a file disappears. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update them independently.
 
 ## Create the App
 
@@ -266,7 +266,7 @@ The search results print in the terminal:
 
 ## Incremental updates
 
-Synor keeps the index in sync with the codebase and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to embed, upsert, and delete. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged, and an embedding is reused when its chunk text is unchanged. `mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's content, so it upserts only the rows that actually changed and deletes rows whose source is gone.
+Synor keeps the index in sync with the codebase and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to embed, upsert, and delete. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged, and an embedding is reused when its chunk text is unchanged. `mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's content, so it upserts only the rows that actually changed and deletes rows whose source is gone.
 
 The same machinery covers two kinds of change: changes to your **data** (the code being indexed) and changes to your **logic** (the pipeline itself).
 

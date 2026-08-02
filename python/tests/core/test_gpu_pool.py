@@ -200,7 +200,7 @@ async def test_synor_fn_runner_multi_gpu_parallel() -> None:
     seen_gpus: list[int | None] = []
     seen_threads: list[int] = []
 
-    @syn.fn.as_async(runner=syn.GPU)
+    @syn.task.as_async(runner=syn.GPU)
     def _gpu_work(x: int) -> int:
         import time
 
@@ -219,7 +219,7 @@ async def test_synor_fn_runner_multi_gpu_parallel() -> None:
 async def test_synor_fn_runner_single_gpu_serializes() -> None:
     order: list[str] = []
 
-    @syn.fn.as_async(runner=syn.GPU)
+    @syn.task.as_async(runner=syn.GPU)
     def _gpu_serial(x: int) -> int:
         import time
 
@@ -239,7 +239,7 @@ async def test_synor_fn_runner_multi_gpu_parallel_async() -> None:
     configure_gpu_pool(2)
     seen_gpus: list[int | None] = []
 
-    @syn.fn.as_async(runner=syn.GPU)
+    @syn.task.as_async(runner=syn.GPU)
     async def _gpu_work_async(x: int) -> int:
         seen_gpus.append(syn.current_gpu())
         await asyncio.sleep(0.05)
@@ -258,7 +258,7 @@ async def test_synor_fn_fractional_gpu_shares_single_gpu() -> None:
     started: list[int] = []
     finished: list[int] = []
 
-    @syn.fn.as_async(runner=syn.GPU(0.5))
+    @syn.task.as_async(runner=syn.GPU(0.5))
     async def _half_gpu(x: int) -> int:
         seen_gpus.append(syn.current_gpu())
         started.append(x)
@@ -279,7 +279,7 @@ async def test_synor_fn_fractional_gpu_blocked_when_full() -> None:
     in_flight = 0
     max_in_flight = 0
 
-    @syn.fn.as_async(runner=syn.GPU(0.5))
+    @syn.task.as_async(runner=syn.GPU(0.5))
     async def _half_gpu(x: int) -> int:
         nonlocal in_flight, max_in_flight
         in_flight += 1
@@ -326,7 +326,7 @@ async def test_synor_fn_current_gpus_and_fraction() -> None:
     configure_gpu_pool(2)
     seen: list[tuple[list[int], float | None]] = []
 
-    @syn.fn.as_async(runner=syn.GPU(0.5))
+    @syn.task.as_async(runner=syn.GPU(0.5))
     def _gpu_work(x: int) -> int:
         seen.append((syn.current_gpus(), syn.current_gpu_fraction()))
         return x + 1

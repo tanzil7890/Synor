@@ -12,7 +12,7 @@ sessions, statements, persons, techs, orgs, and the relationships between them.
 | Step | Python | Rust (this example) |
 |------|--------|---------------------|
 | Read sources | `localfs.walk_dir` | `synor::walk` (`*.txt` URLs, `*.json` transcripts) |
-| Per-session incremental skip | `@syn.fn(memo=True)` | `#[synor::function(memo)]` |
+| Per-session incremental skip | `@syn.task(cache=True)` | `#[synor::function(memo)]` |
 | Audio + transcription | `yt-dlp` + `assemblyai` SDK | `yt-dlp` (subprocess) + AssemblyAI REST (`reqwest`) |
 | LLM extraction (2 passes) | `instructor` + `litellm` | `reqwest` → OpenAI JSON mode |
 | Stable ids | `IdGenerator` | `synor::IdGenerator` |

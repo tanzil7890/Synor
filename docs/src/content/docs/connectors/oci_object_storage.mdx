@@ -217,7 +217,7 @@ Call `exists()` first and branch on the result; on a `True` verdict, subsequent 
 
 ### Live bucket watching
 
-When `live_stream` is provided, `items()` returns a [`LiveMapView`](../advanced_topics/live_component#livemapfeed-and-livemapview) instead of a plain `AsyncIterable`. Combined with [`mount_each()`](../programming_guide/processing_component#mount_each), this enables automatic incremental bucket watching — newly created, updated, and deleted objects are processed without a full rescan.
+When `live_stream` is provided, `items()` returns a [`LiveMapView`](../advanced_topics/live_component#livemapfeed-and-livemapview) instead of a plain `AsyncIterable`. Combined with [`spawn_each()`](../programming_guide/processing_component#spawn_each), this enables automatic incremental bucket watching — newly created, updated, and deleted objects are processed without a full rescan.
 
 The typical setup uses **OCI Streaming**. Configure an [OCI Events Rule](https://docs.oracle.com/en-us/iaas/Content/Events/Concepts/eventsoverview.htm) that forwards Object Storage events (`createobject`, `updateobject`, `deleteobject`) to an OCI Streaming stream, then consume that stream as a `LiveStream[bytes]` via the Kafka connector — see [`topic_as_stream()` and `payloads()`](./kafka#as-a-live-stream) for the consumer / stream setup — and pass it as `live_stream`:
 
@@ -237,7 +237,7 @@ walker = oci_object_storage.list_objects(
     path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     live_stream=topic_stream.payloads(),
 )
-await syn.mount_each(process_file, walker.items(), target)
+await syn.spawn_each(process_file, walker.items(), target)
 ```
 
 See [Live Mode](../programming_guide/live_mode) for how live mode works and how to enable it on the app.
@@ -256,13 +256,13 @@ from synor.connectors import kafka, oci_object_storage, localfs
 from synor.resources.file import FileLike, PatternFilePathMatcher
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike[str], target: localfs.DirTarget) -> None:
     text = await file.read_text()
-    target.declare_file(filename=file.file_path.path.as_posix(), content=text)
+    target.ensure_file(filename=file.file_path.path.as_posix(), content=text)
 
 
-@syn.fn
+@syn.task
 async def app_main(
     namespace: str, bucket: str, outdir: pathlib.Path,
 ) -> None:
@@ -286,7 +286,7 @@ async def app_main(
         live_stream=topic_stream.payloads(),
     )
 
-    await syn.mount_each(process_file, walker.items(), target)
+    await syn.spawn_each(process_file, walker.items(), target)
 
 
 app = syn.App(

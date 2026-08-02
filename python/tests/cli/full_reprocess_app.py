@@ -6,7 +6,7 @@ import pathlib
 from typing import Iterator
 
 import synor as syn
-from synor.connectors.localfs import declare_dir_target, DirTarget
+from synor.connectors.localfs import ensure_dir_target, DirTarget
 
 
 @syn.lifespan
@@ -15,23 +15,23 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     yield
 
 
-@syn.fn
+@syn.task
 def create_targets(target: DirTarget, create_b: bool) -> None:
     """Create target files A and optionally B."""
-    target.declare_file("target_a.txt", "content_a")
+    target.ensure_file("target_a.txt", "content_a")
     if create_b:
-        target.declare_file("target_b.txt", "content_b")
+        target.ensure_file("target_b.txt", "content_b")
 
 
-@syn.fn
+@syn.task
 async def app_main(create_b: bool = True) -> None:
     """Main app function that creates targets A and optionally B."""
-    target = await syn.use_mount(
-        syn.component_subpath("setup"),
-        declare_dir_target,
+    target = await syn.call(
+        syn.unit_path("setup"),
+        ensure_dir_target,
         pathlib.Path("./out_full_reprocess"),
     )
-    await syn.mount(syn.component_subpath("create"), create_targets, target, create_b)
+    await syn.spawn(syn.unit_path("create"), create_targets, target, create_b)
 
 
 app = syn.App(

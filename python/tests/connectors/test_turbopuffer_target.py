@@ -287,7 +287,7 @@ async def _declare_live_target() -> None:
         TPUF, _live_namespace_name, _live_schema
     )
     for row in _live_rows:
-        target.declare_row(row=row)
+        target.ensure_row(row=row)
 
 
 async def _query_all(client: Any, namespace_name: str) -> list[dict[str, Any]]:

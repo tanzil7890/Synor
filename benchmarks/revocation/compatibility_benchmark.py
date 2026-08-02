@@ -46,13 +46,13 @@ async def _run(rounds: int, warmup: int) -> dict[str, object]:
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: int | syn.NonExistenceType,
+            desired_state: int | syn.AbsentType,
             prev_possible_records: Collection[int],
             prev_may_be_missing: bool,
             /,
         ) -> TargetReconcileOutput[int, int, None] | None:
             del key, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             if desired_state in prev_possible_records:
                 return None
@@ -68,9 +68,9 @@ async def _run(rounds: int, warmup: int) -> dict[str, object]:
         Handler(),
     )
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("item", desired[0]))
+        syn.ensure_target_state(provider.target_state("item", desired[0]))
 
     with tempfile.TemporaryDirectory() as directory:
         environment = Environment(

@@ -19,12 +19,12 @@ from datetime import timedelta
 import synor as syn
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: localfs.DirTarget) -> None:
     # This file gets 30 seconds, including retries inside.
     with syn.timeout(timedelta(seconds=30)):
         summary = await summarize_with_llm(await file.read_text())
-    target.declare_file(filename=out_name(file), content=summary)
+    target.ensure_file(filename=out_name(file), content=summary)
 ```
 
 If the budget runs out, the component fails with `syn.DeadlineExceededError` like any other processor error: nothing external is written for it, nothing is memoized, and the next update retries it cleanly.
@@ -51,9 +51,9 @@ A timeout follows work the caller is directly waiting for. It does not follow ba
 | Code shape | What happens |
 | --- | --- |
 | `with syn.timeout(...): app.update()` | The root processor inherits the timeout (see [Time-boxing a whole update](#time-boxing-a-whole-update-programmatic-callers)). |
-| Direct `@syn.fn` call | Inherits the current timeout. |
-| `await syn.use_mount(child, ...)` | The child inherits the timeout because the parent needs the child's result. |
-| `await syn.mount(child, ...)` / `await syn.mount_each(...)` | The child does not inherit the parent's timeout. The caller's own waiting remains subject to the caller's timeout. |
+| Direct `@syn.task` call | Inherits the current timeout. |
+| `await syn.call(child, ...)` | The child inherits the timeout because the parent needs the child's result. |
+| `await syn.spawn(child, ...)` / `await syn.spawn_each(...)` | The child does not inherit the parent's timeout. The caller's own waiting remains subject to the caller's timeout. |
 | `await syn.map(fn, items)` | Item tasks inherit the timeout. Already-started items are allowed to finish. |
 | Batched function body | Does not inherit any one caller's timeout because a batch can contain work from multiple callers. |
 | Target writes and connector sink calls | Do not inherit the processor timeout. Once processing has succeeded, Synor lets target synchronization finish consistently. |
@@ -61,20 +61,20 @@ A timeout follows work the caller is directly waiting for. It does not follow ba
 
 ## Foreground child work
 
-Use `use_mount()` when the parent depends on the child's value. The timeout applies to both parent and child:
+Use `call()` when the parent depends on the child's value. The timeout applies to both parent and child:
 
 ```python
-@syn.fn
+@syn.task
 async def parse_file(file: FileLike) -> ParsedDoc:
     text = await file.read_text()
     syn.check_cancellation()
     return parse(text)
 
 
-@syn.fn
+@syn.task
 async def main(file: FileLike) -> None:
-    parsed = await syn.use_mount(
-        syn.component_subpath("parse"),
+    parsed = await syn.call(
+        syn.unit_path("parse"),
         parse_file,
         file,
     )
@@ -89,20 +89,20 @@ If the deadline passes while `parse_file()` is in `file.read_text()`, Synor does
 
 ## Background child work
 
-Use `mount()` or `mount_each()` when the child is independent background work. The parent's timeout can stop the parent from waiting forever, but it does not become the child's timeout:
+Use `spawn()` or `spawn_each()` when the child is independent background work. The parent's timeout can stop the parent from waiting forever, but it does not become the child's timeout:
 
 ```python
-@syn.fn
+@syn.task
 async def process_file(file: FileLike) -> None:
-    # No timeout is inherited from the parent mount() call.
+    # No timeout is inherited from the parent spawn() call.
     ...
 
 
-@syn.fn
+@syn.task
 async def main(files: list[FileLike]) -> None:
     with syn.timeout(timedelta(seconds=30)):
-        handle = await syn.mount(
-            syn.component_subpath("first-file"),
+        handle = await syn.spawn(
+            syn.unit_path("first-file"),
             process_file,
             files[0],
         )
@@ -119,7 +119,7 @@ If the parent times out while waiting for `handle.ready()`, the timeout belongs 
 The timing contract is deliberately loose:
 
 - Any Synor-managed call **may** raise `syn.DeadlineExceededError` if the deadline passes before it returns.
-- Synor checkpoints — `syn.check_cancellation()`, calling a `@syn.fn`, engine calls such as `syn.use_mount()` — **guarantee** to raise if the deadline has already passed when they are called.
+- Synor checkpoints — `syn.check_cancellation()`, calling a `@syn.task`, engine calls such as `syn.call()` — **guarantee** to raise if the deadline has already passed when they are called.
 
 Don't rely on the exact point where the error is raised. It can move between versions, and enforcement can get tighter where cancelling is safe (the built-in retry helpers already cancel an in-flight attempt at the deadline).
 
@@ -133,10 +133,10 @@ What you can rely on is the outcome:
 Synor already checks common boundaries, but a long processor loop should add explicit checks:
 
 ```python
-@syn.fn
+@syn.task
 async def import_rows(rows: list[Row]) -> None:
     for row in rows:
-        target.declare_row(row=transform(row))
+        target.ensure_row(row=transform(row))
         syn.check_cancellation()
 ```
 
@@ -147,7 +147,7 @@ This makes the loop stop near the deadline instead of waiting until the whole fu
 `syn.timeout()` does not replace client-level timeouts:
 
 ```python
-@syn.fn
+@syn.task
 async def fetch_page(client: httpx.AsyncClient, url: str) -> str:
     # httpx controls this individual request.
     response = await client.get(url, timeout=10.0)

@@ -100,7 +100,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 `process_file` runs once per checkpoint file and routes on its name. The checkpoint id and session index come straight from the file's path, and a fresh `IdGenerator` numbers the rows this file produces.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     emb_table: postgres.TableTarget[SessionEmbeddingRow],
@@ -125,7 +125,7 @@ async def process_file(
     elif filename == "prompt.txt":
         text = (await file.read_text()).strip()
         if text:
-            emb_table.declare_row(
+            emb_table.ensure_row(
                 row=SessionEmbeddingRow(
                     id=await id_gen.next_id(text),
                     checkpoint_id=info.checkpoint_id,
@@ -156,7 +156,7 @@ async def process_file(
         meta = json.loads(await file.read_text())
         usage = meta.get("token_usage", {})
         agent_pct = meta.get("initial_attribution", {}).get("agent_percentage")
-        meta_table.declare_row(
+        meta_table.ensure_row(
             row=SessionMetadataRow(
                 checkpoint_id=info.checkpoint_id,
                 session_index=info.session_index,
@@ -170,21 +170,21 @@ async def process_file(
 
 The transcript and the context summary each fan out to many rows, so they map to `process_chunk`; the prompt is a single short string, so it's embedded inline; and the metadata file declares one row directly into the *other* table — three content types and a structured record, all from one component.
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a file's content and this function's code are both unchanged, it's skipped on the next run, so finished sessions are never re-embedded. `syn.map` fans out to one `process_chunk` call per chunk.
+`@syn.task` with `cache=True` is what makes this incremental: if a file's content and this function's code are both unchanged, it's skipped on the next run, so finished sessions are never re-embedded. `syn.map` fans out to one `process_chunk` call per chunk.
 
 ## Process a chunk
 
 `process_chunk` embeds one piece of text with the shared embedder and declares the target row. Both the transcript and the context paths funnel through it, carrying their own `content_type` and `role`.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: ChunkInput,
     info: SessionInfo,
     id_gen: IdGenerator,
     emb_table: postgres.TableTarget[SessionEmbeddingRow],
 ) -> None:
-    emb_table.declare_row(
+    emb_table.ensure_row(
         row=SessionEmbeddingRow(
             id=await id_gen.next_id(chunk.text),
             checkpoint_id=info.checkpoint_id,
@@ -197,7 +197,7 @@ async def process_chunk(
     )
 ```
 
-We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast model that runs locally with no API key. There are 12k+ sentence-transformer models on [Hugging Face](https://huggingface.co/models?other=sentence-transformers), so swap in whichever you prefer. `emb_table.declare_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match. Each row's `id` is derived from the chunk text, so a turn that survives a re-parse keeps its row.
+We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast model that runs locally with no API key. There are 12k+ sentence-transformer models on [Hugging Face](https://huggingface.co/models?other=sentence-transformers), so swap in whichever you prefer. `emb_table.ensure_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match. Each row's `id` is derived from the chunk text, so a turn that survives a re-parse keeps its row.
 
 ## Define the main function
 
@@ -206,7 +206,7 @@ We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast m
 `app_main` wires the source to the targets. It mounts both Postgres tables, walks the checkpoint directory for the four file types, and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(checkpoints_dir: pathlib.Path) -> None:
     emb_table = await postgres.mount_table_target(
         PG_DB,
@@ -237,7 +237,7 @@ async def app_main(checkpoints_dir: pathlib.Path) -> None:
         ),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), emb_table, meta_table)
+    await syn.spawn_each(process_file, files.items(), emb_table, meta_table)
 
 
 app = syn.App(
@@ -247,7 +247,7 @@ app = syn.App(
 )
 ```
 
-`mount_table_target` creates and manages each Postgres table for you — schema, idempotent upserts, and orphan cleanup when a session disappears. The `included_patterns` are what makes one component handle four different files: every match flows through the same `process_file`, which routes on the name. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update them independently.
+`mount_table_target` creates and manages each Postgres table for you — schema, idempotent upserts, and orphan cleanup when a session disappears. The `included_patterns` are what makes one component handle four different files: every match flows through the same `process_file`, which routes on the name. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update them independently.
 
 > **No vector index here.** To keep the example minimal, this flow doesn't declare a vector index, so queries do a sequential scan — fine for a personal session history. For a larger corpus, add one line — `emb_table.declare_vector_index(column="embedding")` — exactly as the Semantic Search 101 example does, and pgvector serves approximate-nearest-neighbor queries instead.
 
@@ -299,7 +299,7 @@ The most semantically similar sessions come back ranked — even when they share
 
 ## Incremental updates
 
-Synor keeps the index in sync with your sessions and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged, so a finished session is never re-embedded. `mount_table_target` decides what to *write* — each embedding row's `id` is derived from its text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
+Synor keeps the index in sync with your sessions and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged, so a finished session is never re-embedded. `mount_table_target` decides what to *write* — each embedding row's `id` is derived from its text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
 
 - **A new session is captured** — only its files are parsed, chunked, and embedded; their rows are inserted. Everything already indexed is untouched.
 - **A session is updated** — its files are re-routed and re-chunked; turns whose text is unchanged keep their `id` and embedding, genuinely new turns are embedded and inserted, and turns that no longer exist are deleted.

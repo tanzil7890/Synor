@@ -32,8 +32,8 @@ Ask three questions: what changed, which stable work unit owns the result, and
 which declared outcome must be reconciled. The Rust engine answers those
 questions across runs and reprocesses only affected work. State is tracked in a
 local LMDB store, so **no database is required for the engine itself**; one is
-needed only when an example writes to it. Key APIs: `@syn.fn`, `mount` /
-`use_mount` / `mount_each`, `ContextKey`, and target-state declarations. See the
+needed only when an example writes to it. Key APIs: `@syn.task`, `mount` /
+`call` / `spawn_each`, `ContextKey`, and target-state declarations. See the
 skill for details.
 
 ## Running examples

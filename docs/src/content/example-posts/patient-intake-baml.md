@@ -88,7 +88,7 @@ from baml_client.types import Patient
 import baml_py
 
 
-@syn.fn
+@syn.task
 async def extract_patient_info(content: bytes) -> Patient:
     """Extract patient information from PDF content using BAML."""
     pdf = baml_py.Pdf.from_base64(base64.b64encode(content).decode("utf-8"))
@@ -104,33 +104,33 @@ The return type is `Patient` — the actual Pydantic class BAML generated, not a
 `process_patient_form` runs once per PDF. It reads the file, runs the BAML extraction, dumps the typed `Patient` to JSON, and declares one output file named after the source form.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_patient_form(file: FileLike, outdir: pathlib.Path) -> None:
     """Process a patient intake form PDF and extract structured information."""
     content = await file.read()
     patient_info = await extract_patient_info(content)
     patient_json = patient_info.model_dump_json(indent=2)
     output_filename = file.file_path.path.stem + ".json"
-    localfs.declare_file(
+    localfs.ensure_file(
         outdir / output_filename, patient_json, create_parent_dirs=True
     )
 ```
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a PDF's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never pay for a second Gemini call on a form you've already extracted. `patient_info.model_dump_json(indent=2)` serializes the validated model, and `localfs.declare_file` declares the JSON file as a target state; Synor handles writing, updating, or deleting it to match.
+`@syn.task` with `cache=True` is what makes this incremental: if a PDF's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never pay for a second Gemini call on a form you've already extracted. `patient_info.model_dump_json(indent=2)` serializes the validated model, and `localfs.ensure_file` declares the JSON file as a target state; Synor handles writing, updating, or deleting it to match.
 
 ## Define the main function
 
-`app_main` wires the source to the target. It walks the source directory for PDFs and mounts one processing component per file with `mount_each`.
+`app_main` wires the source to the target. It walks the source directory for PDFs and mounts one processing component per file with `spawn_each`.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     """Main application function that processes patient intake forms."""
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     )
-    await syn.mount_each(process_patient_form, files.items(), outdir)
+    await syn.spawn_each(process_patient_form, files.items(), outdir)
 
 
 app = syn.App(
@@ -141,7 +141,7 @@ app = syn.App(
 )
 ```
 
-The filesystem source walks `data/patient_forms/` for `*.pdf`, and `mount_each` runs one component per form so the engine can track and update each independently. `syn.App` binds the main function to its arguments — the source and output directories — into a runnable unit.
+The filesystem source walks `data/patient_forms/` for `*.pdf`, and `spawn_each` runs one component per form so the engine can track and update each independently. `syn.App` binds the main function to its arguments — the source and output directories — into a runnable unit.
 
 ## Setup
 
@@ -186,7 +186,7 @@ Each file is a fully populated, schema-validated patient record — the same sha
 
 ## Incremental updates
 
-Synor keeps the output in sync with your intake forms and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a form is skipped when its bytes and the function's code are both unchanged, so Gemini never re-extracts an unchanged PDF. `localfs.declare_file` decides what to *write* — the engine compares declared output files against what's on disk and applies only the difference.
+Synor keeps the output in sync with your intake forms and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a form is skipped when its bytes and the function's code are both unchanged, so Gemini never re-extracts an unchanged PDF. `localfs.ensure_file` decides what to *write* — the engine compares declared output files against what's on disk and applies only the difference.
 
 - **A form is added** — only that PDF is extracted; its JSON file is written. The rest is untouched.
 - **A form is replaced** — it is re-extracted and its JSON file is rewritten; every other form is left alone.

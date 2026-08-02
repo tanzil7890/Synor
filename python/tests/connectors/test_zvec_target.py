@@ -216,8 +216,8 @@ _declare_enabled: bool = True
 async def _declare() -> None:
     if not _declare_enabled:
         return
-    table = await syn.use_mount(
-        syn.component_subpath("setup", "col"),
+    table = await syn.call(
+        syn.unit_path("setup", "col"),
         zc.declare_collection_target,
         ZVEC_DB,
         _collection,
@@ -225,7 +225,7 @@ async def _declare() -> None:
         managed_by=_managed_by,
     )
     for row in _rows:
-        table.declare_row(row=row)
+        table.ensure_row(row=row)
 
 
 def _make_app(connection: Any, env_name: str) -> syn.App[[], None]:
@@ -465,22 +465,22 @@ def test_multiple_vector_fields(conn: Any) -> None:
 def test_multiple_collections(conn: Any) -> None:
     async def _declare_two() -> None:
         schema = await zc.CollectionSchema.from_class(SimpleDoc, primary_key=["id"])
-        t1 = await syn.use_mount(
-            syn.component_subpath("setup", "c1"),
+        t1 = await syn.call(
+            syn.unit_path("setup", "c1"),
             zc.declare_collection_target,
             ZVEC_DB,
             "collection_one",
             schema,
         )
-        t2 = await syn.use_mount(
-            syn.component_subpath("setup", "c2"),
+        t2 = await syn.call(
+            syn.unit_path("setup", "c2"),
             zc.declare_collection_target,
             ZVEC_DB,
             "collection_two",
             schema,
         )
-        t1.declare_row(row=SimpleDoc(id="1", title="one", year=1, embedding=_EMB))
-        t2.declare_row(row=SimpleDoc(id="1", title="two", year=2, embedding=_EMB))
+        t1.ensure_row(row=SimpleDoc(id="1", title="one", year=1, embedding=_EMB))
+        t2.ensure_row(row=SimpleDoc(id="1", title="two", year=2, embedding=_EMB))
 
     env = make_test_env(conn, "test_multiple_collections")
     app = syn.App(

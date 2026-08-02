@@ -80,10 +80,10 @@ register_memo_key_function(Path, path_key)
 
 ### Override at the call site with `memo_key=`
 
-The two approaches above are **type-level**: every memoized function sees the same fingerprint for a given object. To customize fingerprinting **only for a specific function**, pass `memo_key=` to `@syn.fn` (or `@syn.fn.as_async`). It maps parameter names to either a callable (transform the value before fingerprinting) or `None` (exclude the parameter entirely).
+The two approaches above are **type-level**: every memoized function sees the same fingerprint for a given object. To customize fingerprinting **only for a specific function**, pass `memo_key=` to `@syn.task` (or `@syn.task.as_async`). It maps parameter names to either a callable (transform the value before fingerprinting) or `None` (exclude the parameter entirely).
 
 ```python
-@syn.fn(memo=True, memo_key={"entry": lambda e: (e.name, e.version), "extra": None})
+@syn.task(cache=True, memo_key={"entry": lambda e: (e.name, e.version), "extra": None})
 def transform(entry: SourceDataEntry, extra: str) -> str:
     ...
 ```
@@ -123,7 +123,7 @@ Memo state validation addresses these by letting you attach a **state function**
 
 When Synor finds a fingerprint match, it calls each state function with the stored state from the previous run:
 
-1. **First run** (no previous state): `prev_state` is `syn.NON_EXISTENCE`. Use `syn.is_non_existence(prev_state)` to detect this.
+1. **First run** (no previous state): `prev_state` is `syn.ABSENT`. Use `syn.is_absent(prev_state)` to detect this.
 2. **Subsequent runs**: `prev_state` is whatever you returned last time.
 
 Your state function returns a `syn.MemoStateOutcome(state=..., memo_valid=...)`:
@@ -159,10 +159,10 @@ class LocalFile:
         # Identity only — which file is it?
         return str(self.path.resolve())
 
-    def __synor_memo_state__(self, prev_state: tuple[int, str] | syn.NonExistenceType) -> syn.MemoStateOutcome:
+    def __synor_memo_state__(self, prev_state: tuple[int, str] | syn.AbsentType) -> syn.MemoStateOutcome:
         st = os.stat(self.path)
         new_mtime = st.st_mtime_ns
-        if syn.is_non_existence(prev_state):
+        if syn.is_absent(prev_state):
             # First run — compute initial state (memo_valid defaults to False,
             # which is fine since there's no previous cache to reuse)
             content_hash = hashlib.sha256(self.path.read_bytes()).hexdigest()
@@ -198,10 +198,10 @@ from synor import register_memo_key_function
 def path_key(p: Path) -> object:
     return str(p.resolve())
 
-def path_state(p: Path, prev_state: tuple[int, int] | syn.NonExistenceType) -> syn.MemoStateOutcome:
+def path_state(p: Path, prev_state: tuple[int, int] | syn.AbsentType) -> syn.MemoStateOutcome:
     st = p.stat()
     new_state = (st.st_mtime_ns, st.st_size)
-    memo_valid = not syn.is_non_existence(prev_state) and new_state == prev_state
+    memo_valid = not syn.is_absent(prev_state) and new_state == prev_state
     return syn.MemoStateOutcome(state=new_state, memo_valid=memo_valid)
 
 register_memo_key_function(Path, path_key, state_fn=path_state)
@@ -212,7 +212,7 @@ register_memo_key_function(Path, path_key, state_fn=path_state)
 A state method can return an `Awaitable`. Synor handles this automatically:
 
 - **In an async Synor function**: awaitables from all state methods are gathered concurrently.
-- **In a sync Synor function**: if no event loop is running, Synor uses `asyncio.run()`. If a loop is already running, it raises an error — switch to an async function or use `@syn.fn.as_async`.
+- **In a sync Synor function**: if no event loop is running, Synor uses `asyncio.run()`. If a loop is already running, it raises an error — switch to an async function or use `@syn.task.as_async`.
 
 ```python
 import synor as syn
@@ -225,9 +225,9 @@ class S3Object:
     def __synor_memo_key__(self) -> object:
         return (self.bucket, self.key)
 
-    async def __synor_memo_state__(self, prev_state: str | syn.NonExistenceType) -> syn.MemoStateOutcome:
+    async def __synor_memo_state__(self, prev_state: str | syn.AbsentType) -> syn.MemoStateOutcome:
         etag = await self._head_object()
-        memo_valid = not syn.is_non_existence(prev_state) and etag == prev_state
+        memo_valid = not syn.is_absent(prev_state) and etag == prev_state
         return syn.MemoStateOutcome(state=etag, memo_valid=memo_valid)
 
     async def _head_object(self) -> str:

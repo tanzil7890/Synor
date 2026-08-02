@@ -11,7 +11,7 @@ This is Semantic Search 101 with one thing changed: the vectors land in [LanceDB
 
 ## How it works
 
-The chunk-and-embed half is byte-for-byte the base example — `RecursiveSplitter` cuts each file into overlapping Markdown chunks, and a local `SentenceTransformerEmbedder` (`all-MiniLM-L6-v2`, no API key) turns each into a vector. What changes is the resource and the target: a `LanceAsyncConnection` instead of an `asyncpg` pool, and `lancedb.mount_table_target` instead of the Postgres one — same call shape, same `table.declare_row(...)`. Read it in [`main.py`](main.py):
+The chunk-and-embed half is byte-for-byte the base example — `RecursiveSplitter` cuts each file into overlapping Markdown chunks, and a local `SentenceTransformerEmbedder` (`all-MiniLM-L6-v2`, no API key) turns each into a vector. What changes is the resource and the target: a `LanceAsyncConnection` instead of an `asyncpg` pool, and `lancedb.mount_table_target` instead of the Postgres one — same call shape, same `table.ensure_row(...)`. Read it in [`main.py`](main.py):
 
 ```python
 @syn.lifespan
@@ -21,7 +21,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     builder.provide(EMBEDDER, SentenceTransformerEmbedder(EMBED_MODEL))
     yield
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await lancedb.mount_table_target(
         LANCE_DB, table_name=TABLE_NAME,
@@ -29,7 +29,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
     )
     files = localfs.walk_dir(sourcedir, recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]), live=True)
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
 `lancedb.mount_table_target` is the LanceDB counterpart to the Postgres `mount_table_target`: it creates and manages the table, handles idempotent upserts keyed on the primary key, and cleans up orphan rows when a file disappears. Only the import changed.
@@ -39,7 +39,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
 - **Zero infrastructure.** No database to install, no `POSTGRES_URL` — LanceDB writes to `./lancedb_data/`, created on first run. To start fresh, delete the directory and re-run.
 - **Portable by design.** Data lives in one directory on disk; copy it to move the whole index.
 - **Managed table target.** `lancedb.mount_table_target` owns the schema, idempotent upserts, and orphan cleanup — the same guarantees the Postgres target gives, against a local store.
-- **Incremental by default.** `@syn.fn(memo=True)` skips files whose content and code are unchanged; each row's `id` is derived from its chunk text, so only changed rows are upserted and vanished ones are deleted.
+- **Incremental by default.** `@syn.task(cache=True)` skips files whose content and code are unchanged; each row's `id` is derived from its chunk text, so only changed rows are upserted and vanished ones are deleted.
 - **Same flow, different store.** The chunk-and-embed code is identical to the Postgres version — proof the target is a swappable detail. The same local embedder is reused at query time so indexing and search stay consistent.
 
 ## Run it

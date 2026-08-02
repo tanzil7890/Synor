@@ -59,7 +59,7 @@ async def _index_text(text, source_type, filename, cik, filing_date, form_type, 
     embedder = syn.use_context(EMBEDDER)
     for chunk in _splitter.split(_scrub_pii(text), chunk_size=1000, chunk_overlap=200,
                                  language="markdown"):
-        table.declare_row(row=FilingChunk(
+        table.ensure_row(row=FilingChunk(
             chunk_id=_chunk_id(filename, chunk.start.char_offset, chunk.end.char_offset),
             source_type=source_type, doc_filename=filename, cik=cik,
             filing_date=filing_date, form_type=form_type,
@@ -68,7 +68,7 @@ async def _index_text(text, source_type, filename, cik, filing_date, form_type, 
         ))
 ```
 
-Both sources `declare_row` into the *same* Doris table — `chunk_id` is a stable `uuid5` of the file and chunk offsets, so re-running reconciles cleanly instead of duplicating.
+Both sources `ensure_row` into the *same* Doris table — `chunk_id` is a stable `uuid5` of the file and chunk offsets, so re-running reconciles cleanly instead of duplicating.
 
 > **A note on the port.** The original v0 example also ingested PDF exhibits via docling; this v1 port focuses on the text and XBRL-JSON sources (the PDF path is identical to the Manuals to Structured Data example — `docling` bytes → Markdown, then the same `_index_text`). It needs **Apache Doris 4.0+** for vector index support; a ready `docker-compose.yml` is included.
 

@@ -44,13 +44,13 @@ async def synor_lifespan(
         yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: localfs.File,
     table: postgres.TableTarget[AudioTranscription],
 ) -> None:
     transcript = await _transcriber.transcribe(file)
-    table.declare_row(
+    table.ensure_row(
         row=AudioTranscription(
             filename=str(file.file_path.path),
             text=transcript,
@@ -58,7 +58,7 @@ async def process_file(
     )
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -86,7 +86,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
             ],
         ),
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 
 
 app = syn.App(

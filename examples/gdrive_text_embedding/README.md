@@ -14,7 +14,7 @@ This is Semantic Search 101 with exactly one thing swapped: instead of reading M
 The Drive source needs two things, both read from environment variables so nothing is hardcoded: a Google Cloud **service-account JSON key** with Drive access, and the **folder id(s)** to index. `GoogleDriveSource` walks each root folder recursively and yields one `DriveFile` per document; native Docs, Sheets, and Slides are exported to text, and any other file is downloaded as-is. From there a `DriveFile` behaves like any other `FileLike`, so the rest is the base example. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def app_main() -> None:
     table = await postgres.mount_table_target(
         PG_DB, table_name=TABLE_NAME,
@@ -28,17 +28,17 @@ async def app_main() -> None:
         service_account_credential_path=credential_path,
         root_folder_ids=root_folder_ids,
     )
-    await syn.mount_each(process_file, source.items(), table)
+    await syn.spawn_each(process_file, source.items(), table)
 ```
 
-`source.items()` yields `(key, file)` pairs keyed by the file's name path — exactly what `mount_each` expects — so the engine tracks each Drive file as its own component and updates them independently. `mount_table_target` creates and manages the Postgres table: schema, idempotent upserts, and orphan cleanup when a file disappears from the folder.
+`source.items()` yields `(key, file)` pairs keyed by the file's name path — exactly what `spawn_each` expects — so the engine tracks each Drive file as its own component and updates them independently. `mount_table_target` creates and manages the Postgres table: schema, idempotent upserts, and orphan cleanup when a file disappears from the folder.
 
 ## Why this example is useful
 
-- **Drive as a first-class source.** `GoogleDriveSource.items()` drops into the same `mount_each` fan-out as a local folder — the source is a swappable detail, not a rewrite.
+- **Drive as a first-class source.** `GoogleDriveSource.items()` drops into the same `spawn_each` fan-out as a local folder — the source is a swappable detail, not a rewrite.
 - **Docs/Sheets/Slides handled.** Native Google formats are exported to text (Markdown, CSV, plain text); everything else downloads as-is, then `await file.read_text()` works just like a local file.
 - **Nothing hardcoded.** The service-account key path and folder id(s) come from environment variables, so forks and deployments configure their own.
-- **Incremental by default.** `@syn.fn(memo=True)` skips Drive files whose content and code are unchanged; each row's `id` is derived from its chunk text, so re-running upserts only changed rows and deletes rows whose source is gone.
+- **Incremental by default.** `@syn.task(cache=True)` skips Drive files whose content and code are unchanged; each row's `id` is derived from its chunk text, so re-running upserts only changed rows and deletes rows whose source is gone.
 - **Managed Postgres target.** A single `mount_table_target` owns the schema, idempotent upserts, and orphan cleanup; the same local `all-MiniLM-L6-v2` embedder is reused at query time so indexing and search stay consistent.
 
 ## Run it

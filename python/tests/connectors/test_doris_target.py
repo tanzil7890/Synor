@@ -213,15 +213,15 @@ _table_name: str = ""
 
 
 async def _declare_table_and_rows() -> None:
-    table = await syn.use_mount(
-        syn.component_subpath("setup", "table"),
-        doris.declare_table_target,
+    table = await syn.call(
+        syn.unit_path("setup", "table"),
+        doris.ensure_table_target,
         DORIS_DB_KEY,
         _table_name,
         await doris.TableSchema.from_class(_row_type, primary_key=["id"]),
     )
     for row in _source_rows:
-        table.declare_row(row=row)
+        table.ensure_row(row=row)
 
 
 def test_create_table_and_insert_rows(
@@ -370,9 +370,9 @@ def test_dict_rows(
     synor_env.context_provider.provide(DORIS_DB_KEY, managed_conn)
 
     async def declare_dict_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            doris.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            doris.ensure_table_target,
             DORIS_DB_KEY,
             table_name,
             doris.TableSchema(
@@ -385,7 +385,7 @@ def test_dict_rows(
             ),
         )
         for row in dict_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_doris_dict", environment=synor_env),
@@ -423,9 +423,9 @@ def test_vector_index_creation(
     synor_env.context_provider.provide(DORIS_DB_KEY, managed_conn)
 
     async def declare_vec_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            doris.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            doris.ensure_table_target,
             DORIS_DB_KEY,
             table_name,
             await doris.TableSchema.from_class(VectorRow, primary_key=["id"]),
@@ -438,7 +438,7 @@ def test_vector_index_creation(
             ],
         )
         for row in vec_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_doris_vector", environment=synor_env),

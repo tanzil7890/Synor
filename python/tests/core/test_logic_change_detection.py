@@ -49,7 +49,7 @@ def _unload_module_functions(mod: ModuleType) -> None:
         fp = getattr(obj, "_logic_fp", None)
         if fp is not None:
             core.unregister_logic_fingerprint(fp)
-        # Also scan class attributes for @syn.fn decorated methods.
+        # Also scan class attributes for @syn.task decorated methods.
         if isinstance(obj, type):
             for cls_attr_name in dir(obj):
                 cls_obj = getattr(obj, cls_attr_name, None)
@@ -96,11 +96,11 @@ def test_fn_memo_invalidated_on_logic_change() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.transform_memo("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -141,11 +141,11 @@ def test_component_memo_invalidated_on_logic_change() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.mount(
-            syn.component_subpath("A"), mod.declare_entry_memo, "A", "value1"
+        await syn.spawn(
+            syn.unit_path("A"), mod.declare_entry_memo, "A", "value1"
         )
 
     app = syn.App(
@@ -188,11 +188,11 @@ def test_transitive_fn_memo_bar_memo_changes() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_calls_bar_memo("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -228,11 +228,11 @@ def test_transitive_fn_memo_bar_plain_changes() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_calls_bar_plain("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -273,11 +273,11 @@ def test_transitive_component_calls_bar_memo() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.mount(
-            syn.component_subpath("A"), mod.foo_comp_calls_bar_memo, "A", "value1"
+        await syn.spawn(
+            syn.unit_path("A"), mod.foo_comp_calls_bar_memo, "A", "value1"
         )
 
     app = syn.App(
@@ -314,11 +314,11 @@ def test_transitive_component_mounts_bar_comp_plain() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.mount(
-            syn.component_subpath("A"),
+        await syn.spawn(
+            syn.unit_path("A"),
             mod.foo_comp_mounts_bar_comp_plain,
             "A",
             "value1",
@@ -364,11 +364,11 @@ def test_transitive_component_mounts_bar_comp_memo() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.mount(
-            syn.component_subpath("A"),
+        await syn.spawn(
+            syn.unit_path("A"),
             mod.foo_comp_mounts_bar_comp_memo,
             "A",
             "value1",
@@ -424,10 +424,10 @@ _mount_parent_metrics: list[Any] = []
 _mount_parent_child: list[Any] = []
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _memo_parent_mounts_child(key: str, value: str) -> None:
     _mount_parent_metrics[0].increment("memo_parent")
-    await syn.mount(syn.component_subpath(key), _mount_parent_child[0], key, value)
+    await syn.spawn(syn.unit_path(key), _mount_parent_child[0], key, value)
 
 
 def test_memo_parent_invalidated_when_mounted_child_changes() -> None:
@@ -439,10 +439,10 @@ def test_memo_parent_invalidated_when_mounted_child_changes() -> None:
     _mount_parent_metrics.clear()
     _mount_parent_metrics.append(metrics)
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
-        await syn.mount(
-            syn.component_subpath("A"), _memo_parent_mounts_child, "A", "value1"
+        await syn.spawn(
+            syn.unit_path("A"), _memo_parent_mounts_child, "A", "value1"
         )
 
     app = syn.App(
@@ -494,13 +494,13 @@ _cachehit_child: list[Any] = []
 _cachehit_value: list[str] = []
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _memo_parent_mounts_memo_child(key: str, value: str) -> None:
     # `value` is part of this memo'd parent's key, so changing it forces a
     # rebuild — but the child below is always mounted with FIXED args, so it
     # stays a cache hit across that rebuild.
     _cachehit_metrics[0].increment("cachehit_parent")
-    await syn.mount(syn.component_subpath("C"), _cachehit_child[0], "C", "fixed")
+    await syn.spawn(syn.unit_path("C"), _cachehit_child[0], "C", "fixed")
 
 
 def test_memo_child_cache_hit_still_propagates_deps_to_rebuilt_parent() -> None:
@@ -515,10 +515,10 @@ def test_memo_child_cache_hit_still_propagates_deps_to_rebuilt_parent() -> None:
     _cachehit_value.clear()
     _cachehit_value.append("x1")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
-        await syn.mount(
-            syn.component_subpath("P"),
+        await syn.spawn(
+            syn.unit_path("P"),
             _memo_parent_mounts_memo_child,
             "P",
             _cachehit_value[0],
@@ -569,11 +569,11 @@ def test_fn_memo_invalidated_on_version_bump() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.transform_memo_ver("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -615,11 +615,11 @@ def test_self_mode_not_invalidated_when_child_changes() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_self("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -653,11 +653,11 @@ def test_self_mode_invalidated_when_own_code_changes() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_self("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -699,11 +699,11 @@ def test_none_mode_not_invalidated_on_any_logic_change() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_none("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -755,17 +755,17 @@ def test_none_mode_still_detects_change_on_context_key_deps() -> None:
 
     db_name = "test_none_mode_ctx_deps"
 
-    @syn.fn(memo=True, logic_tracking=None)
+    @syn.task(cache=True, logic_tracking=None)
     def process(name: str, content: str) -> None:
         val = syn.use_context(_CHANGE_DETECTED_KEY_J3)
         metrics.increment("process")
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(name, f"{val}:{content}")
         )
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
-        await syn.mount(syn.component_subpath("A"), process, "A", "data")
+        await syn.spawn(syn.unit_path("A"), process, "A", "data")
 
     # Phase 1: value="v1" — executes then memo hit
     env1 = _create_env_with_ctx(db_name, "v1")
@@ -801,11 +801,11 @@ def test_transitive_full_self_plain_bar_changes() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_full("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -842,11 +842,11 @@ def test_transitive_full_self_plain_baz_changes() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_full("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -881,16 +881,16 @@ def test_transitive_full_self_plain_baz_changes() -> None:
 
 
 def test_bound_method_fn_memo_invalidated_on_logic_change() -> None:
-    """A @syn.fn(memo=True) bound method's cached result is invalidated when code changes."""
+    """A @syn.task(cache=True) bound method's cached result is invalidated when code changes."""
     GlobalDictTarget.store.clear()
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.processor.transform_memo("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -926,16 +926,16 @@ def test_bound_method_fn_memo_invalidated_on_logic_change() -> None:
 
 
 def test_bound_method_component_memo_invalidated_on_logic_change() -> None:
-    """A @syn.fn(memo=True) bound method's component memo is invalidated when code changes."""
+    """A @syn.task(cache=True) bound method's component memo is invalidated when code changes."""
     GlobalDictTarget.store.clear()
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.mount(
-            syn.component_subpath("A"), mod.processor.declare_entry_memo, "A", "value1"
+        await syn.spawn(
+            syn.unit_path("A"), mod.processor.declare_entry_memo, "A", "value1"
         )
 
     app = syn.App(
@@ -978,11 +978,11 @@ def test_fn_memo_invalidated_on_deps_change() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.transform_memo_deps("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -1020,11 +1020,11 @@ def test_transitive_deps_change_propagates_through_full() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_full("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -1063,11 +1063,11 @@ def test_transitive_deps_change_blocked_by_self() -> None:
     metrics = Metrics()
     current_module: list[Any] = []
 
-    @syn.fn
+    @syn.task
     def app_main() -> None:
         mod = current_module[0]
         result = mod.foo_self("A", "value1")
-        syn.declare_target_state(GlobalDictTarget.target_state("A", result))
+        syn.ensure_target_state(GlobalDictTarget.target_state("A", result))
 
     app = syn.App(
         syn.AppConfig(
@@ -1110,11 +1110,11 @@ def test_deps_fingerprint_contract() -> None:
 
     # Build several SyncFunction wrappers around the same callable so the
     # only varying input is the deps value.
-    no_deps = SyncFunction(my_fn, memo=True)
-    deps_a1 = SyncFunction(my_fn, memo=True, deps="prompt-A")
-    deps_a2 = SyncFunction(my_fn, memo=True, deps="prompt-A")
-    deps_b = SyncFunction(my_fn, memo=True, deps="prompt-B")
-    deps_explicit_none = SyncFunction(my_fn, memo=True, deps=None)
+    no_deps = SyncFunction(my_fn, cache=True)
+    deps_a1 = SyncFunction(my_fn, cache=True, deps="prompt-A")
+    deps_a2 = SyncFunction(my_fn, cache=True, deps="prompt-A")
+    deps_b = SyncFunction(my_fn, cache=True, deps="prompt-B")
+    deps_explicit_none = SyncFunction(my_fn, cache=True, deps=None)
 
     try:
         assert deps_a1._logic_fp == deps_a2._logic_fp, (
@@ -1133,17 +1133,17 @@ def test_deps_fingerprint_contract() -> None:
         # Multi-value deps via dict.
         deps_dict_1 = SyncFunction(
             my_fn,
-            memo=True,
+            cache=True,
             deps={"prompt": "P", "model": "M"},
         )
         deps_dict_2 = SyncFunction(
             my_fn,
-            memo=True,
+            cache=True,
             deps={"model": "M", "prompt": "P"},  # same content, different order
         )
         deps_dict_3 = SyncFunction(
             my_fn,
-            memo=True,
+            cache=True,
             deps={"prompt": "P", "model": "M2"},
         )
         try:
@@ -1166,9 +1166,9 @@ def test_deps_fingerprint_contract() -> None:
             def __synor_memo_key__(self) -> object:
                 return ("with_key", self.n)
 
-        same_a = SyncFunction(my_fn, memo=True, deps=WithKey(42, "noise-a"))
-        same_b = SyncFunction(my_fn, memo=True, deps=WithKey(42, "noise-b"))
-        diff = SyncFunction(my_fn, memo=True, deps=WithKey(43, "noise-a"))
+        same_a = SyncFunction(my_fn, cache=True, deps=WithKey(42, "noise-a"))
+        same_b = SyncFunction(my_fn, cache=True, deps=WithKey(42, "noise-b"))
+        diff = SyncFunction(my_fn, cache=True, deps=WithKey(43, "noise-a"))
         try:
             assert same_a._logic_fp == same_b._logic_fp, (
                 "__synor_memo_key__ should ignore transient fields"
@@ -1183,11 +1183,11 @@ def test_deps_fingerprint_contract() -> None:
         # version= and deps= are independent contributors: both feed into the
         # same _logic_fp, and changing either should change it while holding
         # the other fixed.
-        v1_dA = SyncFunction(my_fn, memo=True, version=1, deps="A")
-        v1_dA_b = SyncFunction(my_fn, memo=True, version=1, deps="A")
-        v1_dB = SyncFunction(my_fn, memo=True, version=1, deps="B")
-        v2_dA = SyncFunction(my_fn, memo=True, version=2, deps="A")
-        v2_dB = SyncFunction(my_fn, memo=True, version=2, deps="B")
+        v1_dA = SyncFunction(my_fn, cache=True, version=1, deps="A")
+        v1_dA_b = SyncFunction(my_fn, cache=True, version=1, deps="A")
+        v1_dB = SyncFunction(my_fn, cache=True, version=1, deps="B")
+        v2_dA = SyncFunction(my_fn, cache=True, version=2, deps="A")
+        v2_dB = SyncFunction(my_fn, cache=True, version=2, deps="B")
         try:
             assert v1_dA._logic_fp == v1_dA_b._logic_fp, (
                 "same version + same deps must produce the same fingerprint"
@@ -1222,12 +1222,12 @@ def test_deps_rejected_with_logic_tracking_none() -> None:
     dropped. Catch it at decoration time instead."""
     with pytest.raises(ValueError, match="deps="):
 
-        @syn.fn(memo=True, deps="ignored", logic_tracking=None)
+        @syn.task(cache=True, deps="ignored", logic_tracking=None)
         def _f(x: str) -> str:
             return x
 
     with pytest.raises(ValueError, match="deps="):
 
-        @syn.fn.as_async(memo=True, deps="ignored", logic_tracking=None)
+        @syn.task.as_async(cache=True, deps="ignored", logic_tracking=None)
         async def _g(x: str) -> str:
             return x

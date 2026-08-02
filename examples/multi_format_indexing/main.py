@@ -107,7 +107,7 @@ class Page:
     image: bytes
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def file_to_pages(filename: str, content: bytes) -> list[Page]:
     """PDF -> one image per page; image -> a single page; anything else -> []."""
     mime_type, _ = mimetypes.guess_type(filename)
@@ -123,7 +123,7 @@ def file_to_pages(filename: str, content: bytes) -> list[Page]:
     return []
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def embed_page(page_png: bytes) -> list[list[float]]:
     return embed_image(Image.open(io.BytesIO(page_png)).convert("RGB"))
 
@@ -137,7 +137,7 @@ def _page_id(filename: str, page_number: int | None) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{filename}|{page_number}"))
 
 
-@syn.fn
+@syn.task
 async def process_page(
     page: Page, filename: str, target: qdrant.CollectionTarget
 ) -> None:
@@ -151,7 +151,7 @@ async def process_page(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     filename = str(file.file_path.path)
     pages = await file_to_pages(filename, await file.read())
@@ -164,7 +164,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     model, _, _ = get_colpali()
     dim = int(getattr(model, "dim", 128))
@@ -191,7 +191,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         ),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 
 
 app = syn.App(

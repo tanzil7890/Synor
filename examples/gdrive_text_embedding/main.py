@@ -62,7 +62,7 @@ class DocEmbedding:
     embedding: Annotated[NDArray, EMBEDDER]
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: google_drive.DriveFile,
     table: postgres.TableTarget[DocEmbedding],
@@ -75,14 +75,14 @@ async def process_file(
     await syn.map(_emit_chunk, chunks, file.file_path.path.as_posix(), id_gen, table)
 
 
-@syn.fn
+@syn.task
 async def _emit_chunk(
     chunk: Chunk,
     filename: str,
     id_gen: IdGenerator,
     table: postgres.TableTarget[DocEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=DocEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=filename,
@@ -92,7 +92,7 @@ async def _emit_chunk(
     )
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     table = await postgres.mount_table_target(
         PG_DB,
@@ -116,7 +116,7 @@ async def app_main() -> None:
         root_folder_ids=root_folder_ids,
     )
 
-    await syn.mount_each(process_file, source.items(), table)
+    await syn.spawn_each(process_file, source.items(), table)
 
 
 app = syn.App(

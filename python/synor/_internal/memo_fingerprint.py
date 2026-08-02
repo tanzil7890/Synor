@@ -42,7 +42,7 @@ _memo_fns: dict[type, _MemoFns] = {}
 class StateFnEntry(typing.NamedTuple):
     """A state method paired with a deserializer for its ``prev_state`` parameter.
 
-    ``deserialize_prev`` converts a ``StoredValue`` (or ``NON_EXISTENCE``) into the
+    ``deserialize_prev`` converts a ``StoredValue`` (or ``ABSENT``) into the
     typed Python object expected by the state method.
     ``call`` is the original state method (bound to its instance).
     """
@@ -60,7 +60,7 @@ def _make_state_deserialize_fn(
     Works for both ``__synor_memo_state__(self, prev_state)`` and registered
     ``state_fn(obj, prev_state)`` — in both cases the state type is at position 1.
 
-    ``NonExistenceType`` is stripped from union types since it's a sentinel
+    ``AbsentType`` is stripped from union types since it's a sentinel
     that's never serialized — only the actual state type is deserialized.
     """
     fn_label = qualified_name(raw_state_fn)

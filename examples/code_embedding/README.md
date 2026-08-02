@@ -13,7 +13,7 @@ You declare the transformation in native Python and your own types — each work
 query: "where do we embed chunks?"
 
 [0.582] examples/code_embedding/main.py (L66-L83)
-    @syn.fn
+    @syn.task
     async def process_chunk(chunk, filename, id_gen, table):
         embedding = await syn.use_context(EMBEDDER).embed(chunk.text)
         ...
@@ -26,7 +26,7 @@ Walk a repo → detect language → split along the **syntax tree** with Tree-si
 The whole indexing path is the snippet below — read it top-to-bottom in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[CodeEmbedding]) -> None:
     text = await file.read_text()
     language = detect_code_language(filename=str(file.file_path.path.name))
@@ -35,28 +35,28 @@ async def process_file(file: FileLike, table: postgres.TableTarget[CodeEmbedding
     id_gen = IdGenerator()
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 
-@syn.fn
+@syn.task
 async def process_chunk(chunk, filename, id_gen, table) -> None:
     embedding = await syn.use_context(EMBEDDER).embed(chunk.text)
-    table.declare_row(row=CodeEmbedding(
+    table.ensure_row(row=CodeEmbedding(
         id=await id_gen.next_id(chunk.text), filename=str(filename), code=chunk.text,
         embedding=embedding, start_line=chunk.start.line, end_line=chunk.end.line,
     ))
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     table = await postgres.mount_table_target(PG_DB, table_name=TABLE_NAME, ...)
     table.declare_vector_index(column="embedding")
     files = localfs.walk_dir(sourcedir, recursive=True,
                              path_matcher=PatternFilePathMatcher(included_patterns=["**/*.py", ...]),
                              live=True)
-    await syn.mount_each(process_file, files.items(), table)
+    await syn.spawn_each(process_file, files.items(), table)
 ```
 
 ## Why this example is useful
 
 - **Syntax-aware chunking, built in.** Tree-sitter splits along real code structure — functions, classes, blocks — so retrieval returns whole units, not fragments cut mid-statement. Every major language; unknown types fall back to plain text.
-- **Incremental by default.** `@syn.fn(memo=True)` skips unchanged files and reuses embeddings for unchanged chunks; `mount_table_target` upserts only the rows that moved and deletes orphans. Edit one function → one chunk is re-embedded.
+- **Incremental by default.** `@syn.task(cache=True)` skips unchanged files and reuses embeddings for unchanged chunks; `mount_table_target` upserts only the rows that moved and deletes orphans. Edit one function → one chunk is re-embedded.
 - **Live updates.** `live=True` + `synor update -L` keeps watching the filesystem and applies changes with low latency — always-fresh context for an agent.
 - **Plain Python, your stack.** Swap the embedding model (12k+ on Hugging Face), the chunking, or the vector store. No DSL.
 - **Consistent index & query.** The same embedder is shared by the indexing and query paths, so what you index is what you search.

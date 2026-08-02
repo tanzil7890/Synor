@@ -37,38 +37,38 @@ class SourceDataResult:
     content: str
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_dict_entry(entry: SourceDataEntry) -> None:
     # Track the actual number of component executions for this function.
     if entry.err:
         raise Exception("injected test exception (which is expected)")
     _metrics.increment("calls")
-    syn.declare_target_state(GlobalDictTarget.target_state(entry.name, entry.content))
+    syn.ensure_target_state(GlobalDictTarget.target_state(entry.name, entry.content))
 
 
-@syn.fn
+@syn.task
 async def _declare_dict_data() -> None:
     for entry in _source_data.values():
-        await syn.mount(syn.component_subpath(entry.name), _declare_dict_entry, entry)
+        await syn.spawn(syn.unit_path(entry.name), _declare_dict_entry, entry)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_transform_dict_entry(entry: SourceDataEntry) -> SourceDataResult:
     if entry.err:
         raise Exception("injected test exception (which is expected)")
     _metrics.increment("calls")
-    syn.declare_target_state(GlobalDictTarget.target_state(entry.name, entry.content))
+    syn.ensure_target_state(GlobalDictTarget.target_state(entry.name, entry.content))
     return SourceDataResult(name=entry.name, content=entry.content)
 
 
-@syn.fn
+@syn.task
 async def _declare_transform_dict_data() -> list[SourceDataResult]:
     # Deterministic ordering for stable assertions.
     results: list[SourceDataResult] = []
     for name in sorted(_source_data):
         entry = _source_data[name]
-        result = await syn.use_mount(
-            syn.component_subpath(entry.name), _declare_transform_dict_entry, entry
+        result = await syn.call(
+            syn.unit_path(entry.name), _declare_transform_dict_entry, entry
         )
         results.append(result)
     return results
@@ -344,10 +344,10 @@ def test_memo_invalidation_on_decorator_change() -> None:
     # Use a mutable container to hold the current module's function.
     current_module: list[object] = []
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.mount(syn.component_subpath("A"), mod.process_entry, "A", "value1")  # type: ignore[attr-defined, call-overload]
+        await syn.spawn(syn.unit_path("A"), mod.process_entry, "A", "value1")  # type: ignore[attr-defined, call-overload]
 
     app = syn.App(
         syn.AppConfig(
@@ -395,16 +395,16 @@ def test_memo_invalidation_on_decorator_change() -> None:
 
 
 # ============================================================================
-# Bound method memo tests — verifies that @syn.fn(memo=True) on a class method
+# Bound method memo tests — verifies that @syn.task(memo=True) on a class method
 # is respected when the bound method is passed to mount() / use_mount().
 # ============================================================================
 
 
 class _MemoMethodComponent:
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def declare_entry(self, entry: SourceDataEntry) -> None:
         _metrics.increment("calls")
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(entry.name, entry.content)
         )
 
@@ -412,16 +412,16 @@ class _MemoMethodComponent:
 _memo_method_obj = _MemoMethodComponent()
 
 
-@syn.fn
+@syn.task
 async def _mount_bound_method() -> None:
     for entry in _source_data.values():
-        await syn.mount(
-            syn.component_subpath(entry.name), _memo_method_obj.declare_entry, entry
+        await syn.spawn(
+            syn.unit_path(entry.name), _memo_method_obj.declare_entry, entry
         )
 
 
 def test_bound_method_memo_with_mount() -> None:
-    """@syn.fn(memo=True) on a bound method should be respected in mount()."""
+    """@syn.task(memo=True) on a bound method should be respected in mount()."""
     GlobalDictTarget.store.clear()
     _source_data.clear()
     _metrics.clear()
@@ -444,10 +444,10 @@ def test_bound_method_memo_with_mount() -> None:
 
 
 class _MemoMethodReturnComponent:
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def declare_transform_entry(self, entry: SourceDataEntry) -> SourceDataResult:
         _metrics.increment("calls")
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(entry.name, entry.content)
         )
         return SourceDataResult(name=entry.name, content=entry.content)
@@ -456,13 +456,13 @@ class _MemoMethodReturnComponent:
 _memo_method_return_obj = _MemoMethodReturnComponent()
 
 
-@syn.fn
+@syn.task
 async def _use_mount_bound_method() -> list[SourceDataResult]:
     results: list[SourceDataResult] = []
     for name in sorted(_source_data):
         entry = _source_data[name]
-        result = await syn.use_mount(
-            syn.component_subpath(entry.name),
+        result = await syn.call(
+            syn.unit_path(entry.name),
             _memo_method_return_obj.declare_transform_entry,
             entry,
         )
@@ -471,7 +471,7 @@ async def _use_mount_bound_method() -> list[SourceDataResult]:
 
 
 def test_bound_method_memo_with_use_mount() -> None:
-    """@syn.fn(memo=True) on a bound method should be respected in use_mount()."""
+    """@syn.task(memo=True) on a bound method should be respected in use_mount()."""
     GlobalDictTarget.store.clear()
     _source_data.clear()
     _metrics.clear()

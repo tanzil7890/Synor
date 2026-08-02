@@ -24,7 +24,7 @@ pip install synor[kafka]
 
 ## As source
 
-The `kafka` connector can treat a Kafka topic as a live keyed map — each message is an upsert or delete for a key. It returns a [`LiveMapFeed`](../advanced_topics/live_component#livemapfeed-and-livemapview) for use with `mount_each()`.
+The `kafka` connector can treat a Kafka topic as a live keyed map — each message is an upsert or delete for a key. It returns a [`LiveMapFeed`](../advanced_topics/live_component#livemapfeed-and-livemapview) for use with `spawn_each()`.
 
 ### Setting up a consumer
 
@@ -92,16 +92,16 @@ from synor.connectors import kafka, localfs
 import synor as syn
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_message(msg: Message, target: localfs.DirTarget) -> None:
     key = msg.key()
     value = msg.value()
     if isinstance(key, bytes):
         key = key.decode()
-    target.declare_file(filename=f"{key}.bin", content=value)
+    target.ensure_file(filename=f"{key}.bin", content=value)
 
 
-@syn.fn
+@syn.task
 async def app_main(outdir: pathlib.Path) -> None:
     target = await localfs.mount_dir_target(outdir)
 
@@ -111,7 +111,7 @@ async def app_main(outdir: pathlib.Path) -> None:
         "enable.auto.commit": "false",
     })
     items = kafka.topic_as_map(consumer, ["my-topic"])
-    await syn.mount_each(process_message, items, target)
+    await syn.spawn_each(process_message, items, target)
 
 
 app = syn.App(
@@ -236,7 +236,7 @@ topic_target = await kafka.mount_kafka_topic_target(
 Once a `KafkaTopicTarget` is resolved, declare target states to produce messages:
 
 ```python
-def KafkaTopicTarget.declare_target_state(
+def KafkaTopicTarget.ensure_target_state(
     self,
     *,
     key: bytes | str,
@@ -290,25 +290,25 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: localfs.File, topic_target: kafka.KafkaTopicTarget
 ) -> None:
     content = await file.read_bytes()
-    topic_target.declare_target_state(
+    topic_target.ensure_target_state(
         key=file.file_path.path.as_posix().encode(),
         value=content,
     )
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     topic_target = await kafka.mount_kafka_topic_target(
         KAFKA_PRODUCER, "file-contents"
     )
 
     files = localfs.walk_dir(localfs.FilePath(path="./data"))
-    await syn.mount_each(process_file, files.items(), topic_target)
+    await syn.spawn_each(process_file, files.items(), topic_target)
 
 
 app = syn.App(

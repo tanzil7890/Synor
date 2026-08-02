@@ -665,20 +665,20 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _RowValue | syn.NonExistenceType,
+        desired_state: _RowValue | syn.AbsentType,
         prev_possible_records: Collection[_RowFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_RowAction, _RowFingerprint] | None:
         key = _ROW_KEY_CHECKER.check(key)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             # Delete case - only if it might exist
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_RowAction(key=key, value=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         # Upsert case
@@ -789,19 +789,19 @@ class _VectorIndexHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _VectorIndexSpec | syn.NonExistenceType,
+        desired_state: _VectorIndexSpec | syn.AbsentType,
         prev_possible_records: Collection[_VectorIndexFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_VectorIndexAction, _VectorIndexFingerprint] | None:
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_VectorIndexAction(name=key, spec=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_object(desired_state)
@@ -873,19 +873,19 @@ class _FtsIndexHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _FtsIndexSpec | syn.NonExistenceType,
+        desired_state: _FtsIndexSpec | syn.AbsentType,
         prev_possible_records: Collection[_FtsIndexFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_FtsIndexAction, _FtsIndexFingerprint] | None:
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_FtsIndexAction(name=key, spec=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_object(desired_state)
@@ -970,7 +970,7 @@ class _TableAction(NamedTuple):
     """Action to perform on a table."""
 
     key: _TableKey
-    spec: _TableSpec | syn.NonExistenceType
+    spec: _TableSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
     column_actions: dict[str, statediff.DiffAction]
 
@@ -1007,7 +1007,7 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
                 if action.main_action in ("replace", "delete"):
                     await self._drop_table(conn, key.table_name)
 
-                if syn.is_non_existence(action.spec):
+                if syn.is_absent(action.spec):
                     outputs[i] = None
                     continue
 
@@ -1155,7 +1155,7 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _TableSpec | syn.NonExistenceType,
+        desired_state: _TableSpec | syn.AbsentType,
         prev_possible_records: Collection[_TableTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -1164,10 +1164,10 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
         | None
     ):
         key = _TableKey(*_TABLE_KEY_CHECKER.check(key))
-        tracking_record: _TableTrackingRecord | syn.NonExistenceType
+        tracking_record: _TableTrackingRecord | syn.AbsentType
 
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_table_composite_tracking_record_from_spec(
@@ -1251,7 +1251,7 @@ class TableTarget(
         self._provider = provider
         self._table_schema = table_schema
 
-    def declare_row(self: "TableTarget[RowT]", *, row: RowT) -> None:
+    def ensure_row(self: "TableTarget[RowT]", *, row: RowT) -> None:
         """
         Declare a row to be upserted to this table.
 
@@ -1262,7 +1262,7 @@ class TableTarget(
         row_dict = self._row_to_dict(row)
         # Extract primary key values
         pk_values = tuple(row_dict[pk] for pk in self._table_schema.primary_key)
-        syn.declare_target_state(self._provider.target_state(pk_values, row_dict))
+        syn.ensure_target_state(self._provider.target_state(pk_values, row_dict))
 
     def _row_to_dict(self, row: RowT) -> dict[str, Any]:
         """
@@ -1328,7 +1328,7 @@ class TableTarget(
             ef_construction=ef_construction,
         )
         att_provider = self._provider.attachment("vector_index")
-        syn.declare_target_state(att_provider.target_state(name, spec))
+        syn.ensure_target_state(att_provider.target_state(name, spec))
 
     def declare_fts_index(
         self: "TableTarget[RowT]",
@@ -1363,7 +1363,7 @@ class TableTarget(
             with_position=with_position,
         )
         att_provider = self._provider.attachment("fts_index")
-        syn.declare_target_state(att_provider.target_state(name, spec))
+        syn.ensure_target_state(att_provider.target_state(name, spec))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -1379,7 +1379,7 @@ def table_target(
     """
     Create a TargetState for a LanceDB table target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``mount_table_target()`` for a convenience wrapper.
 
     Args:
@@ -1399,7 +1399,7 @@ def table_target(
     return _table_provider.target_state(key, spec)
 
 
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[LanceAsyncConnection],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -1419,7 +1419,7 @@ def declare_table_target(
     Returns:
         A TableTarget that can be used to declare rows.
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         table_target(
             db,
             table_name,
@@ -1440,7 +1440,7 @@ async def mount_table_target(
     """
     Mount a table target and return a ready-to-use TableTarget.
 
-    Sugar over ``table_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``table_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         db: ContextKey for the LanceDB async connection.
@@ -1451,7 +1451,7 @@ async def mount_table_target(
     Returns:
         A TableTarget that can be used to declare rows.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         table_target(
             db,
             table_name,
@@ -1513,7 +1513,7 @@ __all__ = [
     "ValueEncoder",
     "connect",
     "connect_async",
-    "declare_table_target",
+    "ensure_table_target",
     "mount_table_target",
     "table_target",
 ]

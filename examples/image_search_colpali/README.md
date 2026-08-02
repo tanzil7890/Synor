@@ -20,7 +20,7 @@ The indexing path is short — there's no text to chunk, just one *multi-vector*
 The store does the heavy lifting on the query side: the query's bag of token vectors and an image's bag of patch vectors are scored late-interaction style — each query vector finds its best-matching patch, summed across the query. The only difference from the CLIP version is the *shape* of the embedding. Read it in [`pipeline.py`](pipeline.py):
 
 ```python
-@syn.fn(memo=True)   # unchanged image is never re-embedded
+@syn.task(cache=True)   # unchanged image is never re-embedded
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     content = await file.read()
     embedding = embed_image_bytes(content)              # list[list[float]] — multi-vector
@@ -48,7 +48,7 @@ schema = await qdrant.CollectionSchema.create(
 - **Multi-vector, not single.** ColPali emits a vector per patch and matches a query patch-by-patch — finer-grained than a single CLIP embedding on dense or text-heavy images.
 - **MaxSim in the store.** A `MultiVectorSchema` + `multivector_comparator="max_sim"` makes Qdrant do the late-interaction scoring; the query side just hands over the query's bag of vectors.
 - **Live by default.** The flow runs in live mode inside the API server; a new photo in `img/` is searchable within a second, no rebuild step.
-- **Incremental & self-cleaning.** `@syn.fn(memo=True)` skips unchanged images; each photo is its own processing component, so deleting one removes its Qdrant point automatically.
+- **Incremental & self-cleaning.** `@syn.task(cache=True)` skips unchanged images; each photo is its own processing component, so deleting one removes its Qdrant point automatically.
 - **Drop-in swap from CLIP.** Same Qdrant target, same fan-out, same FastAPI + React app — only the encoder and the collection's vector schema change.
 
 ## Run it

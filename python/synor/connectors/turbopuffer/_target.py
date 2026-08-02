@@ -314,19 +314,19 @@ class _RowHandler(syn.TargetHandler[Row, _RowFingerprint]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Row | syn.NonExistenceType,
+        desired_state: Row | syn.AbsentType,
         prev_possible_records: Collection[_RowFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_RowAction, _RowFingerprint] | None:
         row_id = _ROW_ID_CHECKER.check(key)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_RowAction(row_id=row_id, upsert=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         upsert = _row_to_upsert(desired_state, self._schema)
@@ -371,7 +371,7 @@ _NamespaceTrackingRecord = statediff.MutualTrackingRecord[_NamespaceTrackingReco
 
 class _NamespaceAction(NamedTuple):
     key: _NamespaceKey
-    spec: _NamespaceSpec | syn.NonExistenceType
+    spec: _NamespaceSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
 
 
@@ -402,7 +402,7 @@ class _NamespaceHandler(
                     # Namespace was deleted out-of-band (e.g. via the dashboard).
                     pass
 
-            if syn.is_non_existence(action.spec):
+            if syn.is_absent(action.spec):
                 outputs[i] = None
                 continue
 
@@ -420,7 +420,7 @@ class _NamespaceHandler(
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _NamespaceSpec | syn.NonExistenceType,
+        desired_state: _NamespaceSpec | syn.AbsentType,
         prev_possible_records: Collection[_NamespaceTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -431,10 +431,10 @@ class _NamespaceHandler(
         | None
     ):
         key = _NamespaceKey(*_NAMESPACE_KEY_CHECKER.check(key))
-        tracking_record: _NamespaceTrackingRecord | syn.NonExistenceType
+        tracking_record: _NamespaceTrackingRecord | syn.AbsentType
 
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_NamespaceTrackingRecordCore(
@@ -485,7 +485,7 @@ class NamespaceTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["NamespaceTarge
 
     Example:
         ```python
-        @syn.fn
+        @syn.task
         def process_doc(doc: Doc, target: NamespaceTarget) -> None:
             target.declare_row(turbopuffer.Row(
                 id=doc.id,
@@ -503,7 +503,7 @@ class NamespaceTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["NamespaceTarge
     ) -> None:
         self._provider = provider
 
-    def declare_row(
+    def ensure_row(
         self: "NamespaceTarget[syn.ResolvedS]",
         row: Row,
     ) -> None:
@@ -512,7 +512,7 @@ class NamespaceTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["NamespaceTarge
         Args:
             row: Row containing id, vector(s), and attributes.
         """
-        syn.declare_target_state(self._provider.target_state(row.id, row))
+        syn.ensure_target_state(self._provider.target_state(row.id, row))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -527,7 +527,7 @@ def namespace_target(
 ) -> "syn.TargetState[_RowHandler]":
     """Create a TargetState for a Turbopuffer namespace.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider, or with
+    Use with ``syn.attach_target()`` to mount and get a child provider, or with
     ``mount_namespace_target()`` for a convenience wrapper.
 
     Args:
@@ -556,7 +556,7 @@ def declare_namespace_target(
         schema: NamespaceSchema defining vector fields and distance metric.
         managed_by: Whether the namespace is managed by the system or user.
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         namespace_target(db, namespace_name, schema, managed_by=managed_by)
     )
     return NamespaceTarget(provider)
@@ -571,9 +571,9 @@ async def mount_namespace_target(
 ) -> "NamespaceTarget[syn.ResolvedS]":
     """Mount a namespace target and return a ready-to-use ``NamespaceTarget``.
 
-    Sugar over ``namespace_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``namespace_target()`` + ``syn.attach_target()`` + wrapping.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         namespace_target(db, namespace_name, schema, managed_by=managed_by)
     )
     return NamespaceTarget(provider)

@@ -15,19 +15,19 @@ def set_metrics(metrics: Metrics) -> None:
 
 
 class Processor:
-    """A class with @syn.fn decorated methods — v2 bodies."""
+    """A class with @syn.task decorated methods — v2 bodies."""
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def transform_memo(self, key: str, value: str) -> str:
         assert _metrics is not None
         _metrics.increment("transform_memo")
         return "v2: " + value
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def declare_entry_memo(self, key: str, value: str) -> None:
         assert _metrics is not None
         _metrics.increment("declare_entry_memo")
-        syn.declare_target_state(GlobalDictTarget.target_state(key, "v2: " + value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, "v2: " + value))
 
 
 processor = Processor()

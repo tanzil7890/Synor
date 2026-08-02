@@ -21,22 +21,22 @@ A deck fans out to **slides**, and each slide produces text, audio, and a vector
 `process_file` renders the deck, then mounts one `process_slide` component per page. Each slide component runs the vision LLM, synthesizes audio *and* embeds the notes with `asyncio.gather`, and declares its own row. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)  # unchanged slide replays its previously declared row
+@syn.task(cache=True)  # unchanged slide replays its previously declared row
 async def process_slide(slide: SlidePage, filename: str, table: lancedb.TableTarget[SlideRecord]) -> None:
     notes = await extract_speaker_notes(slide.image)                  # vision LLM
     voice, embedding = await asyncio.gather(
         text_to_speech(notes, syn.use_context(TTS_VOICE)),  # Pocket TTS — local CPU
         syn.use_context(EMBEDDER).embed(notes),     # sentence-transformer
     )
-    table.declare_row(row=SlideRecord(
+    table.ensure_row(row=SlideRecord(
         id=f"{filename}#{slide.page_number}", filename=filename, page=slide.page_number,
         speaker_notes=notes, voice=voice, embedding=embedding,
     ))
 
-@syn.fn(memo=True)  # unchanged deck skips reading and rendering entirely
+@syn.task(cache=True)  # unchanged deck skips reading and rendering entirely
 async def process_file(file: FileLike, table: lancedb.TableTarget[SlideRecord]) -> None:
     slides = await pdf_to_slides(await file.read())
-    await syn.mount_each(
+    await syn.spawn_each(
         process_slide,
         ((slide.page_number, slide) for slide in slides),
         str(file.file_path.path),

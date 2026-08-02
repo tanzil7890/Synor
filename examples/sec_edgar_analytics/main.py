@@ -161,7 +161,7 @@ async def _index_text(
     for chunk in _splitter.split(
         _scrub_pii(text), chunk_size=1000, chunk_overlap=200, language="markdown"
     ):
-        table.declare_row(
+        table.ensure_row(
             row=FilingChunk(
                 chunk_id=_chunk_id(
                     filename, chunk.start.char_offset, chunk.end.char_offset
@@ -178,7 +178,7 @@ async def _index_text(
         )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_filing(
     file: FileLike, table: doris.DorisTableTarget[FilingChunk]
 ) -> None:
@@ -193,7 +193,7 @@ async def process_filing(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_facts(
     file: FileLike, table: doris.DorisTableTarget[FilingChunk]
 ) -> None:
@@ -236,7 +236,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     table = await doris.mount_table_target(
         DORIS_DB,
@@ -252,13 +252,13 @@ async def app_main() -> None:
         localfs.FilePath(path="./data/filings"),
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.txt"]),
     )
-    await syn.mount_each(process_filing, txt.items(), table)
+    await syn.spawn_each(process_filing, txt.items(), table)
 
     facts = localfs.walk_dir(
         localfs.FilePath(path="./data/company_facts"),
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.json"]),
     )
-    await syn.mount_each(process_facts, facts.items(), table)
+    await syn.spawn_each(process_facts, facts.items(), table)
 
 
 app = syn.App(syn.AppConfig(name="SECFilingAnalytics"), app_main)

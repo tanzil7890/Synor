@@ -34,12 +34,12 @@ class _ParentOrderingStore:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
     ) -> syn.TargetReconcileOutput[tuple[str, Any], Any] | None:
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             return None
         if not prev_may_be_missing and all(
             prev == desired_state for prev in prev_possible_records
@@ -58,15 +58,15 @@ _parent_ordering_provider = syn.register_root_target_states_provider(
 )
 
 
-@syn.fn
+@syn.task
 async def _delayed_child_target() -> None:
     await asyncio.sleep(0.05)
-    syn.declare_target_state(GlobalDictTarget.target_state("child", "ready"))
+    syn.ensure_target_state(GlobalDictTarget.target_state("child", "ready"))
 
 
 async def _parent_with_background_child() -> None:
-    await syn.mount(syn.component_subpath("child"), _delayed_child_target)
-    syn.declare_target_state(_parent_ordering_provider.target_state("parent", "ready"))
+    await syn.spawn(syn.unit_path("child"), _delayed_child_target)
+    syn.ensure_target_state(_parent_ordering_provider.target_state("parent", "ready"))
 
 
 def test_parent_submit_waits_for_background_child_ready() -> None:

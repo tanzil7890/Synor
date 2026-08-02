@@ -12,19 +12,19 @@ All APIs live directly on the `syn` module alias. There is no separate `synor.as
 
 ---
 
-## `@syn.fn` Decorator
+## `@syn.task` Decorator
 
 Mark a function as a Synor processing function.
 
 ```python
-@syn.fn
+@syn.task
 async def my_function(arg1: str) -> None: ...
 
-@syn.fn(memo=True, version=1)
+@syn.task(cache=True, version=1)
 async def expensive_fn(data: str) -> Result: ...
 
 # Force async interface for a sync function (useful for batching)
-@syn.fn.as_async(memo=True, batching=True)
+@syn.task.as_async(cache=True, batching=True)
 def batch_embed(texts: list[str]) -> list[NDArray]: ...
 ```
 
@@ -40,18 +40,18 @@ def batch_embed(texts: list[str]) -> list[NDArray]: ...
 
 ## Mount APIs (all async)
 
-All mount APIs accept an optional `ComponentSubpath` as their first argument. When omitted, the subpath is auto-derived from `Symbol(fn.__name__)`. Provide an explicit subpath when mounting the same function multiple times, using multi-part paths, or needing a specific path name.
+All mount APIs accept an optional `UnitPath` as their first argument. When omitted, the subpath is auto-derived from `Symbol(fn.__name__)`. Provide an explicit subpath when mounting the same function multiple times, using multi-part paths, or needing a specific path name.
 
-### `syn.mount()`
+### `syn.spawn()`
 
 Mount a processing component in the background.
 
 ```python
 # Subpath auto-derived from fn.__name__
-handle = await syn.mount(processor_fn, *args, **kwargs)
+handle = await syn.spawn(processor_fn, *args, **kwargs)
 
 # Explicit subpath
-handle = await syn.mount(syn.component_subpath("name"), processor_fn, *args, **kwargs)
+handle = await syn.spawn(syn.unit_path("name"), processor_fn, *args, **kwargs)
 
 await handle.ready()  # Optional: wait until component finishes
 ```
@@ -61,18 +61,18 @@ await handle.ready()  # Optional: wait until component finishes
 - `processor_fn` -- Function (or LiveComponent class) to run.
 - `*args, **kwargs` -- Arguments passed to the function.
 
-**Returns:** `ComponentMountHandle`
+**Returns:** `SpawnHandle`
 
-### `syn.use_mount()`
+### `syn.call()`
 
 Mount a dependent component and return its result. Parent depends on the child.
 
 ```python
 # Subpath auto-derived from fn.__name__
-result = await syn.use_mount(init_fn, *args, **kwargs)
+result = await syn.call(init_fn, *args, **kwargs)
 
 # Explicit subpath
-result = await syn.use_mount(syn.component_subpath("setup"), init_fn, *args, **kwargs)
+result = await syn.call(syn.unit_path("setup"), init_fn, *args, **kwargs)
 ```
 
 **Parameters:**
@@ -82,16 +82,16 @@ result = await syn.use_mount(syn.component_subpath("setup"), init_fn, *args, **k
 
 **Returns:** The return value of `processor_fn`.
 
-### `syn.mount_each()`
+### `syn.spawn_each()`
 
 Mount one component per item in a keyed iterable. Preferred for processing lists.
 
 ```python
 # Subpath auto-derived from fn.__name__
-await syn.mount_each(process_file, files.items(), *extra_args)
+await syn.spawn_each(process_file, files.items(), *extra_args)
 
 # Explicit subpath
-await syn.mount_each(syn.component_subpath("process"), process_file, files.items(), table)
+await syn.spawn_each(syn.unit_path("process"), process_file, files.items(), table)
 ```
 
 **Parameters:**
@@ -100,14 +100,14 @@ await syn.mount_each(syn.component_subpath("process"), process_file, files.items
 - `items` -- Keyed iterable of `(StableKey, T)` pairs, or a `LiveMapFeed` for live mode.
 - `*args, **kwargs` -- Additional arguments passed to `fn` after the item.
 
-**Returns:** `ComponentMountHandle`
+**Returns:** `SpawnHandle`
 
-### `syn.mount_target()`
+### `syn.attach_target()`
 
 Mount a target state, ensuring the container is applied before returning the child provider.
 
 ```python
-provider = await syn.mount_target(target_state)
+provider = await syn.attach_target(target_state)
 ```
 
 Prefer connector convenience methods (`postgres.mount_table_target()`, etc.) which call this internally.
@@ -127,22 +127,22 @@ results = await syn.map(process_chunk, chunks, *extra_args)
 
 **Returns:** `list[T]`
 
-### `syn.component_subpath()`
+### `syn.unit_path()`
 
 Create a stable component path for mounting.
 
 ```python
-syn.component_subpath("setup")
-syn.component_subpath("file", str(file_path))
-syn.component_subpath("record", record.id)
+syn.unit_path("setup")
+syn.unit_path("file", str(file_path))
+syn.unit_path("record", record.id)
 
 # Chaining with /
-subpath = syn.component_subpath("a") / "b" / "c"
+subpath = syn.unit_path("a") / "b" / "c"
 
 # Context manager form (applies to all nested mount calls)
-with syn.component_subpath("process"):
+with syn.unit_path("process"):
     for f in files:
-        await syn.mount(syn.component_subpath(str(f.path)), process_file, f)
+        await syn.spawn(syn.unit_path(str(f.path)), process_file, f)
 ```
 
 **StableKey types:** `str | int | bool | bytes | uuid.UUID | Symbol | tuple[StableKey, ...]`
@@ -274,7 +274,7 @@ builder.set_exception_handler(my_handler)
 
 ```python
 async with syn.exception_handler(my_handler):
-    await syn.mount_each(process_file, files.items(), table)
+    await syn.spawn_each(process_file, files.items(), table)
 ```
 
 ### Handler Signature

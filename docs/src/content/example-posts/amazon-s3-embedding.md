@@ -58,10 +58,10 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 
 ## List objects from the bucket
 
-`app_main` mounts the Postgres table exactly as in the base example, then swaps `localfs.walk_dir` for `amazon_s3.list_objects` — same `path_matcher` glob, same `mount_each` fan-out.
+`app_main` mounts the Postgres table exactly as in the base example, then swaps `localfs.walk_dir` for `amazon_s3.list_objects` — same `path_matcher` glob, same `spawn_each` fan-out.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -79,7 +79,7 @@ async def app_main() -> None:
         prefix=S3_PREFIX,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
 `list_objects` yields one `S3File` per matching object; `prefix` scopes the listing server-side, and the glob filters the rest. `process_file` then reads, chunks, and embeds each one — that code is identical to the base example, so see it there.
@@ -123,7 +123,7 @@ The most semantically similar chunks come back ranked — even when they share n
 
 ## Incremental updates
 
-Synor keeps the index in sync with the bucket and does the **minimum work** to get there. `@syn.fn(memo=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged — and `mount_table_target` decides what to *write*, deriving each row's `id` from its chunk text so it upserts only the rows that actually changed and deletes rows whose source object is gone.
+Synor keeps the index in sync with the bucket and does the **minimum work** to get there. `@syn.task(cache=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged — and `mount_table_target` decides what to *write*, deriving each row's `id` from its chunk text so it upserts only the rows that actually changed and deletes rows whose source object is gone.
 
 - **An object is added** — only that file is chunked and embedded; the rest is untouched.
 - **An object is edited** — it is re-chunked; unchanged chunks keep their `id` and embedding, new chunks are embedded and inserted, and stale ones are deleted.

@@ -37,7 +37,7 @@ class PatientExtractor(dspy.Module):
         return result.patient
 
 
-@syn.fn
+@syn.task
 def extract_patient(pdf_content: bytes) -> Patient:
     """Extract patient information from PDF content."""
     pdf_doc = pymupdf.open(stream=pdf_content, filetype="pdf")
@@ -55,26 +55,26 @@ def extract_patient(pdf_content: bytes) -> Patient:
     return patient
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_patient_form(file: FileLike, outdir: pathlib.Path) -> None:
     """Process a patient intake form PDF and extract structured information."""
     content = await file.read()
     patient_info = extract_patient(content)
     patient_json = patient_info.model_dump_json(indent=2)
     output_filename = file.file_path.path.stem + ".json"
-    localfs.declare_file(
+    localfs.ensure_file(
         outdir / output_filename, patient_json, create_parent_dirs=True
     )
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     """Main application function that processes patient intake forms."""
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     )
-    await syn.mount_each(process_patient_form, files.items(), outdir)
+    await syn.spawn_each(process_patient_form, files.items(), outdir)
 
 
 lm = dspy.LM("gemini/gemini-2.5-flash")

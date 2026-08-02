@@ -26,14 +26,14 @@ class AnyKeyDictTargetStateStore:
     def _sink(
         self,
         context_provider: syn.ContextProvider,
-        actions: Collection[tuple[Any, DictDataWithPrev | syn.NonExistenceType]],
+        actions: Collection[tuple[Any, DictDataWithPrev | syn.AbsentType]],
         /,
     ) -> None:
         if self.sink_exception:
             raise ValueError("injected sink exception")
         with self._lock:
             for key, value in actions:
-                if syn.is_non_existence(value):
+                if syn.is_absent(value):
                     self.data.pop(key, None)
                     self.metrics.increment("delete")
                 else:
@@ -44,7 +44,7 @@ class AnyKeyDictTargetStateStore:
     async def _async_sink(
         self,
         context_provider: syn.ContextProvider,
-        actions: Collection[tuple[Any, DictDataWithPrev | syn.NonExistenceType]],
+        actions: Collection[tuple[Any, DictDataWithPrev | syn.AbsentType]],
         /,
     ) -> None:
         self._sink(context_provider, actions)
@@ -52,17 +52,17 @@ class AnyKeyDictTargetStateStore:
     def reconcile(
         self,
         key: Any,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
     ) -> (
         syn.TargetReconcileOutput[
-            tuple[Any, DictDataWithPrev | syn.NonExistenceType], Any
+            tuple[Any, DictDataWithPrev | syn.AbsentType], Any
         ]
         | None
     ):
         # Short-circuit no-change case
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if len(prev_possible_records) == 0:
                 return None
         else:
@@ -72,8 +72,8 @@ class AnyKeyDictTargetStateStore:
                 return None
 
         new_value = (
-            syn.NON_EXISTENCE
-            if syn.is_non_existence(desired_state)
+            syn.ABSENT
+            if syn.is_absent(desired_state)
             else DictDataWithPrev(
                 data=desired_state,
                 prev=prev_possible_records,
@@ -105,7 +105,7 @@ class AnyKeyTarget:
 
 def _declare_any_key_data(data: dict[Any, Any]) -> None:
     for key, value in data.items():
-        syn.declare_target_state(AnyKeyTarget.target_state(key, value))
+        syn.ensure_target_state(AnyKeyTarget.target_state(key, value))
 
 
 def test_valid_stable_keys() -> None:
@@ -149,7 +149,7 @@ def test_valid_stable_keys() -> None:
     AnyKeyTarget.store.clear()
 
     def declare_none_key() -> None:
-        syn.declare_target_state(AnyKeyTarget.target_state(None, "none_val"))
+        syn.ensure_target_state(AnyKeyTarget.target_state(None, "none_val"))
 
     app = syn.App(
         syn.AppConfig(name="test_none_key", environment=synor_env), declare_none_key
@@ -166,7 +166,7 @@ def test_invalid_keys() -> None:
         pass
 
     def declare_invalid_key() -> None:
-        syn.declare_target_state(AnyKeyTarget.target_state(Foo(), "val"))  # type: ignore[arg-type]
+        syn.ensure_target_state(AnyKeyTarget.target_state(Foo(), "val"))  # type: ignore[arg-type]
 
     app = syn.App(
         syn.AppConfig(name="test_invalid_keys", environment=synor_env),
@@ -183,7 +183,7 @@ def test_nested_container_keys() -> None:
     key_expected = (1, 2)
 
     def declare_list_key() -> None:
-        syn.declare_target_state(AnyKeyTarget.target_state(key_input, "val"))  # type: ignore[arg-type]
+        syn.ensure_target_state(AnyKeyTarget.target_state(key_input, "val"))  # type: ignore[arg-type]
 
     app = syn.App(
         syn.AppConfig(name="test_nested_keys", environment=synor_env), declare_list_key

@@ -1,4 +1,4 @@
-"""Tests for @syn.fn decorator on class methods."""
+"""Tests for @syn.task decorator on class methods."""
 
 from dataclasses import dataclass
 
@@ -37,19 +37,19 @@ class Processor:
     def __init__(self, prefix: str):
         self.prefix = prefix
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def transform(self, entry: SourceDataEntry) -> str:
         _metrics.increment("call.transform")
         return f"{self.prefix}: {entry.content}"
 
-    @syn.fn
+    @syn.task
     def process_entry(self, key: str, entry: SourceDataEntry) -> None:
         transformed = self.transform(entry)  # type: ignore[call-arg, arg-type]
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_regular_method() -> None:
-    """Test @syn.fn on regular instance methods."""
+    """Test @syn.task on regular instance methods."""
     GlobalDictTarget.store.clear()
     _metrics.clear()
 
@@ -59,7 +59,7 @@ def test_regular_method() -> None:
         "B": SourceDataEntry(name="B", version=1, content="contentB"),
     }
 
-    @syn.fn
+    @syn.task
     def process_all() -> None:
         for key, entry in source_data.items():
             processor.process_entry(key, entry)  # type: ignore[call-arg, arg-type]
@@ -90,7 +90,7 @@ def test_regular_method_memo_key_on_self() -> None:
 
     processor = MemoKeyProcessor("processed")
 
-    @syn.fn
+    @syn.task
     def run() -> None:
         first = processor.transform(
             SourceDataEntry(name="A", version=1, content="contentA1")
@@ -128,7 +128,7 @@ class MemoKeyProcessor:
         self.prefix = prefix
         self.noise = "noise"
 
-    @syn.fn(memo=True, memo_key={"self": lambda self: self.prefix})
+    @syn.task(cache=True, memo_key={"self": lambda self: self.prefix})
     def transform(self, entry: SourceDataEntry) -> str:
         _metrics.increment("call.memo_key_transform")
         return f"{self.prefix}: {entry.content}"
@@ -143,22 +143,22 @@ class StaticProcessor:
     """Test class with static methods."""
 
     @staticmethod
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def transform(entry: SourceDataEntry) -> str:
         """Static method with memoization."""
         _metrics.increment("call.static_transform")
         return f"static: {entry.content}"
 
     @staticmethod
-    @syn.fn
+    @syn.task
     def process_entry(key: str, entry: SourceDataEntry) -> None:
         """Static method that uses another memoized static method."""
         transformed = StaticProcessor.transform(entry)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_static_method() -> None:
-    """Test @syn.fn on static methods."""
+    """Test @syn.task on static methods."""
     GlobalDictTarget.store.clear()
     _metrics.clear()
 
@@ -167,7 +167,7 @@ def test_static_method() -> None:
         "B": SourceDataEntry(name="B", version=1, content="contentB"),
     }
 
-    @syn.fn
+    @syn.task
     def process_all() -> None:
         for key, entry in source_data.items():
             StaticProcessor.process_entry(key, entry)
@@ -203,22 +203,22 @@ class ClassProcessor:
     default_prefix = "class"
 
     @classmethod
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def transform(cls, entry: SourceDataEntry) -> str:
         """Class method with memoization."""
         _metrics.increment("call.class_transform")
         return f"{cls.default_prefix}: {entry.content}"
 
     @classmethod
-    @syn.fn
+    @syn.task
     def process_entry(cls, key: str, entry: SourceDataEntry) -> None:
         """Class method that uses another memoized class method."""
         transformed = cls.transform(entry)  # type: ignore[call-arg, arg-type]
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_class_method() -> None:
-    """Test @syn.fn on class methods."""
+    """Test @syn.task on class methods."""
     GlobalDictTarget.store.clear()
     _metrics.clear()
 
@@ -227,7 +227,7 @@ def test_class_method() -> None:
         "B": SourceDataEntry(name="B", version=1, content="contentB"),
     }
 
-    @syn.fn
+    @syn.task
     def process_all() -> None:
         for key, entry in source_data.items():
             ClassProcessor.process_entry(key, entry)  # type: ignore[call-arg, arg-type]
@@ -263,21 +263,21 @@ class AsyncProcessor:
     def __init__(self, prefix: str):
         self.prefix = prefix
 
-    @syn.fn.as_async(memo=True)
+    @syn.task.as_async(cache=True)
     async def transform(self, entry: SourceDataEntry) -> str:
         """Async instance method with memoization."""
         _metrics.increment("call.async_transform")
         return f"{self.prefix}: {entry.content}"
 
-    @syn.fn
+    @syn.task
     async def process_entry(self, key: str, entry: SourceDataEntry) -> None:
         """Async instance method that uses another memoized async method."""
         transformed = await self.transform(entry)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_async_method() -> None:
-    """Test @syn.fn on async instance methods."""
+    """Test @syn.task on async instance methods."""
     GlobalDictTarget.store.clear()
     _metrics.clear()
 
@@ -287,7 +287,7 @@ def test_async_method() -> None:
         "B": SourceDataEntry(name="B", version=1, content="contentB"),
     }
 
-    @syn.fn
+    @syn.task
     async def process_all() -> None:
         for key, entry in source_data.items():
             await processor.process_entry(key, entry)
@@ -323,22 +323,22 @@ class AsyncClassProcessor:
     default_prefix = "async_class"
 
     @classmethod
-    @syn.fn.as_async(memo=True)
+    @syn.task.as_async(cache=True)
     async def transform(cls, entry: SourceDataEntry) -> str:
         """Async class method with memoization."""
         _metrics.increment("call.async_class_transform")
         return f"{cls.default_prefix}: {entry.content}"
 
     @classmethod
-    @syn.fn
+    @syn.task
     async def process_entry(cls, key: str, entry: SourceDataEntry) -> None:
         """Async class method that uses another memoized async class method."""
         transformed = await cls.transform(entry)  # type: ignore[call-arg, arg-type]
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_async_class_method() -> None:
-    """Test @syn.fn on async class methods."""
+    """Test @syn.task on async class methods."""
     GlobalDictTarget.store.clear()
     _metrics.clear()
 
@@ -347,7 +347,7 @@ def test_async_class_method() -> None:
         "B": SourceDataEntry(name="B", version=1, content="contentB"),
     }
 
-    @syn.fn
+    @syn.task
     async def process_all() -> None:
         for key, entry in source_data.items():
             await AsyncClassProcessor.process_entry(key, entry)  # type: ignore[call-arg, arg-type]

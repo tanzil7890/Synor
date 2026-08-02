@@ -106,7 +106,7 @@ def declare_collection_target(
 Once a `CollectionTarget` is resolved, declare documents to be upserted:
 
 ```python
-def CollectionTarget.declare_row(self, *, row: RowT) -> None
+def CollectionTarget.ensure_row(self, *, row: RowT) -> None
 ```
 
 The primary-key value becomes the document `id` (converted to `str`).
@@ -278,7 +278,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
         yield
 
 
-@syn.fn
+@syn.task
 async def index_docs(docs: list[Doc]) -> None:
     target = await zvec.mount_collection_target(
         ZVEC_DB,
@@ -286,5 +286,5 @@ async def index_docs(docs: list[Doc]) -> None:
         await zvec.CollectionSchema.from_class(Doc, primary_key=["id"]),
     )
     for doc in docs:
-        target.declare_row(row=doc)
+        target.ensure_row(row=doc)
 ```

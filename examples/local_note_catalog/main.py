@@ -27,24 +27,24 @@ def _note_record(text: str) -> dict[str, object]:
     }
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
     record = _note_record(await file.read_text())
-    localfs.declare_file(
+    localfs.ensure_file(
         catalog_dir / f"{file.file_path.path.stem}.json",
         json.dumps(record, indent=2) + "\n",
         create_parent_dirs=True,
     )
 
 
-@syn.fn
+@syn.task
 async def app_main(notes_dir: pathlib.Path, catalog_dir: pathlib.Path) -> None:
     notes = localfs.walk_dir(
         notes_dir,
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(catalog_note, notes.items(), catalog_dir)
+    await syn.spawn_each(catalog_note, notes.items(), catalog_dir)
 
 
 app = syn.App(

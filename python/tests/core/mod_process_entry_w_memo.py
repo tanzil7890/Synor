@@ -12,8 +12,8 @@ def set_metrics(metrics: Metrics) -> None:
     _metrics = metrics
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def process_entry(key: str, value: str) -> None:
     assert _metrics is not None
     _metrics.increment("calls")
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))

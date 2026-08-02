@@ -16,12 +16,12 @@ _EXTERNAL: dict[str, Any] = {}
 
 def _apply(
     context_provider: syn.ContextProvider,
-    actions: Collection[tuple[str, Any | syn.NonExistenceType]],
+    actions: Collection[tuple[str, Any | syn.AbsentType]],
     /,
 ) -> None:
     del context_provider
     for key, value in actions:
-        if syn.is_non_existence(value):
+        if syn.is_absent(value):
             _EXTERNAL.pop(key, None)
         else:
             _EXTERNAL[key] = value
@@ -34,17 +34,17 @@ class _Handler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
         /,
-    ) -> syn.TargetReconcileOutput[tuple[str, Any | syn.NonExistenceType], Any] | None:
+    ) -> syn.TargetReconcileOutput[tuple[str, Any | syn.AbsentType], Any] | None:
         del prev_may_be_missing
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records:
                 return None
-            value: Any | syn.NonExistenceType = syn.NON_EXISTENCE
+            value: Any | syn.AbsentType = syn.ABSENT
         else:
             # Always reapply so this fresh process reconstructs the fake
             # external target from the copied tracking state.
@@ -62,18 +62,18 @@ _PROVIDER = syn.register_root_target_states_provider(
 )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _legacy_child() -> None:
-    syn.declare_target_state(
+    syn.ensure_target_state(
         _PROVIDER.target_state("beta", {"revision": 1, "value": "child"})
     )
 
 
 async def _main() -> None:
-    syn.declare_target_state(
+    syn.ensure_target_state(
         _PROVIDER.target_state("alpha", {"revision": 1, "value": "root"})
     )
-    await syn.mount(syn.component_subpath("legacy-child"), _legacy_child)
+    await syn.spawn(syn.unit_path("legacy-child"), _legacy_child)
 
 
 @pytest.mark.asyncio

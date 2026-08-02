@@ -13,7 +13,7 @@ native `synor::lancedb` connector instead of Postgres/pgvector.
 | Concern          | Python                                   | Rust (this example)                                |
 | ---------------- | ---------------------------------------- | -------------------------------------------------- |
 | Source           | `localfs.walk_dir`                       | `synor::fs::walk`                              |
-| Per-file compute | `@syn.fn(memo=True) process_file`       | `#[synor::function(memo)] process_file`         |
+| Per-file compute | `@syn.task(cache=True) process_file`       | `#[synor::function(memo)] process_file`         |
 | Language detect  | `detect_code_language`                   | `synor_ops_text::prog_langs::detect_language`   |
 | Chunking         | `RecursiveSplitter` (1000/300/300)       | `synor_ops_text` `RecursiveChunker` (1000/300/300) |
 | Embeddings       | `sentence-transformers/all-MiniLM-L6-v2` | `fastembed` `AllMiniLML6V2` (same model, 384-dim)   |

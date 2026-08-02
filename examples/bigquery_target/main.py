@@ -90,12 +90,12 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_order(
     order: SourceOrder,
     table: bigquery.TableTarget[BigQueryOrder],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=BigQueryOrder(
             order_id=order.order_id,
             customer=order.customer,
@@ -109,7 +109,7 @@ async def process_order(
     )
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     table = await bigquery.mount_table_target(
         BIGQUERY,
@@ -122,7 +122,7 @@ async def app_main() -> None:
         dataset=DATASET,
     )
 
-    await syn.mount_each(
+    await syn.spawn_each(
         process_order,
         ((order.order_id, order) for order in SAMPLE_ORDERS),
         table,

@@ -51,7 +51,7 @@ async def test_async_default_env(_default_async_env: None) -> None:
     assert _env_db_path.exists()
 
 
-@syn.fn.as_async()
+@syn.task.as_async()
 async def trivial_fn(s: str, i: int) -> str:
     assert isinstance(syn.use_context(_RESOURCE_KEY), _Resource)
     return f"{s} {i}"

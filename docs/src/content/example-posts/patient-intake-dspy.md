@@ -115,7 +115,7 @@ The model is configured once at module load — `dspy.configure(lm=dspy.LM("gemi
 `extract_patient` is the one custom transform. It rasterizes every page of the PDF to a PNG with PyMuPDF (at 2× scale, so small print stays legible), wraps each page as a `dspy.Image`, and runs the extractor. No text extraction, no Markdown conversion — the model reads the rendered form directly.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 def extract_patient(pdf_content: bytes) -> Patient:
     """Extract patient information from PDF content."""
     pdf_doc = pymupdf.open(stream=pdf_content, filetype="pdf")
@@ -133,7 +133,7 @@ def extract_patient(pdf_content: bytes) -> Patient:
     return patient
 ```
 
-`@syn.fn` makes this a Synor function so the engine can track it. Rendering at `Matrix(2, 2)` matters: forms are full of small, hand-entered text, and the extra resolution is the difference between the model reading a zip code and guessing one.
+`@syn.task` makes this a Synor function so the engine can track it. Rendering at `Matrix(2, 2)` matters: forms are full of small, hand-entered text, and the extra resolution is the difference between the model reading a zip code and guessing one.
 
 ## Process a file
 
@@ -142,33 +142,33 @@ def extract_patient(pdf_content: bytes) -> Patient:
 `process_patient_form` runs once per PDF. It reads the file's bytes, extracts the `Patient`, serializes it to pretty-printed JSON, and declares one output file named after the source form.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_patient_form(file: FileLike, outdir: pathlib.Path) -> None:
     """Process a patient intake form PDF and extract structured information."""
     content = await file.read()
     patient_info = extract_patient(content)
     patient_json = patient_info.model_dump_json(indent=2)
     output_filename = file.file_path.path.stem + ".json"
-    localfs.declare_file(
+    localfs.ensure_file(
         outdir / output_filename, patient_json, create_parent_dirs=True
     )
 ```
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a form's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never re-run the (paid, slow) vision extraction on a form you've already processed. `localfs.declare_file` declares the JSON as a target state; Synor writes, rewrites, or deletes it to match.
+`@syn.task` with `cache=True` is what makes this incremental: if a form's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never re-run the (paid, slow) vision extraction on a form you've already processed. `localfs.ensure_file` declares the JSON as a target state; Synor writes, rewrites, or deletes it to match.
 
 ## Define the main function
 
 `app_main` wires the source to the target. It walks the source directory for PDFs and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     """Main application function that processes patient intake forms."""
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     )
-    await syn.mount_each(process_patient_form, files.items(), outdir)
+    await syn.spawn_each(process_patient_form, files.items(), outdir)
 
 
 app = syn.App(
@@ -179,7 +179,7 @@ app = syn.App(
 )
 ```
 
-`walk_dir` scans the filesystem source for `*.pdf` files, and `mount_each` runs one component per file so the engine can track and update them independently. Each component owns exactly one output JSON, so the mapping from form to record is one-to-one — and when a form disappears, its JSON is cleaned up automatically.
+`walk_dir` scans the filesystem source for `*.pdf` files, and `spawn_each` runs one component per file so the engine can track and update them independently. Each component owns exactly one output JSON, so the mapping from form to record is one-to-one — and when a form disappears, its JSON is cleaned up automatically.
 
 ## Run the pipeline
 
@@ -202,7 +202,7 @@ Open one and you'll see the full `Patient` record — name, date of birth, addre
 
 ## Incremental updates
 
-Synor keeps the output JSON in sync with your forms and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a form is skipped when its bytes and the function's code are both unchanged, so the vision model never re-reads a form you've already extracted. `mount_each` decides what to *write* — each component owns one JSON file, so the engine creates, rewrites, or deletes exactly the files that changed.
+Synor keeps the output JSON in sync with your forms and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a form is skipped when its bytes and the function's code are both unchanged, so the vision model never re-reads a form you've already extracted. `spawn_each` decides what to *write* — each component owns one JSON file, so the engine creates, rewrites, or deletes exactly the files that changed.
 
 - **A form is added** — only that PDF is rendered and extracted; its JSON is written. The rest is untouched.
 - **A form is replaced** — it is re-rendered and re-extracted, and its single JSON is rewritten.

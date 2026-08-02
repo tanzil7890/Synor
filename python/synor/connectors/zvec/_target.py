@@ -659,19 +659,19 @@ class _DocHandler(syn.TargetHandler[_DocValue, bytes]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _DocValue | syn.NonExistenceType,
+        desired_state: _DocValue | syn.AbsentType,
         prev_possible_records: Collection[bytes],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_DocAction, bytes] | None:
         doc_id = _DOC_ID_CHECKER.check(key)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_DocAction(doc_id=doc_id, value=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_object(
@@ -755,7 +755,7 @@ def _tracking_core_from_spec(spec: _CollectionSpec) -> _CollectionTrackingRecord
 
 class _CollectionAction(NamedTuple):
     key: _CollectionKey
-    spec: _CollectionSpec | syn.NonExistenceType
+    spec: _CollectionSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
 
 
@@ -779,7 +779,7 @@ def _apply_collection_actions(
             if action.main_action in ("replace", "delete"):
                 conn.destroy(key.collection_name)
 
-            if syn.is_non_existence(action.spec):
+            if syn.is_absent(action.spec):
                 outputs[i] = None
                 continue
 
@@ -808,7 +808,7 @@ class _CollectionHandler(
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _CollectionSpec | syn.NonExistenceType,
+        desired_state: _CollectionSpec | syn.AbsentType,
         prev_possible_records: Collection[_CollectionTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -819,9 +819,9 @@ class _CollectionHandler(
         | None
     ):
         key = _CollectionKey(*_COLLECTION_KEY_CHECKER.check(key))
-        tracking_record: _CollectionTrackingRecord | syn.NonExistenceType
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        tracking_record: _CollectionTrackingRecord | syn.AbsentType
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_tracking_core_from_spec(desired_state),
@@ -889,7 +889,7 @@ class CollectionTarget(
         self._provider = provider
         self._schema = schema
 
-    def declare_row(self: "CollectionTarget[RowT]", *, row: RowT) -> None:
+    def ensure_row(self: "CollectionTarget[RowT]", *, row: RowT) -> None:
         """Declare a document (row) to be upserted to this collection.
 
         The primary-key value becomes the document id (converted to ``str``).
@@ -921,7 +921,7 @@ class CollectionTarget(
                     value = col.encoder(value)
                 fields[name] = value
 
-        syn.declare_target_state(
+        syn.ensure_target_state(
             self._provider.target_state(
                 doc_id, _DocValue(doc_id=doc_id, vectors=vectors, fields=fields)
             )
@@ -940,7 +940,7 @@ def collection_target(
 ) -> "syn.TargetState[_DocHandler]":
     """Create a TargetState for a zvec collection target.
 
-    Use with ``syn.mount_target()`` or the convenience wrappers
+    Use with ``syn.attach_target()`` or the convenience wrappers
     ``declare_collection_target()`` / ``mount_collection_target()``.
 
     Args:
@@ -978,7 +978,7 @@ def declare_collection_target(
     managed_by: target.ManagedBy = target.ManagedBy.SYSTEM,
 ) -> "CollectionTarget[RowT, syn.PendingS]":
     """Declare a zvec collection target and return a CollectionTarget for rows."""
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         collection_target(db, collection_name, schema, managed_by=managed_by)
     )
     return CollectionTarget(provider, schema)
@@ -992,7 +992,7 @@ async def mount_collection_target(
     managed_by: target.ManagedBy = target.ManagedBy.SYSTEM,
 ) -> "CollectionTarget[RowT]":
     """Mount a zvec collection target and return a ready-to-use CollectionTarget."""
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         collection_target(db, collection_name, schema, managed_by=managed_by)
     )
     return CollectionTarget(provider, schema)

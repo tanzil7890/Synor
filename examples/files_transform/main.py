@@ -8,21 +8,21 @@ from markdown_it import MarkdownIt
 _markdown_it = MarkdownIt("gfm-like")
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, outdir: pathlib.Path) -> None:
     html = _markdown_it.render(await file.read_text())
     outname = "__".join(file.file_path.path.parts) + ".html"
-    localfs.declare_file(outdir / outname, html, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, html, create_parent_dirs=True)
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 
 
 app = syn.App(

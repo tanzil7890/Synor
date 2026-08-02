@@ -75,7 +75,7 @@ target_table = await postgres.mount_table_target(
 target_table.declare_vector_index(column="vector")
 
 # Declare rows
-target_table.declare_row(row=Embedding(id=1, text="hello", vector=vec))
+target_table.ensure_row(row=Embedding(id=1, text="hello", vector=vec))
 ```
 
 ### As Source
@@ -97,8 +97,8 @@ fetcher = source.fetch_rows()
 async for record in fetcher:
     ...
 
-# Keyed iteration for mount_each
-await syn.mount_each(process_record, source.fetch_rows().items(key=lambda r: r.id), table)
+# Keyed iteration for spawn_each
+await syn.spawn_each(process_record, source.fetch_rows().items(key=lambda r: r.id), table)
 ```
 
 ### Type Mapping
@@ -157,7 +157,7 @@ target_table = await sqlite.mount_table_target(
     table_schema=await sqlite.TableSchema.from_class(Embedding, primary_key=["id"]),
 )
 
-target_table.declare_row(row=Embedding(id=1, text="hello", vector=vec))
+target_table.ensure_row(row=Embedding(id=1, text="hello", vector=vec))
 ```
 
 ### Type Mapping
@@ -204,7 +204,7 @@ target_table = await lancedb.mount_table_target(
     table_schema=await lancedb.TableSchema.from_class(Embedding, primary_key=["id"]),
 )
 
-target_table.declare_row(row=Embedding(id=1, text="hello", vector=vec))
+target_table.ensure_row(row=Embedding(id=1, text="hello", vector=vec))
 ```
 
 ### Type Mapping
@@ -320,7 +320,7 @@ target_table = await surrealdb.mount_table_target(
     table_schema=await surrealdb.TableSchema.from_class(MyRecord),
 )
 
-target_table.declare_row(row=MyRecord(id="rec1", name="example"))
+target_table.ensure_row(row=MyRecord(id="rec1", name="example"))
 ```
 
 ### As Target (Relation)
@@ -399,7 +399,7 @@ assigned_rel = await neo4j.mount_relation_target(
 )
 
 # Declare nodes
-person_table.declare_record(row=Person(name="Alice"))   # alias: declare_row
+person_table.declare_record(row=Person(name="Alice"))   # alias: ensure_row
 task_table.declare_record(row=Task(description="ship v1"))
 
 # Declare edges (record optional; PK auto-derived from endpoints when omitted)
@@ -475,7 +475,7 @@ assigned_rel = await falkordb.mount_relation_target(
 )
 
 # Declare nodes
-person_table.declare_record(row=Person(name="Alice"))   # alias: declare_row
+person_table.declare_record(row=Person(name="Alice"))   # alias: ensure_row
 task_table.declare_record(row=Task(description="ship v1"))
 
 # Declare edges
@@ -528,13 +528,13 @@ files = localfs.walk_dir(
 )
 
 # Process each file
-await syn.mount_each(process_file, files.items(), target_table)
+await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
 ### As Target (Single File)
 
 ```python
-localfs.declare_file(
+localfs.ensure_file(
     outdir / "output.txt",
     "file content",
     create_parent_dirs=True,
@@ -545,8 +545,8 @@ localfs.declare_file(
 
 ```python
 dir_target = await localfs.mount_dir_target(pathlib.Path("./output"))
-dir_target.declare_file("file1.txt", "content 1")
-dir_target.declare_file("subdir/file2.txt", "content 2")
+dir_target.ensure_file("file1.txt", "content 1")
+dir_target.ensure_file("subdir/file2.txt", "content 2")
 ```
 
 ### Stable File Paths
@@ -596,7 +596,7 @@ walker = amazon_s3.list_objects(
     max_file_size=10_000_000,
 )
 
-await syn.mount_each(process_file, walker.items(), target)
+await syn.spawn_each(process_file, walker.items(), target)
 
 # Single object
 file = await amazon_s3.get_object(client, "s3://my-bucket/path/to/file.json")
@@ -625,10 +625,10 @@ consumer = AIOConsumer({
 })
 
 items = kafka.topic_as_map(consumer, ["my-topic"])
-await syn.mount_each(process_message, items, target_table)
+await syn.spawn_each(process_message, items, target_table)
 ```
 
-`topic_as_map()` returns a `LiveMapFeed`, which `mount_each()` auto-detects for live mode.
+`topic_as_map()` returns a `LiveMapFeed`, which `spawn_each()` auto-detects for live mode.
 
 ### As Target
 
@@ -638,7 +638,7 @@ from confluent_kafka.aio import AIOProducer
 KAFKA_PRODUCER = syn.ContextKey[AIOProducer]("kafka_producer")
 
 topic_target = await kafka.mount_kafka_topic_target(KAFKA_PRODUCER, "my-topic")
-topic_target.declare_target_state(key="msg-key", value=json.dumps(data))
+topic_target.ensure_target_state(key="msg-key", value=json.dumps(data))
 ```
 
 ---
@@ -681,7 +681,7 @@ target_table = await doris.mount_table_target(
     vector_indexes=[doris.VectorIndexDef(field_name="embedding", metric_type="cosine_distance")],
 )
 
-target_table.declare_row(row=MyRecord(id=1, text="hello", embedding=vec))
+target_table.ensure_row(row=MyRecord(id=1, text="hello", embedding=vec))
 ```
 
 ---
@@ -699,7 +699,7 @@ source = google_drive.GoogleDriveSource(
     service_account_credential_path="credentials.json",
     root_folder_ids=["folder-id"],
 )
-await syn.mount_each(process_file, source.items(), target)
+await syn.spawn_each(process_file, source.items(), target)
 ```
 
 For ACL-sensitive indexing, use the additive governed API. It keys items by

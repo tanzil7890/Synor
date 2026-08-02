@@ -211,7 +211,7 @@ import synor as syn
 from synor.connectors import amazon_s3
 from synor.resources.file import FileLike, PatternFilePathMatcher
 
-@syn.fn
+@syn.task
 async def app_main(bucket: str) -> None:
     session = aiobotocore.session.get_session()
     async with session.create_client("s3") as client:
@@ -221,15 +221,15 @@ async def app_main(bucket: str) -> None:
             client, bucket, prefix="docs/", path_matcher=matcher,
         )
 
-        with syn.component_subpath("file"):
+        with syn.unit_path("file"):
             async for key, file in walker.items():
-                syn.mount(
-                    syn.component_subpath(key),
+                syn.spawn(
+                    syn.unit_path(key),
                     process_file,
                     file,
                 )
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike[str]) -> None:
     text = await file.read_text()
     # ... process the file content ...

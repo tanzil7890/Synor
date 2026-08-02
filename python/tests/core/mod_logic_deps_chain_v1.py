@@ -18,21 +18,21 @@ def set_metrics(metrics: Metrics) -> None:
     _metrics = metrics
 
 
-@syn.fn(memo=True, deps=_BAR_PROMPT)
+@syn.task(cache=True, deps=_BAR_PROMPT)
 def bar(s: str) -> str:
     assert _metrics is not None
     _metrics.increment("bar")
     return "bar: " + s
 
 
-@syn.fn(memo=True, logic_tracking="full")
+@syn.task(cache=True, logic_tracking="full")
 def foo_full(key: str, value: str) -> str:
     assert _metrics is not None
     _metrics.increment("foo_full")
     return bar(value)
 
 
-@syn.fn(memo=True, logic_tracking="self")
+@syn.task(cache=True, logic_tracking="self")
 def foo_self(key: str, value: str) -> str:
     assert _metrics is not None
     _metrics.increment("foo_self")

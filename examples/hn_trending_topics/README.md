@@ -19,29 +19,29 @@ The data source is a custom one: two small `async` functions over the Algolia HN
 The same topic mentioned in many messages becomes many `HnTopic` rows keyed on `(topic, message_id)` — exactly what makes the trending ranking meaningful. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def process_thread(thread_id: str, targets: TableTargets) -> None:
     async with aiohttp.ClientSession() as session:
         thread = await fetch_thread(session, thread_id)
     thread_topics = await extract_topics(thread.text)
 
-    targets.messages.declare_row(row=HnMessage(
+    targets.messages.ensure_row(row=HnMessage(
         id=thread.id, thread_id=thread.id, content_type="thread",
         author=thread.author, text=thread.text, url=thread.url, created_at=thread.created_at,
     ))
     for topic in thread_topics:
-        targets.topics.declare_row(row=HnTopic(
+        targets.topics.ensure_row(row=HnTopic(
             topic=topic, message_id=thread.id, thread_id=thread.id,
             content_type="thread", created_at=thread.created_at,
         ))
     for comment in thread.comments:
         comment_topics = await extract_topics(comment.text)
-        targets.messages.declare_row(row=HnMessage(..., content_type="comment", ...))
+        targets.messages.ensure_row(row=HnMessage(..., content_type="comment", ...))
         for topic in comment_topics:
-            targets.topics.declare_row(row=HnTopic(..., content_type="comment", ...))
+            targets.topics.ensure_row(row=HnTopic(..., content_type="comment", ...))
 ```
 
-You *declare* what rows should exist — no inserts or deletes. `app_main` mounts the two Postgres tables, fetches the recent thread IDs, and fans out one `process_thread` component per thread with `mount_each`. If a thread drops out of the feed, the rows it owned are cleaned up automatically.
+You *declare* what rows should exist — no inserts or deletes. `app_main` mounts the two Postgres tables, fetches the recent thread IDs, and fans out one `process_thread` component per thread with `spawn_each`. If a thread drops out of the feed, the rows it owned are cleaned up automatically.
 
 ## Why this example is useful
 

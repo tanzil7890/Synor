@@ -69,7 +69,7 @@ Compared to the Postgres version, the only difference is the resource: `lancedb.
 `app_main` wires the source to the target. It mounts the LanceDB table, walks the source directory, and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await lancedb.mount_table_target(
         LANCE_DB,
@@ -85,10 +85,10 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
-`lancedb.mount_table_target` is the LanceDB counterpart to the Postgres `mount_table_target` — same call shape, same managed-table guarantees: it creates and manages the table for you, handles idempotent upserts keyed on the primary key, and cleans up orphan rows when a file disappears. `process_file` and `process_chunk` take a `lancedb.TableTarget[DocEmbedding]` and call `table.declare_row(...)` exactly as before; only the import changed. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file.
+`lancedb.mount_table_target` is the LanceDB counterpart to the Postgres `mount_table_target` — same call shape, same managed-table guarantees: it creates and manages the table for you, handles idempotent upserts keyed on the primary key, and cleans up orphan rows when a file disappears. `process_file` and `process_chunk` take a `lancedb.TableTarget[DocEmbedding]` and call `table.ensure_row(...)` exactly as before; only the import changed. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file.
 
 The App binds it all together and points at the Markdown folder:
 
@@ -145,7 +145,7 @@ The most semantically similar chunks come back ranked — even when they share n
 
 ## Incremental updates
 
-The incremental story is identical to the base example: `@syn.fn(memo=True)` decides what to *recompute* (a file is skipped when its content and the function's code are both unchanged), and `lancedb.mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
+The incremental story is identical to the base example: `@syn.task(cache=True)` decides what to *recompute* (a file is skipped when its content and the function's code are both unchanged), and `lancedb.mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
 
 - **A file is added** — only that file is chunked and embedded, and its rows are inserted.
 - **A file is edited** — it is re-chunked; unchanged chunks keep their `id` and embedding, genuinely new chunks are embedded and inserted, and chunks that no longer exist are deleted.

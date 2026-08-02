@@ -16,30 +16,30 @@ The whole pipeline is about 25 lines. `process_file` reads the Markdown, renders
 ```python
 _markdown_it = MarkdownIt("gfm-like")
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, outdir: pathlib.Path) -> None:
     html = _markdown_it.render(await file.read_text())
     outname = "__".join(file.file_path.path.parts) + ".html"
-    localfs.declare_file(outdir / outname, html, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, html, create_parent_dirs=True)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 ```
 
-The transform itself is just two lines: read the text, render it. The output name joins the source path parts with `__`, so `subdir/file.md` becomes `subdir__file.html` — a flat, collision-free name. `localfs.declare_file` describes the file you *want to exist*; Synor writes it, overwrites it on change, and deletes it when the source Markdown is gone.
+The transform itself is just two lines: read the text, render it. The output name joins the source path parts with `__`, so `subdir/file.md` becomes `subdir__file.html` — a flat, collision-free name. `localfs.ensure_file` describes the file you *want to exist*; Synor writes it, overwrites it on change, and deletes it when the source Markdown is gone.
 
 ## Why this example is useful
 
 - **The whole method, minimized.** Observe, own, and reconcile in about 25 lines, with no database or embeddings.
 - **Your transform is just a function.** `_markdown_it.render` is plain Python; swap it for any function and you have a different pipeline.
-- **Managed file targets.** `localfs.declare_file` handles writing, overwriting on change, and deleting the `.html` when the source `.md` disappears — you never write file I/O glue.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a file whose content and code are unchanged; add, edit, or delete one Markdown file and only that file's HTML moves.
+- **Managed file targets.** `localfs.ensure_file` handles writing, overwriting on change, and deleting the `.html` when the source `.md` disappears — you never write file I/O glue.
+- **Incremental by default.** `@syn.task(cache=True)` skips a file whose content and code are unchanged; add, edit, or delete one Markdown file and only that file's HTML moves.
 - **Live without re-scanning.** The filesystem source declares `live=True` — pass `-L` and it keeps watching the directory, applying each change with low latency.
 
 ## Run it

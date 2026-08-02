@@ -63,7 +63,7 @@ from .serde import (
     qualified_name,
     unwrap_element_type,
 )
-from .typing import NOT_SET, NON_EXISTENCE, NotSetType, is_not_set
+from .typing import NOT_SET, ABSENT, NotSetType, is_not_set
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -138,9 +138,9 @@ if TYPE_CHECKING:
         def __call__(self, fn: Any) -> Any: ...
 
     class _BatchedDecorator(Protocol):
-        """Protocol for batched function decorator used by @syn.fn.as_async.
+        """Protocol for batched function decorator used by @syn.task.as_async.
 
-        Accepts both sync and async underlying functions, since @syn.fn.as_async
+        Accepts both sync and async underlying functions, since @syn.task.as_async
         always ensures the result is async.
 
         Transforms:
@@ -208,7 +208,7 @@ class _StateCallResult(NamedTuple):
 def _call_entries(
     entries: list[StateFnEntry], stored: list[Any] | None
 ) -> list[_StateCallResult]:
-    """Call each state method once with its stored prev (or NON_EXISTENCE).
+    """Call each state method once with its stored prev (or ABSENT).
 
     Returns a list of :class:`_StateCallResult` with the same length and
     order as *entries*. If *stored* is length-mismatched with *entries*
@@ -220,7 +220,7 @@ def _call_entries(
     results: list[_StateCallResult] = []
     for i, entry in enumerate(entries):
         prev = (
-            entry.deserialize_prev(stored[i]) if stored is not None else NON_EXISTENCE
+            entry.deserialize_prev(stored[i]) if stored is not None else ABSENT
         )
         results.append(_StateCallResult(prev=prev, outcome=entry.call(prev)))
     return results
@@ -290,7 +290,7 @@ def _call_state_methods_sync(
     the stored previous states (for chunks where a stored prev is present).
 
     If any method returns an ``Awaitable`` the awaitables are resolved:
-    - Running event loop → raise (suggest ``@syn.fn.as_async``).
+    - Running event loop → raise (suggest ``@syn.task.as_async``).
     - No loop → ``asyncio.run(asyncio.gather(...))``.
     """
     # Normalize empty stored-context (`{}` or `None`) to `None` so downstream
@@ -298,7 +298,7 @@ def _call_state_methods_sync(
     context_stored = context_stored if context_stored else None
     running_loop_error_msg = (
         "Memo state function returned an awaitable from a sync context "
-        "with a running event loop. Use @syn.fn.as_async for the "
+        "with a running event loop. Use @syn.task.as_async for the "
         "decorated function instead."
     )
 
@@ -672,12 +672,12 @@ class SyncFunction(Function[P, R_co]):
     """Sync function with optional memoization.
 
     Does not support batching or runner — those require an async interface
-    and produce AsyncFunction (via @syn.fn.as_async).
+    and produce AsyncFunction (via @syn.task.as_async).
     """
 
     __slots__ = (
         "_fn",
-        "_memo",
+        "_cache",
         "_memo_key",
         "_processor_info",
         "_logic_fp",
@@ -687,7 +687,7 @@ class SyncFunction(Function[P, R_co]):
     )
 
     _fn: Callable[P, R_co]
-    _memo: bool
+    _cache: bool
     _memo_key: PreparedMemoKeySpec | None
     _processor_info: core.ComponentProcessorInfo
     _logic_fp: core.Fingerprint | None
@@ -699,7 +699,7 @@ class SyncFunction(Function[P, R_co]):
         self,
         fn: Callable[P, R_co],
         *,
-        memo: bool,
+        cache: bool,
         memo_key: MemoKeySpec = None,
         version: int | None = None,
         logic_tracking: LogicTracking = "full",
@@ -712,7 +712,7 @@ class SyncFunction(Function[P, R_co]):
                 "all, so the deps value would be silently ignored."
             )
         self._fn = fn
-        self._memo = memo
+        self._cache = cache
         self._memo_key = _normalize_memo_key(fn, memo_key)
         self._processor_info = core.ComponentProcessorInfo(fn.__qualname__)
         self._logic_tracking = logic_tracking
@@ -791,7 +791,7 @@ class SyncFunction(Function[P, R_co]):
         propagate = self._logic_tracking == "full"
         fn_ctx: core.FnCallContext | None = None
         try:
-            if self._memo:
+            if self._cache:
                 state_methods: list[StateFnEntry] = []
                 memo_args: tuple[Any, ...] = args  # type: ignore[assignment]
                 memo_kwargs: dict[str, Any] = kwargs  # type: ignore[assignment]
@@ -914,7 +914,7 @@ class SyncFunction(Function[P, R_co]):
     ) -> core.ComponentProcessor[R_co]:
         state_methods: list[StateFnEntry] = []
         memo_fp: core.Fingerprint | None = None
-        if self._memo:
+        if self._cache:
             memo_args: tuple[Any, ...] = args  # type: ignore[assignment]
             memo_kwargs: dict[str, Any] = kwargs  # type: ignore[assignment]
             if self._memo_key:
@@ -939,7 +939,7 @@ class SyncFunction(Function[P, R_co]):
         # TODO(future simplification): make this handler cache-hit-only.
         # The cache-miss branch below is pure data collection (look up eager
         # initial states for context, call positional state fns with
-        # NON_EXISTENCE). Both could be pre-computed at _core_processor time
+        # ABSENT). Both could be pre-computed at _core_processor time
         # and passed into the Rust processor as new fields, letting
         # execute_once's cache-miss path skip the Rust→Python callback
         # entirely. Not urgent; see "Future simplification" in
@@ -1182,7 +1182,7 @@ class AsyncFunction(Function[P, R_co]):
         "_orig_async_fn",
         "_orig_sync_fn",
         "_fn_is_async",
-        "_memo",
+        "_cache",
         "_memo_key",
         "_processor_info",
         "_logic_fp",
@@ -1199,7 +1199,7 @@ class AsyncFunction(Function[P, R_co]):
 
     _orig_async_fn: AsyncCallable[..., Any] | None
     _orig_sync_fn: Callable[..., Any] | None
-    _memo: bool
+    _cache: bool
     _memo_key: PreparedMemoKeySpec | None
     _processor_info: core.ComponentProcessorInfo
     _logic_fp: core.Fingerprint | None
@@ -1219,7 +1219,7 @@ class AsyncFunction(Function[P, R_co]):
         async_fn: AsyncCallable[..., Any] | None,
         sync_fn: Callable[..., Any] | None,
         *,
-        memo: bool,
+        cache: bool,
         memo_key: MemoKeySpec = None,
         batching: bool = False,
         max_batch_size: int | None = None,
@@ -1239,7 +1239,7 @@ class AsyncFunction(Function[P, R_co]):
             )
         self._orig_async_fn = async_fn
         self._orig_sync_fn = sync_fn
-        self._memo = memo
+        self._cache = cache
         self._memo_key = _normalize_memo_key(fn, memo_key)
         self._processor_info = core.ComponentProcessorInfo(fn.__qualname__)
         self._logic_tracking = logic_tracking
@@ -1343,7 +1343,7 @@ class AsyncFunction(Function[P, R_co]):
             # Check memo (when enabled and context available)
             memo_states_for_resolve: list[Any] | None = None
             context_states_for_resolve: dict[core.Fingerprint, list[Any]] | None = None
-            if self._memo and parent_ctx is not None:
+            if self._cache and parent_ctx is not None:
                 env = parent_ctx._env
                 async_memo_args: tuple[Any, ...] = args  # type: ignore[assignment]
                 async_memo_kwargs: dict[str, Any] = kwargs  # type: ignore[assignment]
@@ -1691,7 +1691,7 @@ class AsyncFunction(Function[P, R_co]):
     ) -> core.ComponentProcessor[R_co]:
         state_methods: list[StateFnEntry] = []
         memo_fp: core.Fingerprint | None = None
-        if self._memo:
+        if self._cache:
             async_proc_args: tuple[Any, ...] = args  # type: ignore[assignment]
             async_proc_kwargs: dict[str, Any] = kwargs  # type: ignore[assignment]
             if self._memo_key:
@@ -1814,7 +1814,7 @@ class _GenericFunctionBuilder:
     def __init__(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: bool = False,
         max_batch_size: int | None = None,
@@ -1823,7 +1823,7 @@ class _GenericFunctionBuilder:
         logic_tracking: LogicTracking = "full",
         deps: Any = None,
     ) -> None:
-        self._memo = memo
+        self._cache = cache
         self._memo_key = memo_key
         self._batching = batching
         self._max_batch_size = max_batch_size
@@ -1836,11 +1836,11 @@ class _GenericFunctionBuilder:
         if self._batching or self._runner is not None:
             raise ValueError(
                 "Batching and runner require the function to be async. "
-                "Use @syn.fn.as_async instead, or rewrite the function to be async."
+                "Use @syn.task.as_async instead, or rewrite the function to be async."
             )
         wrapper = SyncFunction(
             fn,
-            memo=self._memo,
+            cache=self._cache,
             memo_key=self._memo_key,
             version=self._version,
             logic_tracking=self._logic_tracking,
@@ -1859,7 +1859,7 @@ class _GenericFunctionBuilder:
         wrapper = AsyncFunction[P, R_co](
             async_fn,
             sync_fn,
-            memo=self._memo,
+            cache=self._cache,
             memo_key=self._memo_key,
             batching=self._batching,
             max_batch_size=self._max_batch_size,
@@ -1877,9 +1877,9 @@ class _SyncFunctionBuilder(_GenericFunctionBuilder):
     def __call__(self, fn: Callable[P, R_co]) -> SyncFunction[P, R_co]:
         if inspect.iscoroutinefunction(fn):
             raise ValueError(
-                "Async functions are not supported by @syn.fn decorator "
+                "Async functions are not supported by @syn.task decorator "
                 "when batching or runner is specified. "
-                "Please use @syn.fn.as_async instead."
+                "Please use @syn.task.as_async instead."
             )
         return self._build_sync(fn)
 
@@ -1889,14 +1889,14 @@ class _AutoFunctionBuilder(_GenericFunctionBuilder):
     def __init__(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         version: int | None = None,
         logic_tracking: LogicTracking = "full",
         deps: Any = None,
     ) -> None:
         super().__init__(
-            memo=memo,
+            cache=cache,
             memo_key=memo_key,
             version=version,
             logic_tracking=logic_tracking,
@@ -1937,16 +1937,16 @@ class _AsyncFunctionBuilder(_GenericFunctionBuilder):
 
 
 class _FunctionDecorator:
-    """Namespace for @syn.fn and @syn.fn.as_async decorators."""
+    """Namespace for @syn.task and @syn.task.as_async decorators."""
 
-    # --- @syn.fn(...) / @syn.fn ---
+    # --- @syn.task(...) / @syn.task ---
 
     # Without batching / runner, supports both sync and async functions
     @overload
     def __call__(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         version: int | None = None,
         logic_tracking: LogicTracking = "full",
@@ -1957,7 +1957,7 @@ class _FunctionDecorator:
     def __call__(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: Literal[True],
         max_batch_size: int | None = None,
@@ -1971,7 +1971,7 @@ class _FunctionDecorator:
     def __call__(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: Literal[False] = False,
         max_batch_size: int | None = None,
@@ -1992,7 +1992,7 @@ class _FunctionDecorator:
         fn: Callable[P, R_co] | None = None,
         /,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: bool = False,
         max_batch_size: int | None = None,
@@ -2001,7 +2001,7 @@ class _FunctionDecorator:
         logic_tracking: LogicTracking = "full",
         deps: Any = None,
     ) -> Any:
-        """Decorator for Synor functions (exposed as @syn.fn).
+        """Decorator for Synor functions (exposed as @syn.task).
 
         Preserves the sync/async nature of the underlying function:
         - Sync function -> SyncFunction (sync)
@@ -2009,7 +2009,7 @@ class _FunctionDecorator:
 
         Args:
             fn: The function to decorate (optional, for use without parentheses)
-            memo: Enable memoization (skip execution when inputs unchanged)
+            cache: Enable memoization (skip execution when inputs unchanged)
             memo_key: Optional per-parameter memoization key overrides. For a
                 parameter name, ``None`` excludes that argument from the memo
                 key and a callable maps the runtime value to the value that
@@ -2049,7 +2049,7 @@ class _FunctionDecorator:
 
         Batching and runner require an async interface. With this decorator, only
         async underlying functions are accepted when batching/runner is specified.
-        Use @syn.fn.as_async for sync underlying functions that need
+        Use @syn.task.as_async for sync underlying functions that need
         batching/runner.
 
         Memoization works with all modes:
@@ -2058,7 +2058,7 @@ class _FunctionDecorator:
         """
         builder = (
             _SyncFunctionBuilder(
-                memo=memo,
+                cache=cache,
                 memo_key=memo_key,
                 batching=batching,
                 max_batch_size=max_batch_size,
@@ -2069,7 +2069,7 @@ class _FunctionDecorator:
             )
             if batching or runner or max_batch_size is not None
             else _AutoFunctionBuilder(
-                memo=memo,
+                cache=cache,
                 memo_key=memo_key,
                 version=version,
                 logic_tracking=logic_tracking,
@@ -2081,14 +2081,14 @@ class _FunctionDecorator:
         else:
             return builder
 
-    # --- @syn.fn.as_async(...) / @syn.fn.as_async ---
+    # --- @syn.task.as_async(...) / @syn.task.as_async ---
 
     # Overload for batching=True
     @overload
     def as_async(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: Literal[True],
         max_batch_size: int | None = None,
@@ -2102,7 +2102,7 @@ class _FunctionDecorator:
     def as_async(
         self,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: Literal[False] = False,
         max_batch_size: int | None = None,
@@ -2129,7 +2129,7 @@ class _FunctionDecorator:
         fn: Any = None,
         /,
         *,
-        memo: bool = False,
+        cache: bool = False,
         memo_key: MemoKeySpec = None,
         batching: bool = False,
         max_batch_size: int | None = None,
@@ -2138,14 +2138,14 @@ class _FunctionDecorator:
         logic_tracking: LogicTracking = "full",
         deps: Any = None,
     ) -> Any:
-        """Decorator for Synor functions (exposed as @syn.fn.as_async).
+        """Decorator for Synor functions (exposed as @syn.task.as_async).
 
-        Always yields an async function, equivalent to @syn.fn plus ensuring
+        Always yields an async function, equivalent to @syn.task plus ensuring
         the result is async. Accepts both sync and async underlying functions.
 
         Args:
             fn: The function to decorate (optional, for use without parentheses)
-            memo: Enable memoization (skip execution when inputs unchanged)
+            cache: Enable memoization (skip execution when inputs unchanged)
             batching: Enable batching (function receives list[T], returns list[R])
             max_batch_size: Maximum batch size (only with batching=True)
             runner: Runner to execute the function (e.g., GPU for subprocess)
@@ -2168,7 +2168,7 @@ class _FunctionDecorator:
             - With batching/runner: ComponentContext optional, memo checked when available
         """
         builder = _AsyncFunctionBuilder(
-            memo=memo,
+            cache=cache,
             memo_key=memo_key,
             batching=batching,
             max_batch_size=max_batch_size,
@@ -2183,7 +2183,7 @@ class _FunctionDecorator:
             return builder
 
 
-fn = _FunctionDecorator()
+task = _FunctionDecorator()
 
 
 def create_core_component_processor(
@@ -2240,7 +2240,7 @@ def fn_ret_deserializer(fn: typing.Any) -> DeserializeFn:
     """Return a ``DeserializeFn`` that deserializes *fn*'s return type.
 
     Zero upfront cost — all work is deferred to the first call.
-    For ``@syn.fn``-decorated functions the pre-built ``DeserializeFn`` is reused.
+    For ``@syn.task``-decorated functions the pre-built ``DeserializeFn`` is reused.
     For plain functions the return-type annotation is inspected at call time.
     """
     # Unwrap bound methods to get the underlying Function object.

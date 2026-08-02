@@ -59,7 +59,7 @@ class LlmPairResolver:
     Configuration is bound at construction; each call only takes
     ``(entity, candidates)`` matching the :class:`PairResolver` protocol.
 
-    Per-pair results are memoized via Synor's ``@syn.fn(memo=True)``
+    Per-pair results are memoized via Synor's ``@syn.task(memo=True)``
     decorator, persisted across runs.
     """
 
@@ -90,7 +90,7 @@ class LlmPairResolver:
         self._memo_key = _syn.memo_fingerprint((model, entity_type, extra_guidance))
         self._client: _typing.Any | None = None
 
-    @_syn.fn(memo=True, logic_tracking="self")
+    @_syn.task(cache=True, logic_tracking="self")
     async def __call__(
         self,
         entity: str,

@@ -396,23 +396,23 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     yield
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     """Define your main pipeline here.
 
     Common pattern:
       1) Declare targets/target states under stable 'setup/...' paths.
       2) Enumerate inputs (files, DB rows, etc.).
-      3) Mount per input processing unit using a stable path.
+      3) Spawn per input processing unit using a stable path.
 
     Note: app_main can accept parameters (e.g., sourcedir/outdir) passed via syn.App(...)
     """
 
     # 1) Declare targets/target states
     # Example (local filesystem):
-    #   target = await syn.use_mount(
-    #       syn.component_subpath("setup"),
-    #       localfs.declare_dir_target,
+    #   target = await syn.call(
+    #       syn.unit_path("setup"),
+    #       localfs.ensure_dir_target,
     #       outdir,
     #   )
 
@@ -423,11 +423,11 @@ async def app_main() -> None:
     #       path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     #   )
 
-    # 3) Mount a processing unit for each input under a stable path
+    # 3) Spawn a processing unit for each input under a stable path
     # Example:
     #   for f in files:
-    #       await syn.mount(
-    #           syn.component_subpath("process", str(f.relative_path)),
+    #       await syn.spawn(
+    #           syn.unit_path("process", str(f.relative_path)),
     #           process_file_function,
     #           f,
     #           target,

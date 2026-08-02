@@ -17,15 +17,15 @@ _source_data: dict[str, dict[str, Any]] = {}
 
 async def _declare_dicts() -> None:
     """Create dict target states for testing."""
-    with syn.component_subpath("dict"):
+    with syn.unit_path("dict"):
         for name, data in _source_data.items():
-            single_dict_provider = await syn.use_mount(
-                syn.component_subpath(name),
+            single_dict_provider = await syn.call(
+                syn.unit_path(name),
                 DictsTarget.declare_dict_target,
                 name,
             )
             for key, value in data.items():
-                syn.declare_target_state(single_dict_provider.target_state(key, value))
+                syn.ensure_target_state(single_dict_provider.target_state(key, value))
 
 
 def test_drop_blocking() -> None:
@@ -199,7 +199,7 @@ def test_drop_with_live_component_in_registry() -> None:
     _source_data.clear()
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _CatchUpLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _CatchUpLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_drop_live_component_drain", environment=synor_env),

@@ -492,17 +492,17 @@ def get_param_annotation(func: Any, position: int) -> Any:
 
 
 def strip_non_existence_type(hint: Any) -> Any:
-    """Remove ``NonExistenceType`` from a union type hint.
+    """Remove ``AbsentType`` from a union type hint.
 
-    ``tuple[int, str] | NonExistenceType`` → ``tuple[int, str]``
+    ``tuple[int, str] | AbsentType`` → ``tuple[int, str]``
     Non-union hints are returned unchanged.
     """
-    from .typing import NonExistenceType
+    from .typing import AbsentType
 
     origin = typing.get_origin(hint)
     if origin is not types.UnionType and origin is not typing.Union:
         return hint
-    args = [a for a in typing.get_args(hint) if a is not NonExistenceType]
+    args = [a for a in typing.get_args(hint) if a is not AbsentType]
     if len(args) == 1:
         return args[0]
     if not args:

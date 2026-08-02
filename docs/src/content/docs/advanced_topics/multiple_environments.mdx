@@ -59,12 +59,12 @@ import pathlib
 env1 = syn.Environment(syn.Settings.from_env(db_path=pathlib.Path("./db1/synor.db")))
 env2 = syn.Environment(syn.Settings.from_env(db_path=pathlib.Path("./db2/synor.db")))
 
-@syn.fn
+@syn.task
 def build1() -> None:
     # ... pipeline logic for env1 ...
     pass
 
-@syn.fn
+@syn.task
 def build2() -> None:
     # ... pipeline logic for env2 ...
     pass
@@ -95,7 +95,7 @@ def _lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     builder.settings.db_path = pathlib.Path("./default/synor.db")
     yield
 
-@syn.fn
+@syn.task
 def build() -> None:
     # ... pipeline logic ...
     pass

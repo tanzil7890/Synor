@@ -911,19 +911,19 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _RowValue | syn.NonExistenceType,
+        desired_state: _RowValue | syn.AbsentType,
         prev_possible_records: Collection[_RowFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_RowAction, _RowFingerprint] | None:
         key = _ROW_KEY_CHECKER.check(key)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_RowAction(key=key, value=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_object(desired_state)
@@ -1024,7 +1024,7 @@ _TableTrackingRecord = statediff.MutualTrackingRecord[
 
 class _TableAction(NamedTuple):
     key: _TableKey
-    spec: _TableSpec | syn.NonExistenceType
+    spec: _TableSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
     column_actions: dict[str, statediff.DiffAction]
 
@@ -1058,7 +1058,7 @@ def _apply_table_actions(
                 except Exception as e:
                     _logger.warning("Failed to drop table %s: %s", key.table_name, e)
 
-            if syn.is_non_existence(action.spec):
+            if syn.is_absent(action.spec):
                 outputs[i] = None
                 continue
 
@@ -1125,7 +1125,7 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _TableSpec | syn.NonExistenceType,
+        desired_state: _TableSpec | syn.AbsentType,
         prev_possible_records: Collection[_TableTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -1134,10 +1134,10 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
         | None
     ):
         key = _TableKey(*_TABLE_KEY_CHECKER.check(key))
-        tracking_record: _TableTrackingRecord | syn.NonExistenceType
+        tracking_record: _TableTrackingRecord | syn.AbsentType
 
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_table_composite_tracking_record_from_spec(
@@ -1215,7 +1215,7 @@ def table_target(
     return _table_provider.target_state(key, spec)
 
 
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[ManagedConnection],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -1224,7 +1224,7 @@ def declare_table_target(
     vector_indexes: list[VectorIndexDef] | None = None,
     inverted_indexes: list[InvertedIndexDef] | None = None,
 ) -> "DorisTableTarget[RowT, syn.PendingS]":
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         table_target(
             db,
             table_name,
@@ -1246,7 +1246,7 @@ async def mount_table_target(
     vector_indexes: list[VectorIndexDef] | None = None,
     inverted_indexes: list[InvertedIndexDef] | None = None,
 ) -> "DorisTableTarget[RowT]":
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         table_target(
             db,
             table_name,
@@ -1275,10 +1275,10 @@ class DorisTableTarget(
         self._provider = provider
         self._table_schema = table_schema
 
-    def declare_row(self: "DorisTableTarget[RowT]", *, row: RowT) -> None:
+    def ensure_row(self: "DorisTableTarget[RowT]", *, row: RowT) -> None:
         row_dict = self._row_to_dict(row)
         pk_values = tuple(row_dict[pk] for pk in self._table_schema.primary_key)
-        syn.declare_target_state(self._provider.target_state(pk_values, row_dict))
+        syn.ensure_target_state(self._provider.target_state(pk_values, row_dict))
 
     def _row_to_dict(self, row: RowT) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -1387,7 +1387,7 @@ __all__ = [
     "connect",
     "connect_async",
     "build_vector_search_query",
-    "declare_table_target",
+    "ensure_table_target",
     "DorisConnectionConfig",
     "DorisTableTarget",
     "DorisType",

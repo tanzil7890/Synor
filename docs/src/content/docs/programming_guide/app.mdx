@@ -23,7 +23,7 @@ To create an App, provide:
 ```python
 import synor as syn
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     # ... your pipeline logic ...
 
@@ -79,7 +79,7 @@ To watch progress beyond the `report_to_stdout` flag, the `UpdateHandle` returne
 An App is the top-level runner and entry point. A **processing component** is the unit of incremental execution *within* an app.
 
 - Your app's main function runs as the **root processing component** at the root path.
-- Each call to `mount()` or `use_mount()` declares a **child processing component** at a child path. Sugar APIs like `mount_each()` and `mount_target()` also create child components.
+- Each call to `spawn()` or `call()` declares a **child processing component** at a child path. Sugar APIs like `spawn_each()` and `attach_target()` also create child components.
 - Each processing component declares a set of target states, and Synor syncs them as a unit when that component finishes — all writes happen after processing completes, and each target backend applies its batch atomically when supported.
 
 This is why `app.update()` does not "run everything from scratch": Synor uses the component path tree to decide what can be reused and what must re-run.
@@ -88,7 +88,7 @@ For example, an app that processes files might mount one component per file. [A 
 
 ```text
 (root)                         ← app_main component
-├── "setup"                    ← declare_dir_target component
+├── "setup"                    ← ensure_dir_target component
 └── "process"
     ├── "hello.md"             ← process_file component
     └── "world.md"             ← process_file component
@@ -111,7 +111,7 @@ With `SYNOR_DB` set, you can create and run apps without any additional configur
 ```python
 import synor as syn
 
-@syn.fn
+@syn.task
 def app_main() -> None:
     # ... your pipeline logic ...
 

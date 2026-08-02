@@ -25,13 +25,13 @@ def test_global_exception_handler_invoked_for_background_mount() -> None:
         builder.set_exception_handler(handler)
         yield
 
-    @syn.fn
+    @syn.task
     async def _child() -> None:
         raise ValueError("boom")
 
-    @syn.fn
+    @syn.task
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("child"), _child)
+        await syn.spawn(syn.unit_path("child"), _child)
 
     app = syn.App("test_exception_handlers_global", _root)
     app.update_blocking()
@@ -56,18 +56,18 @@ def test_scoped_handler_overrides_global_and_fallback_on_handler_error() -> None
         builder.set_exception_handler(global_handler)
         yield
 
-    @syn.fn
+    @syn.task
     async def _child() -> None:
         raise ValueError("boom")
 
-    @syn.fn
+    @syn.task
     async def _root() -> None:
         def inner_handler(exc: BaseException, ctx: syn.ExceptionContext) -> None:
             calls.append(f"inner:{ctx.source}:{type(exc).__name__}")
             raise RuntimeError("handler failed")
 
         async with syn.exception_handler(inner_handler):
-            await syn.mount(syn.component_subpath("child"), _child)
+            await syn.spawn(syn.unit_path("child"), _child)
 
     app = syn.App("test_exception_handlers_scoped", _root)
     app.update_blocking()
@@ -115,18 +115,18 @@ def test_orphan_delete_failure_routes_through_parent_handler() -> None:
         builder.set_exception_handler(handler)
         yield
 
-    @syn.fn
+    @syn.task
     async def _child(value: int) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("k", value))
+        syn.ensure_target_state(GlobalDictTarget.target_state("k", value))
 
-    @syn.fn
+    @syn.task
     async def _parent() -> None:
         for name, value in _orphan_source.items():
-            await syn.mount(syn.component_subpath(name), _child, value)
+            await syn.spawn(syn.unit_path(name), _child, value)
 
-    @syn.fn
+    @syn.task
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("parent"), _parent)
+        await syn.spawn(syn.unit_path("parent"), _parent)
 
     app = syn.App("test_exception_handlers_orphan_cascade", _root)
 
@@ -151,7 +151,7 @@ def test_orphan_delete_failure_routes_through_parent_handler() -> None:
 
     # Exactly one failure surfaces — the orphan-delete of "A". The handler's
     # mount_kind is "mount" because the on_error was wired through
-    # `syn.mount(..., parent_fn)` at the parent's mount time.
+    # `syn.spawn(..., parent_fn)` at the parent's mount time.
     assert len(seen) == 1, f"expected one handler call; got {seen}"
     exc_name, mount_kind = seen[0]
     assert exc_name == "RuntimeError"
@@ -177,13 +177,13 @@ def test_background_mount_failure_surfaces_python_traceback() -> None:
         builder.set_exception_handler(handler)
         yield
 
-    @syn.fn
+    @syn.task
     async def _failing() -> None:
         _raise_for_trace_test()
 
-    @syn.fn
+    @syn.task
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("child"), _failing)
+        await syn.spawn(syn.unit_path("child"), _failing)
 
     app = syn.App("test_exception_handlers_trace", _root)
     app.update_blocking()

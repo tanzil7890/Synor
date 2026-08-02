@@ -55,7 +55,7 @@ Everything downstream of this — `DocEmbedding`, `process_file`, `process_chunk
 `app_main` mounts the Postgres table, then walks the bucket with `list_objects`. It is the OCI analogue of `localfs.walk_dir` — give it the client, the namespace, the bucket, an optional prefix, and a path matcher, and it yields one `OCIFile` per matching object.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -82,10 +82,10 @@ async def app_main() -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live_stream=live_stream,
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
-`mount_each` runs one processing component per object so the engine tracks and updates each independently. With `live_stream=None` (the default), `list_objects` does a one-shot catch-up scan. Pass a stream and it keeps watching — that's the next section.
+`spawn_each` runs one processing component per object so the engine tracks and updates each independently. With `live_stream=None` (the default), `list_objects` does a one-shot catch-up scan. Pass a stream and it keeps watching — that's the next section.
 
 ## Live mode via OCI Streaming
 
@@ -146,7 +146,7 @@ This example keeps it minimal and doesn't declare a vector index, so queries do 
 
 ## Incremental updates
 
-Incrementality works the same as the base example: `@syn.fn(memo=True)` skips an object whose content and code are unchanged, and `mount_table_target` upserts only the rows that actually changed and deletes rows whose source is gone.
+Incrementality works the same as the base example: `@syn.task(cache=True)` skips an object whose content and code are unchanged, and `mount_table_target` upserts only the rows that actually changed and deletes rows whose source is gone.
 
 - **An object is added** — only that object is chunked and embedded; its rows are inserted.
 - **An object is updated** — it is re-chunked; unchanged chunks keep their `id` and embedding, new chunks are embedded and inserted, and vanished chunks are deleted.

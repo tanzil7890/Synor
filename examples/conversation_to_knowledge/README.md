@@ -17,7 +17,7 @@ The whole graph is declared as **target states** — read it in [`conv_knowledge
 
 ```python
 # Phase 1 — one memoized component per episode: transcribe, extract, declare nodes + edges
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_session(youtube_id, session_table, statement_table, session_statement_rel):
     transcript = await fetch_transcript(youtube_id)          # yt-dlp + AssemblyAI diarization
     metadata   = await extract_metadata(step1_text, transcript)   # LLM → who is speaking
@@ -45,7 +45,7 @@ statement_mentions_rel = await surrealdb.mount_relation_target(
 
 - **Structured LLM extraction.** OpenAI (via LiteLLM) + Pydantic models pull speakers, thematic statements, and mentioned entities as *typed data* — not freeform text you have to re-parse.
 - **Entity resolution, built in.** `resolve_entities` collapses near-duplicate people, techs, and orgs using embedding similarity + LLM confirmation, so the graph has one canonical node per real-world thing.
-- **Incremental, per episode.** `@syn.fn(memo=True)` with one component per YouTube ID means adding an episode processes only that episode; unchanged sessions are skipped.
+- **Incremental, per episode.** `@syn.task(cache=True)` with one component per YouTube ID means adding an episode processes only that episode; unchanged sessions are skipped.
 - **A real graph, declaratively.** Nodes and polymorphic relationships are declared as target states; Synor syncs them into SurrealDB and cleans up what's gone — no migration scripts.
 - **Plain async Python, swappable parts.** Transcriber, LLM, embedder, and graph store are all yours to change.
 

@@ -52,7 +52,7 @@ class _MinimalLiveComponent:
 
 def test_live_component_rejected_in_use_mount() -> None:
     async def _main() -> None:
-        await syn.use_mount(syn.component_subpath("x"), _MinimalLiveComponent)
+        await syn.call(syn.unit_path("x"), _MinimalLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_rejected_use_mount", environment=synor_env),
@@ -69,7 +69,7 @@ def test_live_component_rejected_in_use_mount() -> None:
 
 def _declare_source_entries() -> None:
     for key, value in _source_data.items():
-        syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
 class _BasicLiveComponent:
@@ -91,7 +91,7 @@ def test_live_component_basic_full_update() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _BasicLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _BasicLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_basic_full_update", environment=synor_env),
@@ -127,7 +127,7 @@ def test_live_component_catch_up_mode() -> None:
     _source_data["x"] = 10
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _CatchUpLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _CatchUpLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_catch_up_mode", environment=synor_env),
@@ -159,7 +159,7 @@ def test_live_component_mark_ready_auto_on_return() -> None:
     _source_data["auto"] = 42
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _AutoReadyLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _AutoReadyLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_mark_ready_auto", environment=synor_env),
@@ -210,7 +210,7 @@ def test_read_committed_state_across_runs() -> None:
     _source_data["k"] = 1
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _BootstrapStateLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _BootstrapStateLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_read_committed_state", environment=synor_env),
@@ -266,7 +266,7 @@ def test_live_state_survives_regular_use_state_prune() -> None:
     _source_data["k"] = 1
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _LiveBootSurvivesRegularPrune)
+        await syn.spawn(syn.unit_path("live"), _LiveBootSurvivesRegularPrune)
 
     app = syn.App(
         syn.AppConfig(name="test_live_state_survives_prune", environment=synor_env),
@@ -287,7 +287,7 @@ def test_live_state_survives_regular_use_state_prune() -> None:
 
 
 def _declare_item(key: str, value: int) -> None:
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
 class _IncrementalUpdateLiveComponent:
@@ -300,7 +300,7 @@ class _IncrementalUpdateLiveComponent:
         await operator.update_full()
         # Incremental: add a new item not in _source_data
         handle = await operator.update(
-            syn.component_subpath("new_item"), _declare_item, "new_key", 99
+            syn.unit_path("new_item"), _declare_item, "new_key", 99
         )
         await handle.ready()
         # mark_ready called AFTER incremental operations so update_blocking waits
@@ -316,7 +316,7 @@ async def test_preview_rejects_live_component_without_mutation() -> None:
     env = common.create_test_env(__file__, suffix=app_name)
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _IncrementalUpdateLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _IncrementalUpdateLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name=app_name, environment=env),
@@ -343,7 +343,7 @@ class _InnerLiveComponent:
     """Inner live component mounted via operator.update(LiveCompClass)."""
 
     async def process(self) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("inner_marker", 7))
+        syn.ensure_target_state(GlobalDictTarget.target_state("inner_marker", 7))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
@@ -359,13 +359,13 @@ class _OuterLiveComponentWithInner:
     """
 
     async def process(self) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("outer_marker", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("outer_marker", 1))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
         # Mount a nested live component at "inner" subpath.
         handle = await operator.update(
-            syn.component_subpath("inner"), _InnerLiveComponent
+            syn.unit_path("inner"), _InnerLiveComponent
         )
         await handle.ready()
         await operator.mark_ready()
@@ -404,7 +404,7 @@ class _LiveThenPlainOuterComponent:
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
-        child_path = syn.component_subpath("child")
+        child_path = syn.unit_path("child")
 
         live_handle = await operator.update(child_path, _PersistentInnerLiveComponent)
         await live_handle.ready()
@@ -424,7 +424,7 @@ class _PlainThenLiveOuterComponent:
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
-        child_path = syn.component_subpath("child")
+        child_path = syn.unit_path("child")
 
         plain_handle = await operator.update(
             child_path, _declare_item, _LIVE_TRANSITION_KEY, 2
@@ -437,11 +437,11 @@ class _PlainThenLiveOuterComponent:
 
 
 def test_in_process_live_blocks_synor_mount() -> None:
-    """Polish 2: `syn.mount(...)` inside `process_live` raises RuntimeError.
+    """Polish 2: `syn.spawn(...)` inside `process_live` raises RuntimeError.
 
     Verifies the `_in_process_live` ContextVar enforcement directly:
     when the var is `True` (as it is inside `process_live`), the entry
-    points `syn.mount` / `syn.mount_each` / `syn.use_mount` must
+    points `syn.spawn` / `syn.spawn_each` / `syn.call` must
     raise a `RuntimeError` mentioning `process_live`.
 
     The integration shape — that the var is actually set to `True` for
@@ -461,30 +461,30 @@ def test_in_process_live_blocks_synor_mount() -> None:
 
     # Default: not in process_live → no raise.
     assert _in_process_live.get() is False
-    check_not_in_process_live("syn.mount")  # should not raise
+    check_not_in_process_live("syn.spawn")  # should not raise
 
     # Simulate inside process_live: var set to True → must raise.
     prev = _in_process_live.get()
     _in_process_live.set(True)
     try:
         with pytest.raises(RuntimeError, match="not allowed inside process_live"):
-            check_not_in_process_live("syn.mount")
+            check_not_in_process_live("syn.spawn")
         with pytest.raises(RuntimeError, match="not allowed inside process_live"):
-            check_not_in_process_live("syn.mount_each")
+            check_not_in_process_live("syn.spawn_each")
         with pytest.raises(RuntimeError, match="not allowed inside process_live"):
-            check_not_in_process_live("syn.use_mount")
+            check_not_in_process_live("syn.call")
     finally:
         _in_process_live.set(prev)
 
 
 class _LiveComponentInnerCallsSynorMount:
-    """Polish 2 positive test: process() inside live can call syn.mount safely."""
+    """Polish 2 positive test: process() inside live can call syn.spawn safely."""
 
     async def process(self) -> None:
         # This MUST NOT raise — process() is a separate context; the
         # symmetric reset in update_full sets _in_process_live=False
         # before the new Task captures Context for process()'s body.
-        await syn.mount(syn.component_subpath("ok"), _declare_item, "marker", 99)
+        await syn.spawn(syn.unit_path("ok"), _declare_item, "marker", 99)
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
@@ -492,7 +492,7 @@ class _LiveComponentInnerCallsSynorMount:
 
 
 def test_process_inside_live_can_call_synor_mount() -> None:
-    """Polish 2: `syn.mount(...)` from inside `process()` of a live component
+    """Polish 2: `syn.spawn(...)` from inside `process()` of a live component
     must work — `update_full`'s inline `_in_process_live = False` reset
     takes effect for the asyncio Task that runs `process()`.
 
@@ -503,8 +503,8 @@ def test_process_inside_live_can_call_synor_mount() -> None:
     GlobalDictTarget.store.clear()
 
     async def _main() -> None:
-        await syn.mount(
-            syn.component_subpath("inner_ok"), _LiveComponentInnerCallsSynorMount
+        await syn.spawn(
+            syn.unit_path("inner_ok"), _LiveComponentInnerCallsSynorMount
         )
 
     app = syn.App(
@@ -531,7 +531,7 @@ def test_live_component_operator_update_with_live_class() -> None:
     _source_data.clear()
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("outer"), _OuterLiveComponentWithInner)
+        await syn.spawn(syn.unit_path("outer"), _OuterLiveComponentWithInner)
 
     app = syn.App(
         syn.AppConfig(name="test_operator_update_live_class", environment=synor_env),
@@ -552,7 +552,7 @@ def test_nested_live_to_plain_cancels_old_task_and_latest_value_wins() -> None:
     _live_transition_events.clear()
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("outer"), _LiveThenPlainOuterComponent)
+        await syn.spawn(syn.unit_path("outer"), _LiveThenPlainOuterComponent)
 
     app = syn.App(
         syn.AppConfig(
@@ -570,7 +570,7 @@ def test_nested_plain_to_live_latest_value_wins() -> None:
     GlobalDictTarget.store.clear()
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("outer"), _PlainThenLiveOuterComponent)
+        await syn.spawn(syn.unit_path("outer"), _PlainThenLiveOuterComponent)
 
     app = syn.App(
         syn.AppConfig(
@@ -591,7 +591,7 @@ def test_live_component_incremental_update() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _IncrementalUpdateLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _IncrementalUpdateLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_incremental_update", environment=synor_env),
@@ -614,12 +614,12 @@ class _IncrementalDeleteDirectLiveComponent:
 
     async def process(self) -> None:
         for key, value in _source_data.items():
-            await syn.mount(syn.component_subpath(key), _declare_item, key, value)
+            await syn.spawn(syn.unit_path(key), _declare_item, key, value)
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
         # Directly delete the child that was mounted by process() for key "b"
-        handle = await operator.delete(syn.component_subpath("b"))
+        handle = await operator.delete(syn.unit_path("b"))
         await handle.ready()
         await operator.mark_ready()
 
@@ -633,8 +633,8 @@ def test_live_component_incremental_delete_direct() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.mount(
-            syn.component_subpath("live"), _IncrementalDeleteDirectLiveComponent
+        await syn.spawn(
+            syn.unit_path("live"), _IncrementalDeleteDirectLiveComponent
         )
 
     app = syn.App(
@@ -660,13 +660,13 @@ class _IncrementalDeleteNoStaleComponent:
 
     async def process(self) -> None:
         for key, value in _source_data.items():
-            await syn.mount(syn.component_subpath(key), _declare_item, key, value)
+            await syn.spawn(syn.unit_path(key), _declare_item, key, value)
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
         # Delete "b" only if it's in the current source data
         if "b" in _source_data:
-            handle = await operator.delete(syn.component_subpath("b"))
+            handle = await operator.delete(syn.unit_path("b"))
             await handle.ready()
         await operator.mark_ready()
 
@@ -681,8 +681,8 @@ async def test_live_component_incremental_delete_no_stale_tombstone() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.mount(
-            syn.component_subpath("live"), _IncrementalDeleteNoStaleComponent
+        await syn.spawn(
+            syn.unit_path("live"), _IncrementalDeleteNoStaleComponent
         )
 
     app = syn.App(
@@ -800,7 +800,7 @@ async def test_live_delete_reinsert_serializes_verified_effect_boundaries() -> N
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: int | syn.NonExistenceType,
+            desired_state: int | syn.AbsentType,
             prev_possible_records: Collection[int],
             prev_may_be_missing: bool,
             /,
@@ -813,7 +813,7 @@ async def test_live_delete_reinsert_serializes_verified_effect_boundaries() -> N
         ):
             del prev_may_be_missing
             assert isinstance(key, str)
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 if not prev_possible_records:
                     return None
                 descriptor = EffectDescriptor(
@@ -840,7 +840,7 @@ async def test_live_delete_reinsert_serializes_verified_effect_boundaries() -> N
     )
 
     async def declare_value(value: int) -> None:
-        syn.declare_target_state(provider.target_state("item", value))
+        syn.ensure_target_state(provider.target_state("item", value))
 
     class RaceLiveComponent:
         async def process(self) -> None:
@@ -849,18 +849,18 @@ async def test_live_delete_reinsert_serializes_verified_effect_boundaries() -> N
         async def process_live(self, operator: syn.LiveComponentOperator) -> None:
             await operator.update_full()
             initial = await operator.update(
-                syn.component_subpath("item"),
+                syn.unit_path("item"),
                 declare_value,
                 1,
             )
             await initial.ready()
 
-            deleting = await operator.delete(syn.component_subpath("item"))
+            deleting = await operator.delete(syn.unit_path("item"))
             await asyncio.wait_for(delete_apply_started.wait(), timeout=2)
             assert external == {}
 
             replacement = await operator.update(
-                syn.component_subpath("item"),
+                syn.unit_path("item"),
                 declare_value,
                 2,
             )
@@ -875,7 +875,7 @@ async def test_live_delete_reinsert_serializes_verified_effect_boundaries() -> N
     environment = common.create_test_env(__file__, suffix="verified_delete_reinsert")
 
     async def main() -> None:
-        await syn.mount(syn.component_subpath("live"), RaceLiveComponent)
+        await syn.spawn(syn.unit_path("live"), RaceLiveComponent)
 
     app = syn.App(
         syn.AppConfig(
@@ -922,7 +922,7 @@ class _IncrementalDeleteViaGCLiveComponent:
         await operator.update_full()
         # Incrementally add "extra"
         handle = await operator.update(
-            syn.component_subpath("extra"), _declare_item, "extra_key", 42
+            syn.unit_path("extra"), _declare_item, "extra_key", 42
         )
         await handle.ready()
         # Second full update: process() still only declares "a" and "b".
@@ -940,8 +940,8 @@ def test_live_component_incremental_delete() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.mount(
-            syn.component_subpath("live"), _IncrementalDeleteViaGCLiveComponent
+        await syn.spawn(
+            syn.unit_path("live"), _IncrementalDeleteViaGCLiveComponent
         )
 
     app = syn.App(
@@ -967,12 +967,12 @@ def _declare_gc_entries() -> None:
     Phase 1+: A, B only
     """
     if _gc_phase == 0:
-        syn.declare_target_state(GlobalDictTarget.target_state("gc_a", 1))
-        syn.declare_target_state(GlobalDictTarget.target_state("gc_b", 2))
-        syn.declare_target_state(GlobalDictTarget.target_state("gc_c", 3))
+        syn.ensure_target_state(GlobalDictTarget.target_state("gc_a", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("gc_b", 2))
+        syn.ensure_target_state(GlobalDictTarget.target_state("gc_c", 3))
     else:
-        syn.declare_target_state(GlobalDictTarget.target_state("gc_a", 1))
-        syn.declare_target_state(GlobalDictTarget.target_state("gc_b", 2))
+        syn.ensure_target_state(GlobalDictTarget.target_state("gc_a", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("gc_b", 2))
 
 
 class _GCLiveComponent:
@@ -989,7 +989,7 @@ class _GCLiveComponent:
 
         # Incremental add D
         handle = await operator.update(
-            syn.component_subpath("d_item"), _declare_item, "gc_d", 4
+            syn.unit_path("d_item"), _declare_item, "gc_d", 4
         )
         await handle.ready()
 
@@ -1004,7 +1004,7 @@ def test_live_component_update_full_gc() -> None:
     _source_data.clear()
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _GCLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _GCLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_update_full_gc", environment=synor_env),
@@ -1031,7 +1031,7 @@ class _LiveThatReports:
         self._exc = exc
 
     async def process(self) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("marker", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("marker", 1))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
@@ -1047,7 +1047,7 @@ class _LiveThatReportsCaught:
     """Raises and catches a ValueError, then reports it — exc.__traceback__ is real."""
 
     async def process(self) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("marker", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("marker", 1))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
@@ -1080,8 +1080,8 @@ def test_report_exception_routes_to_global_handler() -> None:
     )
 
     async def _root() -> None:
-        await syn.mount(
-            syn.component_subpath("live"),
+        await syn.spawn(
+            syn.unit_path("live"),
             _LiveThatReports,
             ValueError("boom from cycle"),
         )
@@ -1115,7 +1115,7 @@ def test_report_exception_surfaces_python_traceback() -> None:
     )
 
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("live"), _LiveThatReportsCaught)
+        await syn.spawn(syn.unit_path("live"), _LiveThatReportsCaught)
 
     app = syn.App(syn.AppConfig(name="test_report_exc_trace", environment=env), _root)
     app.update_blocking(live=True)
@@ -1134,7 +1134,7 @@ async def _failing_child(value: int) -> None:
 
 async def _child_declare_one(value: int) -> None:
     """Helper for delete-propagation test: declares a single target row."""
-    syn.declare_target_state(GlobalDictTarget.target_state("c", value))
+    syn.ensure_target_state(GlobalDictTarget.target_state("c", value))
 
 
 class _LiveThatDeletesWithFailingSink:
@@ -1151,12 +1151,12 @@ class _LiveThatDeletesWithFailingSink:
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
-        h = await operator.update(syn.component_subpath("c"), _child_declare_one, 1)
+        h = await operator.update(syn.unit_path("c"), _child_declare_one, 1)
         await h.ready()
         await operator.mark_ready()
         GlobalDictTarget.store.sink_exception = True
         try:
-            dh = await operator.delete(syn.component_subpath("c"))
+            dh = await operator.delete(syn.unit_path("c"))
             await dh.ready()
         finally:
             GlobalDictTarget.store.sink_exception = False
@@ -1178,7 +1178,7 @@ def test_operator_delete_failure_routes_to_handler() -> None:
     )
 
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("live"), _LiveThatDeletesWithFailingSink)
+        await syn.spawn(syn.unit_path("live"), _LiveThatDeletesWithFailingSink)
 
     app = syn.App(syn.AppConfig(name="test_delete_route", environment=env), _root)
     app.update_blocking(live=True)
@@ -1206,12 +1206,12 @@ class _LiveThatDeletesWithRaisingHandler:
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         type(self).delete_err = None
         await operator.update_full()
-        h = await operator.update(syn.component_subpath("c"), _child_declare_one, 1)
+        h = await operator.update(syn.unit_path("c"), _child_declare_one, 1)
         await h.ready()
         await operator.mark_ready()
         GlobalDictTarget.store.sink_exception = True
         try:
-            dh = await operator.delete(syn.component_subpath("c"))
+            dh = await operator.delete(syn.unit_path("c"))
             try:
                 await dh.ready()
             except Exception as e:
@@ -1240,8 +1240,8 @@ def test_operator_delete_failure_propagates_via_raising_handler() -> None:
     )
 
     async def _root() -> None:
-        await syn.mount(
-            syn.component_subpath("live"), _LiveThatDeletesWithRaisingHandler
+        await syn.spawn(
+            syn.unit_path("live"), _LiveThatDeletesWithRaisingHandler
         )
 
     app = syn.App(syn.AppConfig(name="test_delete_raise", environment=env), _root)
@@ -1258,14 +1258,14 @@ class _LiveThatUpdatesFailingChild:
     update_err: BaseException | None = None
 
     async def process(self) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("marker", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("marker", 1))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         type(self).update_err = None
         await operator.update_full()
         await operator.mark_ready()
         handle = await operator.update(
-            syn.component_subpath("bad_child"), _failing_child, 42
+            syn.unit_path("bad_child"), _failing_child, 42
         )
         try:
             await handle.ready()
@@ -1294,7 +1294,7 @@ def test_operator_update_child_failure_routes_to_handler() -> None:
     )
 
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("live"), _LiveThatUpdatesFailingChild)
+        await syn.spawn(syn.unit_path("live"), _LiveThatUpdatesFailingChild)
 
     app = syn.App(syn.AppConfig(name="test_op_update_failure", environment=env), _root)
     app.update_blocking(live=True)
@@ -1324,7 +1324,7 @@ def test_operator_update_child_failure_propagates_via_raising_handler() -> None:
     )
 
     async def _root() -> None:
-        await syn.mount(syn.component_subpath("live"), _LiveThatUpdatesFailingChild)
+        await syn.spawn(syn.unit_path("live"), _LiveThatUpdatesFailingChild)
 
     app = syn.App(syn.AppConfig(name="test_op_update_raise", environment=env), _root)
     app.update_blocking(live=True)
@@ -1343,8 +1343,8 @@ def test_report_exception_falls_back_to_log_when_no_handler(
     env = common.create_test_env(__file__, suffix="report_exc_no_handler")
 
     async def _root() -> None:
-        await syn.mount(
-            syn.component_subpath("live"),
+        await syn.spawn(
+            syn.unit_path("live"),
             _LiveThatReports,
             RuntimeError("no handler boom"),
         )
@@ -1402,7 +1402,7 @@ _live_source: dict[str, int] = {}
 def _declare_live_item(key: str) -> None:
     """Per-item function for LiveMapView tests. Looks up value from _live_source."""
     value = _live_source[key]
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
 def test_mount_each_live_items_view_basic() -> None:
@@ -1413,7 +1413,7 @@ def test_mount_each_live_items_view_basic() -> None:
     items = _TestLiveMapView(_live_source)
 
     async def _main() -> None:
-        await syn.mount_each(_declare_live_item, items)  # type: ignore[call-overload]
+        await syn.spawn_each(_declare_live_item, items)  # type: ignore[call-overload]
 
     app = syn.App(
         syn.AppConfig(name="test_live_items_basic", environment=synor_env),
@@ -1436,7 +1436,7 @@ def test_mount_each_live_items_view_catch_up_mode() -> None:
     items = _TestLiveMapView(_live_source)
 
     async def _main() -> None:
-        await syn.mount_each(_declare_live_item, items)  # type: ignore[call-overload]
+        await syn.spawn_each(_declare_live_item, items)  # type: ignore[call-overload]
 
     app = syn.App(
         syn.AppConfig(name="test_live_items_catch_up", environment=synor_env),
@@ -1465,7 +1465,7 @@ def test_mount_each_live_items_view_incremental_update() -> None:
     items.set_watch_fn(_after_ready)
 
     async def _main() -> None:
-        await syn.mount_each(_declare_live_item, items)  # type: ignore[call-overload]
+        await syn.spawn_each(_declare_live_item, items)  # type: ignore[call-overload]
 
     app = syn.App(
         syn.AppConfig(name="test_live_items_incr_update", environment=synor_env),
@@ -1495,7 +1495,7 @@ def test_mount_each_live_items_view_update_all_rescan() -> None:
     items.set_watch_fn(_after_ready)
 
     async def _main() -> None:
-        await syn.mount_each(_declare_live_item, items)  # type: ignore[call-overload]
+        await syn.spawn_each(_declare_live_item, items)  # type: ignore[call-overload]
 
     app = syn.App(
         syn.AppConfig(name="test_live_items_rescan", environment=synor_env),
@@ -1516,7 +1516,7 @@ def test_mount_each_auto_subpath() -> None:
     _live_source["k1"] = 1
 
     async def _main() -> None:
-        await syn.mount_each(_declare_live_item, [("k1", "k1")])  # type: ignore[call-overload]
+        await syn.spawn_each(_declare_live_item, [("k1", "k1")])  # type: ignore[call-overload]
 
     app = syn.App(
         syn.AppConfig(name="test_mount_each_auto_subpath", environment=synor_env),
@@ -1544,7 +1544,7 @@ class _PerItemLiveComponent:
         self._value = value
 
     async def process(self) -> None:
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(f"item{self._value}", self._value)
         )
 
@@ -1562,8 +1562,8 @@ def test_mount_each_live_component_per_item_catch_up() -> None:
     GlobalDictTarget.store.clear()
 
     async def _main() -> None:
-        await syn.mount_each(
-            syn.component_subpath("items"),
+        await syn.spawn_each(
+            syn.unit_path("items"),
             _PerItemLiveComponent,
             [("a", 1), ("b", 2)],
         )
@@ -1592,8 +1592,8 @@ def test_mount_each_live_component_per_item_live_mode() -> None:
     GlobalDictTarget.store.clear()
 
     async def _main() -> None:
-        handle = await syn.mount_each(
-            syn.component_subpath("items"),
+        handle = await syn.spawn_each(
+            syn.unit_path("items"),
             _PerItemLiveComponent,
             [("a", 1), ("b", 2), ("c", 3)],
         )
@@ -1627,8 +1627,8 @@ def test_mount_each_live_component_per_item_gc_on_rerun() -> None:
     GlobalDictTarget.store.clear()
 
     async def _main() -> None:
-        handle = await syn.mount_each(
-            syn.component_subpath("items"),
+        handle = await syn.spawn_each(
+            syn.unit_path("items"),
             _PerItemLiveComponent,
             [(str(v), v) for v in _per_item_live_source],
         )
@@ -1661,7 +1661,7 @@ class _PerItemLiveComponentByName:
         self._name = name
 
     async def process(self) -> None:
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(self._name, _live_source[self._name])
         )
 
@@ -1685,8 +1685,8 @@ def test_mount_each_live_items_view_with_live_component() -> None:
     items = _TestLiveMapView(_live_source)
 
     async def _main() -> None:
-        await syn.mount_each(
-            syn.component_subpath("items"),
+        await syn.spawn_each(
+            syn.unit_path("items"),
             _PerItemLiveComponentByName,
             items,  # type: ignore[arg-type]
         )
@@ -1706,7 +1706,7 @@ def test_mount_each_live_items_view_with_live_component() -> None:
 
 
 def test_mount_each_no_name_raises() -> None:
-    """Callables without __name__ require an explicit ComponentSubpath."""
+    """Callables without __name__ require an explicit UnitPath."""
 
     class _NoName:
         def __call__(self, x: Any) -> None:
@@ -1715,13 +1715,13 @@ def test_mount_each_no_name_raises() -> None:
     fn = _NoName()  # callable instance without __name__
 
     async def _main() -> None:
-        await syn.mount_each(fn, [("a", 1)])  # type: ignore[arg-type]
+        await syn.spawn_each(fn, [("a", 1)])  # type: ignore[arg-type]
 
     app = syn.App(
         syn.AppConfig(name="test_mount_each_no_name", environment=synor_env),
         _main,
     )
-    with pytest.raises(TypeError, match="requires a ComponentSubpath"):
+    with pytest.raises(TypeError, match="requires a UnitPath"):
         app.update_blocking()
 
 
@@ -1759,7 +1759,7 @@ async def test_live_component_global_cancel_terminates_update() -> None:
                 raise
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("live"), _BlockingLive)
+        await syn.spawn(syn.unit_path("live"), _BlockingLive)
 
     _core.reset_global_cancellation()
     app = syn.App(
@@ -1797,7 +1797,7 @@ async def test_drop_cancels_own_live_update_then_acquires_process_lease() -> Non
 
     class BlockingLive:
         async def process(self) -> None:
-            syn.declare_target_state(GlobalDictTarget.target_state("leased-live", 1))
+            syn.ensure_target_state(GlobalDictTarget.target_state("leased-live", 1))
 
         async def process_live(self, operator: syn.LiveComponentOperator) -> None:
             await operator.update_full()
@@ -1812,7 +1812,7 @@ async def test_drop_cancels_own_live_update_then_acquires_process_lease() -> Non
     environment = common.create_test_env(__file__, suffix="drop_live_lease_handoff")
 
     async def main() -> None:
-        await syn.mount(syn.component_subpath("live"), BlockingLive)
+        await syn.spawn(syn.unit_path("live"), BlockingLive)
 
     app = syn.App(
         syn.AppConfig(

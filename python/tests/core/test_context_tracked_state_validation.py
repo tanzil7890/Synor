@@ -56,7 +56,7 @@ class StatefulEmbedder:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         memo_valid = (
-            not syn.is_non_existence(prev_state) and prev_state == self.state_value
+            not syn.is_absent(prev_state) and prev_state == self.state_value
         )
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
@@ -83,18 +83,18 @@ _metrics_fn = Metrics()
 _source_fn: dict[str, str] = {}
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _embed_text(key: str) -> str:
     _metrics_fn.increment("embed")
     embedder = syn.use_context(EMBEDDER_KEY)
     return f"{embedder.name}({embedder.state_value}):{key}"
 
 
-@syn.fn
+@syn.task
 def _run_embed() -> None:
     for key in _source_fn:
         result = _embed_text(key)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result))
 
 
 def test_detect_change_context_state_validation_function_level() -> None:
@@ -161,7 +161,7 @@ class TwoLevelStatefulEmbedder:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         new_state = (self.generation, self.content_hash)
-        if syn.is_non_existence(prev_state):
+        if syn.is_absent(prev_state):
             return syn.MemoStateOutcome(state=new_state, memo_valid=False)
         _, prev_hash = prev_state
         memo_valid = prev_hash == self.content_hash
@@ -175,14 +175,14 @@ TWO_LEVEL_KEY = syn.ContextKey[TwoLevelStatefulEmbedder](
 _metrics_two_level = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _embed_two_level(key: str) -> str:
     _metrics_two_level.increment("embed2")
     emb = syn.use_context(TWO_LEVEL_KEY)
     return f"{emb.name}:{key}:{emb.content_hash}"
 
 
-@syn.fn
+@syn.task
 def _run_embed_two_level() -> None:
     _embed_two_level("k1")
 
@@ -251,14 +251,14 @@ REPLACE_KEY = syn.ContextKey[StatefulEmbedder](
 _metrics_replace = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _embed_replace(key: str) -> str:
     _metrics_replace.increment("embed3")
     emb = syn.use_context(REPLACE_KEY)
     return f"{emb.name}:{key}"
 
 
-@syn.fn
+@syn.task
 def _run_embed_replace() -> None:
     _embed_replace("k1")
 
@@ -308,7 +308,7 @@ class _Inner:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         memo_valid = (
-            not syn.is_non_existence(prev_state) and prev_state == self.state_value
+            not syn.is_absent(prev_state) and prev_state == self.state_value
         )
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
@@ -320,14 +320,14 @@ COMPOSITE_KEY = syn.ContextKey[tuple[str, _Inner]](
 _metrics_composite = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _embed_composite(key: str) -> str:
     _metrics_composite.increment("embed4")
     label, _ = syn.use_context(COMPOSITE_KEY)
     return f"{label}:{key}"
 
 
-@syn.fn
+@syn.task
 def _run_embed_composite() -> None:
     _embed_composite("k1")
 
@@ -381,19 +381,19 @@ _metrics_comp = Metrics()
 _source_comp: dict[str, str] = {}
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _embed_component(item: str) -> None:
     _metrics_comp.increment("comp")
     emb = syn.use_context(COMP_KEY)
-    syn.declare_target_state(
+    syn.ensure_target_state(
         GlobalDictTarget.target_state(item, f"{emb.name}({emb.state_value}):{item}")
     )
 
 
-@syn.fn
+@syn.task
 async def _mount_embed() -> None:
     for item in _source_comp:
-        await syn.mount(syn.component_subpath(item), _embed_component, item)
+        await syn.spawn(syn.unit_path(item), _embed_component, item)
 
 
 def test_detect_change_context_state_validation_component_level() -> None:
@@ -452,7 +452,7 @@ _use_both_keys = False
 _metrics_branch = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _branching_fn(k: str) -> str:
     _metrics_branch.increment("branch")
     a = syn.use_context(KEY_A)
@@ -463,7 +463,7 @@ def _branching_fn(k: str) -> str:
     return f"{'|'.join(parts)}:{k}"
 
 
-@syn.fn
+@syn.task
 def _run_branching() -> None:
     _branching_fn("x")
 

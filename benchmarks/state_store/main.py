@@ -49,14 +49,14 @@ class _NoopTargetHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: None | syn.NonExistenceType,
+        desired_state: None | syn.AbsentType,
         _prev_records: Collection[None],
         _prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[tuple[syn.StableKey, bool], None] | None:
-        is_delete = syn.is_non_existence(desired_state)
-        tracking_record: None | syn.NonExistenceType = (
-            syn.NON_EXISTENCE if is_delete else None
+        is_delete = syn.is_absent(desired_state)
+        tracking_record: None | syn.AbsentType = (
+            syn.ABSENT if is_delete else None
         )
         return syn.TargetReconcileOutput(
             action=(key, is_delete),
@@ -70,20 +70,20 @@ _noop_provider = syn.register_root_target_states_provider(
 )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def noop_component(idx: int) -> None:
     """Memoized component: declares _M no-op target states. Memo lets warm
     runs short-circuit recomputation; declared target states still flow
     through pre_commit / commit so the target-state write path is
     exercised."""
     for j in range(_M):
-        syn.declare_target_state(_noop_provider.target_state(f"{idx}-{j}", None))
+        syn.ensure_target_state(_noop_provider.target_state(f"{idx}-{j}", None))
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     items = [(str(i), i) for i in range(_N)]
-    await syn.mount_each(noop_component, items)
+    await syn.spawn_each(noop_component, items)
 
 
 app = syn.App("StateStoreBench", app_main)

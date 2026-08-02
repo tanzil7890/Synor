@@ -6,7 +6,7 @@ from tests.common import create_test_env
 synor_env = create_test_env(__file__)
 
 
-@syn.fn()
+@syn.task()
 def trivial_fn_sync(s: str, i: int) -> str:
     return f"{s} {i}"
 
@@ -37,7 +37,7 @@ async def test_sync_bare_app() -> None:
     assert await app.update() == "Hello sync_bare_app 2"
 
 
-@syn.fn()
+@syn.task()
 async def trivial_fn_async(s: str, i: int) -> str:
     return f"{s} {i}"
 
@@ -53,7 +53,7 @@ async def test_async_app() -> None:
     assert await app.update() == "Hello async_app 3"
 
 
-@syn.fn.as_async()
+@syn.task.as_async()
 def trivial_fn_async_wrapped(s: str, i: int) -> str:
     return f"{s} {i}"
 

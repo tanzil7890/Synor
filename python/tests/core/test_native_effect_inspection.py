@@ -5,7 +5,7 @@ import synor.inspect as synor_inspect
 from tests import common
 
 
-@syn.fn
+@syn.task
 async def _empty_app() -> None:
     pass
 

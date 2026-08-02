@@ -53,7 +53,7 @@ async def synor_lifespan(
     yield
 
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
@@ -62,7 +62,7 @@ async def process_chunk(
 ) -> None:
     embedding_vec = await syn.use_context(EMBEDDER).embed(chunk.text)
 
-    target.declare_row(
+    target.ensure_row(
         turbopuffer.Row(
             id=str(await id_gen.next_id(chunk.text)),
             vector=embedding_vec,
@@ -76,7 +76,7 @@ async def process_chunk(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     target: turbopuffer.NamespaceTarget,
@@ -89,7 +89,7 @@ async def process_file(
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, target)
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_namespace = await turbopuffer.mount_namespace_target(
         TPUF_DB,
@@ -104,7 +104,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # source supports live watch; pass -L to `synor update` to actually run live
     )
-    await syn.mount_each(process_file, files.items(), target_namespace)
+    await syn.spawn_each(process_file, files.items(), target_namespace)
 
 
 app = syn.App(

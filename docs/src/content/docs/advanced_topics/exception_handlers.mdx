@@ -15,10 +15,10 @@ For a quick overview of failure isolation and the two-phase model, see [What hap
 
 | API | What it takes to return | Raises on failure? |
 |---|---|---|
-| `syn.mount`, `syn.mount_each`, `LiveComponentOperator.update`/`.delete` | the work is *scheduled* (returns a handle) | **No** — execution runs in the background |
+| `syn.spawn`, `syn.spawn_each`, `LiveComponentOperator.update`/`.delete` | the work is *scheduled* (returns a handle) | **No** — execution runs in the background |
 | `await handle.ready()` (any of the above) | reaches *ready state* | **No by default** — logged at `ERROR`; opt into propagation by installing a handler that raises |
 | `await LiveComponentOperator.update_full()` | reaches *ready state* of the full cycle | **No by default** — same shape as `handle.ready()` |
-| `await syn.use_mount(...)` | the inner component's *value* is produced | **Yes** — component success is on the critical path |
+| `await syn.call(...)` | the inner component's *value* is produced | **Yes** — component success is on the critical path |
 | `await app.drop()` (and `synor drop`) | GC succeeds at *every* level | **Yes**, at any depth — leaking target state would otherwise go silent |
 
 **Why `ready`/`update_full` tolerate errors by default:** `handle.ready()` is usually not awaited (callers spawn many mounts in a loop and rely on the parent's `wait_for_children`), so raising into nobody would silently disappear. Logging the failure gives operators a signal regardless. The same applies to `update_full` — a periodic refresh that died on the first cycle failure would be worse than one that logs and retries on the next tick.
@@ -73,15 +73,15 @@ See [Progress monitoring](./progress_monitoring) for the full `UpdateHandle` API
 
 ## Exception handlers
 
-For background-mounted components (`mount()` and `mount_each()`), you can register **exception handlers** to observe or react to failures — for example, to send alerts, record metrics, or implement custom logic.
+For background-mounted components (`spawn()` and `spawn_each()`), you can register **exception handlers** to observe or react to failures — for example, to send alerts, record metrics, or implement custom logic.
 
 Synor supports two levels of exception handlers:
 
 - **Global (environment-level)**: registered once in your lifespan function; applies to all background mounts in the environment.
-- **Scoped**: an async context manager that applies to all `mount()` / `mount_each()` calls made within it.
+- **Scoped**: an async context manager that applies to all `spawn()` / `spawn_each()` calls made within it.
 
 :::note
-Exception handlers only apply to `mount()` and `mount_each()`. `use_mount()` propagates errors directly to the caller since the parent has an explicit dependency on the result.
+Exception handlers only apply to `spawn()` and `spawn_each()`. `call()` propagates errors directly to the caller since the parent has an explicit dependency on the result.
 :::
 
 ### Global exception handler
@@ -107,17 +107,17 @@ This replaces the default "log error" behavior for all background mounts in the 
 Use `syn.exception_handler()` as an async context manager to apply a handler to a specific dynamic scope:
 
 ```python
-@syn.fn
+@syn.task
 async def process_all(files):
     def on_error(exc: BaseException, ctx: syn.ExceptionContext) -> None:
         print(f"Failed processing {ctx.stable_path}: {exc}")
 
     async with syn.exception_handler(on_error):
         for f in files:
-            await syn.mount(syn.component_subpath(str(f.path)), process_file, f)
+            await syn.spawn(syn.unit_path(str(f.path)), process_file, f)
 ```
 
-The handler applies to all `mount()` / `mount_each()` calls within the `async with` block, including those in nested functions called from within the block.
+The handler applies to all `spawn()` / `spawn_each()` calls within the `async with` block, including those in nested functions called from within the block.
 
 ### Handler type
 
@@ -183,14 +183,14 @@ def lifespan(builder: syn.EnvironmentBuilder):
     builder.set_exception_handler(global_handler)
     yield
 
-@syn.fn
+@syn.task
 async def _root() -> None:
     def inner_handler(exc: BaseException, ctx: syn.ExceptionContext) -> None:
         print(f"inner: {exc}")
         raise RuntimeError("inner handler failed")  # falls through to global_handler
 
     async with syn.exception_handler(inner_handler):
-        await syn.mount(syn.component_subpath("child"), _child)
+        await syn.spawn(syn.unit_path("child"), _child)
 ```
 
 Users who never register handlers see identical behavior to the default — exceptions from background mounts are logged at `ERROR` level and siblings continue unaffected.

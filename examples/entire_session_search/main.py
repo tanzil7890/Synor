@@ -154,14 +154,14 @@ def parse_transcript(content: str) -> list[TranscriptChunk]:
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: ChunkInput,
     info: SessionInfo,
     id_gen: IdGenerator,
     emb_table: postgres.TableTarget[SessionEmbeddingRow],
 ) -> None:
-    emb_table.declare_row(
+    emb_table.ensure_row(
         row=SessionEmbeddingRow(
             id=await id_gen.next_id(chunk.text),
             checkpoint_id=info.checkpoint_id,
@@ -174,7 +174,7 @@ async def process_chunk(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     emb_table: postgres.TableTarget[SessionEmbeddingRow],
@@ -201,7 +201,7 @@ async def process_file(
     elif filename == "prompt.txt":
         text = (await file.read_text()).strip()
         if text:
-            emb_table.declare_row(
+            emb_table.ensure_row(
                 row=SessionEmbeddingRow(
                     id=await id_gen.next_id(text),
                     checkpoint_id=info.checkpoint_id,
@@ -257,7 +257,7 @@ async def process_file(
         if agent_pct is not None:
             agent_pct = float(agent_pct)
 
-        meta_table.declare_row(
+        meta_table.ensure_row(
             row=SessionMetadataRow(
                 checkpoint_id=info.checkpoint_id,
                 session_index=info.session_index,
@@ -274,7 +274,7 @@ async def process_file(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def app_main(checkpoints_dir: pathlib.Path) -> None:
     emb_table = await postgres.mount_table_target(
         PG_DB,
@@ -310,7 +310,7 @@ async def app_main(checkpoints_dir: pathlib.Path) -> None:
         ),
         live=True,  # source supports live watch; pass -L to `synor update` to actually run live
     )
-    await syn.mount_each(process_file, files.items(), emb_table, meta_table)
+    await syn.spawn_each(process_file, files.items(), emb_table, meta_table)
 
 
 app = syn.App(

@@ -11,7 +11,7 @@ them in Postgres/pgvector — then serves similarity search.
 | ---------------- | ---------------------------------------- | -------------------------------------------------- |
 | Source           | `localfs.walk_dir` (`**/*.pdf`)          | `synor::fs::walk` (`**/*.pdf`)                 |
 | PDF → text       | `docling` (PDF → Markdown, ML pipeline)  | `lopdf` text extraction                            |
-| Per-file compute | `@syn.fn(memo=True) process_file`       | `#[synor::function(memo)] process_file`         |
+| Per-file compute | `@syn.task(cache=True) process_file`       | `#[synor::function(memo)] process_file`         |
 | Chunking         | `RecursiveSplitter` (markdown, 2000/500) | `synor_ops_text` `RecursiveChunker` (markdown, 2000/500) |
 | Embeddings       | `sentence-transformers/all-MiniLM-L6-v2` | `fastembed` `AllMiniLML6V2` (same model, 384-dim)   |
 | Target           | `postgres.mount_table_target`            | `postgres::mount_table_target`                      |

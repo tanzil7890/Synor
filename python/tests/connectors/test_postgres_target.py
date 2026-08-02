@@ -242,15 +242,15 @@ async def test_postgres_declare_vector_index(pg_env: _PgEnv) -> None:
         async def declare_fn() -> None:
             if not declare_table:
                 return
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(VectorRow, primary_key=["id"]),
             )
             for row in source_rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
             table.declare_vector_index(
                 name=logical_name,
                 column="embedding",
@@ -324,15 +324,15 @@ async def test_postgres_declare_vector_index_recreate_in_non_default_schema(
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(VectorRow, primary_key=["id"]),
                 pg_schema_name=schema_name,
             )
-            table.declare_row(
+            table.ensure_row(
                 row=VectorRow(
                     id="1",
                     content="hello",
@@ -391,15 +391,15 @@ async def test_postgres_declare_vector_index_fingerprint_no_change(
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(VectorRow, primary_key=["id"]),
             )
             for row in source_rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
             table.declare_vector_index(
                 name=logical_name,
                 column="embedding",
@@ -441,16 +441,16 @@ async def test_postgres_declare_halfvec_vector_index_uses_halfvec_opclass(
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(
                     HalfVectorRow, primary_key=["id"]
                 ),
             )
-            table.declare_row(
+            table.ensure_row(
                 row=HalfVectorRow(
                     id="1",
                     content="hello",
@@ -499,15 +499,15 @@ async def test_postgres_declare_sql_command_attachment(pg_env: _PgEnv) -> None:
         async def declare_fn() -> None:
             if not declare_table:
                 return
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(TextRow, primary_key=["id"]),
             )
             for row in source_rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
             if current_setup_sql is not None:
                 table.declare_sql_command_attachment(
                     name="custom_idx",
@@ -574,15 +574,15 @@ async def test_postgres_sql_command_attachment_no_teardown(pg_env: _PgEnv) -> No
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(TextRow, primary_key=["id"]),
             )
             for row in source_rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
             if declare_attachment:
                 table.declare_sql_command_attachment(
                     name="temp_idx",
@@ -630,15 +630,15 @@ async def test_postgres_mixed_rows_and_attachments(pg_env: _PgEnv) -> None:
         async def declare_fn() -> None:
             if not declare_table:
                 return
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(VectorRow, primary_key=["id"]),
             )
             for row in source_rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
             table.declare_vector_index(
                 name=logical_name,
                 column="embedding",
@@ -729,15 +729,15 @@ async def test_postgres_strips_nul_in_text_and_jsonb(pg_env: _PgEnv) -> None:
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 await postgres.TableSchema.from_class(_NulProbeRow, primary_key=["id"]),
             )
             for row in rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
 
         app = syn.App(
             syn.AppConfig(name=f"test_nul_strip_{table_name}", environment=synor_env),
@@ -798,9 +798,9 @@ async def test_postgres_column_drop_retries_after_failed_attempt(
     try:
 
         async def declare_fn() -> None:
-            await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 _schema(),
@@ -890,14 +890,14 @@ async def test_schema_evolution_compatible_changes(pg_env: _PgEnv) -> None:
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 _schema(),
             )
-            table.declare_row(
+            table.ensure_row(
                 row={
                     "id": "row1",
                     "col_nn_nn": "data1",
@@ -979,15 +979,15 @@ async def test_schema_evolution_incompatible_fallback(
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 _schema(),
             )
             if not use_v2:
-                table.declare_row(row={"id": "row1", "incompat_col": "not_an_int"})
+                table.ensure_row(row={"id": "row1", "incompat_col": "not_an_int"})
 
         app = syn.App(
             syn.AppConfig(name=f"test_schema_fb_{table_name}", environment=synor_env),
@@ -1055,15 +1055,15 @@ async def test_postgres_strips_nul_in_array_columns(pg_env: _PgEnv) -> None:
     try:
 
         async def declare_fn() -> None:
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                postgres.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                postgres.ensure_table_target,
                 _PG_DB_KEY,
                 table_name,
                 schema,
             )
             for row in rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
 
         app = syn.App(
             syn.AppConfig(name=f"test_arr_nul_{table_name}", environment=synor_env),

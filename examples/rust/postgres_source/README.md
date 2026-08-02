@@ -13,7 +13,7 @@ output.
 | Concern            | Python                                            | Rust (this example)                                    |
 | ------------------ | ------------------------------------------------- | ------------------------------------------------------ |
 | Source rows        | `postgres.PgTableSource(...).fetch_rows()`        | `postgres::read_table::<SourceProduct>(db, "source_products")` |
-| Per-row compute    | `@syn.fn(memo=True) process_product`             | `#[synor::function(memo)] process_product`         |
+| Per-row compute    | `@syn.task(cache=True) process_product`             | `#[synor::function(memo)] process_product`         |
 | Output store       | `postgres.TableTarget` + vector index             | `postgres::mount_table_target` + `declare_vector_index` |
 | Embeddings         | `sentence-transformers/all-MiniLM-L6-v2`          | `fastembed` `AllMiniLML6V2` (same model, 384-dim)      |
 

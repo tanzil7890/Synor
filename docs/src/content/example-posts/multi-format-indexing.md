@@ -32,7 +32,7 @@ A file fans out to **pages**, so the shape is *file → N pages → N points*:
 One function handles every format: PDFs go through [`pdf2image`](https://github.com/Belval/pdf2image), images pass through as a single page, anything else is skipped.
 
 ```python title="main.py"
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def file_to_pages(filename: str, content: bytes) -> list[Page]:
     mime_type, _ = mimetypes.guess_type(filename)
     if mime_type == "application/pdf":
@@ -50,7 +50,7 @@ def file_to_pages(filename: str, content: bytes) -> list[Page]:
 `process_file` splits a file into pages, then maps each page through `process_file`'s helper, which embeds it with ColPali and declares one multi-vector Qdrant point:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_page(page: Page, filename: str, target: qdrant.CollectionTarget) -> None:
     embedding = await embed_page(page.image)          # list[list[float]] — multi-vector
     target.declare_point(
@@ -62,13 +62,13 @@ async def process_page(page: Page, filename: str, target: qdrant.CollectionTarge
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     pages = await file_to_pages(str(file.file_path.path), await file.read())
     await syn.map(process_page, pages, str(file.file_path.path), target)
 ```
 
-`embed_page` runs the ColPali model (loaded once via `@functools.cache`) and returns a *list of* vectors — the multi-vector representation. `syn.map` fans out one `process_page` per page, and `@syn.fn(memo=True)` skips files that haven't changed.
+`embed_page` runs the ColPali model (loaded once via `@functools.cache`) and returns a *list of* vectors — the multi-vector representation. `syn.map` fans out one `process_page` per page, and `@syn.task(cache=True)` skips files that haven't changed.
 
 ## The multi-vector Qdrant collection
 

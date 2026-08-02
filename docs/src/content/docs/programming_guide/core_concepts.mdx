@@ -64,8 +64,8 @@ In the diagram, each note path owns one JSON outcome. When
 `notes/retired.md` disappears, that component path is absent from the next run.
 Synor removes the outcome that path previously owned.
 
-See [Choose work units](./processing_component) for `mount`, `use_mount`,
-`mount_each`, and explicit component subpaths.
+See [Choose work units](./processing_component) for `mount`, `call`,
+`spawn_each`, and explicit component subpaths.
 
 ## Target states describe outcomes
 
@@ -97,7 +97,7 @@ keys, and synchronization behavior.
 
 ## Memoization preserves settled work
 
-`@syn.fn(memo=True)` allows a function result to be reused when its serialized
+`@syn.task(cache=True)` allows a function result to be reused when its serialized
 arguments and implementation fingerprint are unchanged. Memoization can sit at
 more than one level.
 

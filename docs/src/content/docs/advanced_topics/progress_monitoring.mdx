@@ -70,18 +70,18 @@ class UpdateSnapshot:
 
 By default every component's stats roll up into one report for the whole `app.update()`. For a large pipeline you often want to watch a *part* of it on its own — "indexing the docs tree" separately from "indexing the code tree", or one expensive phase by itself.
 
-`syn.stats_group(title)` opens a scope: everything mounted inside the block aggregates into a **separate** report under `title`, **split out** of the parent (the parent report no longer counts that work — there's no double counting). It's a plain `with` block, used inside a processing component like [`syn.component_subpath`](../programming_guide/processing_component#using-component_subpath-as-a-context-manager):
+`syn.stats_group(title)` opens a scope: everything mounted inside the block aggregates into a **separate** report under `title`, **split out** of the parent (the parent report no longer counts that work — there's no double counting). It's a plain `with` block, used inside a processing component like [`syn.unit_path`](../programming_guide/processing_component#using-unit_path-as-a-context-manager):
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(docs_dir, code_dir, target):
     with syn.stats_group("Indexing docs", report_to_stdout=True):
         files = localfs.walk_dir(docs_dir, ...)
-        await syn.mount_each(process_doc, files.items(), target)
+        await syn.spawn_each(process_doc, files.items(), target)
 
     with syn.stats_group("Indexing code", report_to_stdout=True):
         files = localfs.walk_dir(code_dir, ...)
-        await syn.mount_each(process_code, files.items(), target)
+        await syn.spawn_each(process_code, files.items(), target)
 ```
 
 With `report_to_stdout=True`, the group's progress is also printed to stdout, labeled by its title, alongside the main `report_to_stdout` display without disrupting it. Pass a `timedelta` instead of `True` to set the group's refresh interval.
@@ -90,7 +90,7 @@ The block yields a `StatsGroupHandle` with the same `stats()` and `watch()` as `
 
 ```python
 with syn.stats_group("Indexing docs") as sg:
-    await syn.mount_each(process_doc, files.items(), target)
+    await syn.spawn_each(process_doc, files.items(), target)
 
 # Exit is non-blocking, so the mounted work keeps running after the block —
 # `sg` stays valid; drain its watch() to follow that work to completion:

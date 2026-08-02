@@ -75,7 +75,7 @@ async def synor_lifespan(
         yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_product(
     product: SourceProduct,
     table: postgres.TableTarget[OutputProduct],
@@ -83,7 +83,7 @@ async def process_product(
     full_description = f"Category: {product.product_category}\nName: {product.product_name}\n\n{product.description}"
     total_value = product.price * product.amount
     embedding = await syn.use_context(EMBEDDER).embed(full_description)
-    table.declare_row(
+    table.ensure_row(
         row=OutputProduct(
             product_category=product.product_category,
             product_name=product.product_name,
@@ -96,7 +96,7 @@ async def process_product(
     )
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -114,7 +114,7 @@ async def app_main() -> None:
         row_type=SourceProduct,
     )
 
-    await syn.mount_each(
+    await syn.spawn_each(
         process_product,
         source.fetch_rows().items(lambda p: (p.product_category, p.product_name)),
         target_table,

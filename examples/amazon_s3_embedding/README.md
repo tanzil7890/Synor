@@ -11,10 +11,10 @@ This is Semantic Search 101 with one thing swapped: the source is an Amazon S3 b
 
 ## How it works
 
-The S3 connector needs an [aiobotocore](https://github.com/aio-libs/aiobotocore) client, opened once in the lifespan alongside the Postgres pool and embedder. `app_main` mounts the Postgres table exactly as in the base example, then swaps `localfs.walk_dir` for `amazon_s3.list_objects` — same `path_matcher` glob, same `mount_each` fan-out. Read it in [`main.py`](main.py):
+The S3 connector needs an [aiobotocore](https://github.com/aio-libs/aiobotocore) client, opened once in the lifespan alongside the Postgres pool and embedder. `app_main` mounts the Postgres table exactly as in the base example, then swaps `localfs.walk_dir` for `amazon_s3.list_objects` — same `path_matcher` glob, same `spawn_each` fan-out. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB, table_name=TABLE_NAME,
@@ -26,17 +26,17 @@ async def app_main() -> None:
         client, S3_BUCKET, prefix=S3_PREFIX,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
 `list_objects` yields one `S3File` per matching object; `prefix` scopes the listing server-side, and the glob filters the rest. `process_file` then reads, chunks, and embeds each one — identical to the base example. `create_client("s3")` picks up standard AWS credentials (env vars, `~/.aws/credentials`, or an IAM role); set `AWS_ENDPOINT_URL` to point at an S3-compatible service like MinIO.
 
 ## Why this example is useful
 
-- **S3 as a first-class source.** `amazon_s3.list_objects` drops into the same `mount_each` fan-out as a local folder — the source is a swappable detail, not a rewrite.
+- **S3 as a first-class source.** `amazon_s3.list_objects` drops into the same `spawn_each` fan-out as a local folder — the source is a swappable detail, not a rewrite.
 - **Scoped listing.** `prefix` filters server-side and the `**/*.md` glob filters the rest, so you index only what you mean to.
 - **S3-compatible too.** Point `AWS_ENDPOINT_URL` at MinIO or any S3-compatible service; credentials come from the standard AWS chain.
-- **Incremental by default.** `@syn.fn(memo=True)` skips objects whose content and code are unchanged; each row's `id` is derived from its chunk text, so re-running upserts only changed rows and deletes rows whose source object is gone.
+- **Incremental by default.** `@syn.task(cache=True)` skips objects whose content and code are unchanged; each row's `id` is derived from its chunk text, so re-running upserts only changed rows and deletes rows whose source object is gone.
 - **Managed Postgres target.** A single `mount_table_target` owns the schema, idempotent upserts, and orphan cleanup; the same local `all-MiniLM-L6-v2` embedder is reused at query time so indexing and search stay consistent.
 
 ## Run it

@@ -24,14 +24,14 @@ _source_data: dict[str, SourceDataEntry] = {}
 _metrics = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_dict_entry(entry: SourceDataEntry) -> None:
     """Memoized function that declares a target state."""
     _metrics.increment("calls")
-    syn.declare_target_state(GlobalDictTarget.target_state(entry.name, entry.content))
+    syn.ensure_target_state(GlobalDictTarget.target_state(entry.name, entry.content))
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _declare_dict_data_memoized(data_version: int) -> None:
     """Main function that mounts child components. Memoized to test component memoization.
 
@@ -39,15 +39,15 @@ async def _declare_dict_data_memoized(data_version: int) -> None:
     """
     _metrics.increment("root_component")
     for entry in _source_data.values():
-        await syn.mount(syn.component_subpath(entry.name), _declare_dict_entry, entry)
+        await syn.spawn(syn.unit_path(entry.name), _declare_dict_entry, entry)
 
 
-@syn.fn
+@syn.task
 async def _declare_dict_data() -> None:
     """Main function that mounts child components. Not memoized."""
     _metrics.increment("root_component")
     for entry in _source_data.values():
-        await syn.mount(syn.component_subpath(entry.name), _declare_dict_entry, entry)
+        await syn.spawn(syn.unit_path(entry.name), _declare_dict_entry, entry)
 
 
 def test_full_reprocess_force_execution_of_memoized_functions() -> None:

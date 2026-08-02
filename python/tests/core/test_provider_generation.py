@@ -8,25 +8,25 @@ from tests.common.target_states import DictsTarget, DictDataWithPrev, AtMost
 _inner_exec_count: int = 0
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _insert_rows_memo(provider: Any, data: dict[str, Any]) -> None:
     global _inner_exec_count
     _inner_exec_count += 1
     for key, value in data.items():
-        syn.declare_target_state(provider.target_state(key, value))
+        syn.ensure_target_state(provider.target_state(key, value))
 
 
 async def _declare_dicts_with_memo() -> None:
-    with syn.component_subpath("dict"):
+    with syn.unit_path("dict"):
         for name, data in _source_data.items():
-            with syn.component_subpath(name):
-                single_dict_provider = await syn.use_mount(
-                    syn.component_subpath("setup"),
+            with syn.unit_path(name):
+                single_dict_provider = await syn.call(
+                    syn.unit_path("setup"),
                     DictsTarget.declare_dict_target,
                     name,
                 )
-                await syn.use_mount(  # type: ignore[call-overload]
-                    syn.component_subpath("rows"),
+                await syn.call(  # type: ignore[call-overload]
+                    syn.unit_path("rows"),
                     _insert_rows_memo,
                     single_dict_provider,
                     data,
@@ -39,15 +39,15 @@ _source_data: dict[str, dict[str, Any]] = {}
 
 
 async def _declare_dicts_data() -> None:
-    with syn.component_subpath("dict"):
+    with syn.unit_path("dict"):
         for name, data in _source_data.items():
-            single_dict_provider = await syn.use_mount(
-                syn.component_subpath(name),
+            single_dict_provider = await syn.call(
+                syn.unit_path(name),
                 DictsTarget.declare_dict_target,
                 name,
             )
             for key, value in data.items():
-                syn.declare_target_state(single_dict_provider.target_state(key, value))
+                syn.ensure_target_state(single_dict_provider.target_state(key, value))
 
 
 def _new_app(name: str) -> syn.App[[], None]:

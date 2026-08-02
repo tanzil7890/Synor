@@ -1,7 +1,7 @@
 """Module with deps='v1' for external-dependency change detection testing.
 
 The function body is IDENTICAL in deps_v1 and deps_v2 — only the value
-declared via the ``deps=`` parameter on ``@syn.fn`` differs.
+declared via the ``deps=`` parameter on ``@syn.task`` differs.
 """
 
 import synor as syn
@@ -17,7 +17,7 @@ def set_metrics(metrics: Metrics) -> None:
     _metrics = metrics
 
 
-@syn.fn(memo=True, deps=_PROMPT)
+@syn.task(cache=True, deps=_PROMPT)
 def transform_memo_deps(key: str, value: str) -> str:
     assert _metrics is not None
     _metrics.increment("transform_memo_deps")

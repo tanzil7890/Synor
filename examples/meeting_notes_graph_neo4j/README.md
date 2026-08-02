@@ -21,7 +21,7 @@ Three node types, three relationship types, and "who is on the hook for what" be
 Because people are shared across notes, the pipeline runs in three phases — read it top-to-bottom in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)  # Phase 1 — per note: split into meetings, declare Meeting/Task + DECIDED, carry raw names forward
+@syn.task(cache=True)  # Phase 1 — per note: split into meetings, declare Meeting/Task + DECIDED, carry raw names forward
 async def process_file(file, meeting_table, task_table, decided_rel) -> list[MeetingExtraction]:
     for section in _split_meetings(await file.read_text()):
         extracted = await extract_meeting(section)
@@ -32,12 +32,12 @@ async def process_file(file, meeting_table, task_table, decided_rel) -> list[Mee
             decided_rel.declare_relation(from_id=meeting_id, to_id=task.description)
         ...
 
-@syn.fn(memo=True)  # Phase 2 — collapse "Alice" / "Alice Chen" / "alice c." into canonical names
+@syn.task(cache=True)  # Phase 2 — collapse "Alice" / "Alice Chen" / "alice c." into canonical names
 async def _resolve_persons(raw_persons: set[str]) -> ResolvedEntities:
     return await resolve_entities(entities=raw_persons, embedder=syn.use_context(EMBEDDER),
                                   resolve_pair=LlmPairResolver(model=syn.use_context(RESOLUTION_LLM_MODEL)))
 
-@syn.fn              # Phase 3 — declare canonical Person nodes + ATTENDED / ASSIGNED_TO using resolved names
+@syn.task              # Phase 3 — declare canonical Person nodes + ATTENDED / ASSIGNED_TO using resolved names
 async def create_person_relations(meetings, persons, person_table, attended_rel, assigned_rel) -> None:
     for canonical_name in persons.canonicals():  person_table.declare_record(row=Person(name=canonical_name))
     ...
@@ -49,7 +49,7 @@ Extraction is [instructor](https://github.com/instructor-ai/instructor) over [Li
 
 - **Entity resolution built in.** Synor's `entity_resolution` op embeds every raw name, filters by vector similarity, and asks the LLM to confirm *only* the close pairs — so the same person written five ways collapses to one node, cheaply.
 - **Cross-file nodes, owned in one place.** People are shared across notes, so no single note's component can own a `Person` node. The two cross-file phases own the canonical set and the person-touching edges, exactly once.
-- **Incremental by default.** `@syn.fn(memo=True)` caches each extraction by content; edit one note and only that note re-extracts, then resolution and the graph diff. A no-change re-run makes zero LLM calls.
+- **Incremental by default.** `@syn.task(cache=True)` caches each extraction by content; edit one note and only that note re-extracts, then resolution and the graph diff. A no-change re-run makes zero LLM calls.
 - **Two models on purpose.** A stronger `LLM_MODEL` does the structured extraction; a cheaper `RESOLUTION_LLM_MODEL` confirms resolution pairs — both are [LiteLLM provider strings](https://docs.litellm.ai/docs/providers) you can swap.
 - **Honest cache busting.** The model ids and embedder are declared with `detect_change=True`, so swapping any of them re-extracts against it with no cache to clear by hand.
 

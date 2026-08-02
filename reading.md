@@ -65,12 +65,12 @@ to be passed as arguments or declared through dependency and context APIs.
 
 ## 4. Own work
 
-The app boundary is the Python API: `App`, `@syn.fn`, `mount`, `use_mount`, and
-`mount_each`. These calls create stable processing-component paths, such as one
+The app boundary is the Python API: `App`, `@syn.task`, `mount`, `call`, and
+`spawn_each`. These calls create stable processing-component paths, such as one
 component per file or one component per record.
 
 That stable path is the ownership key. If the same component path appears again
-with unchanged inputs and unchanged code, `memo=True` lets the engine reuse the
+with unchanged inputs and unchanged code, `cache=True` lets the engine reuse the
 settled result. If a path disappears, Synor knows which outcomes no longer have
 an owner.
 

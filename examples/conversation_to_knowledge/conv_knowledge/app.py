@@ -45,7 +45,7 @@ SURREAL_DB = syn.ContextKey[surrealdb.ConnectionFactory]("surreal_db")
 EMBEDDER = syn.ContextKey[SentenceTransformerEmbedder]("embedder", detect_change=True)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _resolve_entities(
     all_raw_entities: set[str],
 ) -> dict[str, str | None]:
@@ -116,7 +116,7 @@ async def synor_lifespan(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_session(
     youtube_id: str,
     session_table: surrealdb.TableTarget[Any],
@@ -174,7 +174,7 @@ async def process_session(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def create_knowledge_base(
     all_session_raw: list[SessionRawEntities],
     entity_dedup: dict[str, dict[str, str | None]],
@@ -258,7 +258,7 @@ def _collect_all_raw(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # --- Setup table targets ---
     session_table = await surrealdb.mount_table_target(
@@ -308,8 +308,8 @@ async def app_main() -> None:
                 continue
             youtube_id = extract_video_id(line)
             session_coros.append(
-                syn.use_mount(
-                    syn.component_subpath("session", youtube_id),
+                syn.call(
+                    syn.unit_path("session", youtube_id),
                     process_session,
                     youtube_id,
                     session_table,
@@ -325,8 +325,8 @@ async def app_main() -> None:
             [cfg.name for cfg in ENTITY_TYPES],
             await asyncio.gather(
                 *(
-                    syn.use_mount(
-                        syn.component_subpath("resolve", cfg.name),
+                    syn.call(
+                        syn.unit_path("resolve", cfg.name),
                         _resolve_entities,
                         _collect_all_raw(all_session_raw, cfg.name),
                     )
@@ -337,8 +337,8 @@ async def app_main() -> None:
     )
 
     # --- Phase 3: Declare knowledge base ---
-    await syn.mount(
-        syn.component_subpath("knowledge_base"),
+    await syn.spawn(
+        syn.unit_path("knowledge_base"),
         create_knowledge_base,
         all_session_raw=all_session_raw,
         entity_dedup=entity_dedup,

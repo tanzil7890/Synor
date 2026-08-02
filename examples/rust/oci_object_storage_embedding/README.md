@@ -13,7 +13,7 @@ Postgres/pgvector — then serves similarity search.
 | ---------------- | ----------------------------------------------- | --------------------------------------------------------- |
 | Source           | `oci_object_storage.list_objects` (`oci` SDK)   | `synor::oci_object_storage::list_objects` (native REST)|
 | Auth             | `oci.config.from_file` + `ObjectStorageClient`  | `OciClient::connect` reads `~/.oci/config`, signs requests |
-| Per-file compute | `@syn.fn(memo=True) process_file`              | `#[synor::function(memo)] process_file`               |
+| Per-file compute | `@syn.task(cache=True) process_file`              | `#[synor::function(memo)] process_file`               |
 | Chunking         | `RecursiveSplitter` (markdown, 2000/500)        | `RecursiveSplitter` (markdown, 2000/500)                  |
 | Embeddings       | `sentence-transformers/all-MiniLM-L6-v2`        | `fastembed` `AllMiniLML6V2` (same model, 384-dim)         |
 | Target           | `postgres.mount_table_target` + pgvector        | `postgres::mount_table_target` + `declare_vector_index`   |

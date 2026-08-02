@@ -69,7 +69,7 @@ identify with their full name — omit any speaker you cannot identify. Do not g
 """
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_metadata(
     reformatted_transcript: str, transcript: SessionTranscript
 ) -> SessionMetadata:
@@ -149,7 +149,7 @@ and factual assertions.
 STATEMENTS_PROMPT = _build_statements_prompt()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_statements(
     reformatted_transcript: str,
 ) -> StatementExtraction:

@@ -143,7 +143,7 @@ PRODUCT_TEMPLATE = Template(
 )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_taxonomy(detail: str) -> ProductTaxonomyInfo:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -174,7 +174,7 @@ class ProductTaxonomies:
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     product_table: neo4j.TableTarget[Product],
@@ -200,7 +200,7 @@ async def process_file(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def build_graph(
     products: list[ProductTaxonomies],
     taxonomy_table: neo4j.TableTarget[Taxonomy],
@@ -226,7 +226,7 @@ async def build_graph(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     product_table = await neo4j.mount_table_target(
         KG_DB,
@@ -255,8 +255,8 @@ async def app_main(sourcedir: pathlib.Path) -> None:
     file_coros = []
     async for path_key, file in files.items():
         file_coros.append(
-            syn.use_mount(
-                syn.component_subpath("file", path_key),
+            syn.call(
+                syn.unit_path("file", path_key),
                 process_file,
                 file,
                 product_table,
@@ -264,8 +264,8 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         )
     products: list[ProductTaxonomies] = list(await asyncio.gather(*file_coros))
 
-    await syn.mount(
-        syn.component_subpath("build_graph"),
+    await syn.spawn(
+        syn.unit_path("build_graph"),
         build_graph,
         products,
         taxonomy_table,

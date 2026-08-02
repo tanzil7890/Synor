@@ -80,7 +80,7 @@ The `snowflake` connector provides target state APIs for writing rows to tables.
 Declares a table as a target state. Returns a `TableTarget` for declaring rows.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[ConnectionConfig],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -107,7 +107,7 @@ When `managed_by="system"`, Synor creates the database, schema, and table if nee
 Once a `TableTarget` is resolved, declare rows to be upserted:
 
 ```python
-def TableTarget.declare_row(
+def TableTarget.ensure_row(
     self,
     *,
     row: RowT,
@@ -210,7 +210,7 @@ async def declare_products(rows: list[ProductRow]) -> None:
     )
 
     for row in rows:
-        table.declare_row(row=row)
+        table.ensure_row(row=row)
 ```
 
 See `examples/snowflake_target` for a runnable project.

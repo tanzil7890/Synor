@@ -41,7 +41,7 @@ class ContextAwareEntry:
         # memo state for mount() arguments.
         _ctx_val = syn.use_context(_TEST_CTX_KEY)
         memo_valid = (
-            not syn.is_non_existence(prev_state) and self.state_value == prev_state
+            not syn.is_absent(prev_state) and self.state_value == prev_state
         )
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
@@ -54,17 +54,17 @@ _source_data: dict[str, ContextAwareEntry] = {}
 _metrics = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_entry(entry: ContextAwareEntry) -> str:
     _metrics.increment("call.transform")
     return f"processed: {entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_data() -> None:
     for key, value in _source_data.items():
         transformed = _transform_entry(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed))
 
 
 def test_memo_state_use_context_function_call() -> None:
@@ -98,18 +98,18 @@ def test_memo_state_use_context_function_call() -> None:
 # ============================================================================
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_entry(entry: ContextAwareEntry) -> None:
     _metrics.increment("call.declare")
-    syn.declare_target_state(
+    syn.ensure_target_state(
         GlobalDictTarget.target_state(entry.name, f"comp: {entry.content}")
     )
 
 
-@syn.fn
+@syn.task
 async def _mount_entries() -> None:
     for key, value in _source_data.items():
-        await syn.mount(syn.component_subpath(key), _declare_entry, value)
+        await syn.spawn(syn.unit_path(key), _declare_entry, value)
 
 
 def test_memo_state_use_context_component_mount() -> None:

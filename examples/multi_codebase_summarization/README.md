@@ -14,7 +14,7 @@ Your code is the source of truth, but a hand-written wiki drifts the moment some
 Each top-level subdirectory is treated as a project. The pipeline extracts a structured `CodebaseInfo` per file with an LLM, aggregates files into a project summary, and writes Markdown with Mermaid diagrams. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)   # per file — structured LLM extraction, cached by content
+@syn.task(cache=True)   # per file — structured LLM extraction, cached by content
 async def extract_file_info(file: FileLike) -> CodebaseInfo:
     result = await _instructor_client.chat.completions.create(
         model=LLM_MODEL, response_model=CodebaseInfo,
@@ -22,14 +22,14 @@ async def extract_file_info(file: FileLike) -> CodebaseInfo:
     )
     return CodebaseInfo.model_validate(result.model_dump())
 
-@syn.fn(memo=True)   # per project — extract every file, aggregate, write one Markdown page
+@syn.task(cache=True)   # per project — extract every file, aggregate, write one Markdown page
 async def process_project(project_name: str, files, output_dir: pathlib.Path) -> None:
     file_infos = await syn.map(extract_file_info, files)         # concurrent extraction
     project_info = await aggregate_project_info(project_name, file_infos)
     markdown = generate_markdown(project_name, project_info, file_infos)
-    localfs.declare_file(output_dir / f"{project_name}.md", markdown, create_parent_dirs=True)
+    localfs.ensure_file(output_dir / f"{project_name}.md", markdown, create_parent_dirs=True)
 
-@syn.fn
+@syn.task
 async def app_main(root_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
     for entry in root_dir.resolve().iterdir():
         if not entry.is_dir() or entry.name.startswith("."):
@@ -38,16 +38,16 @@ async def app_main(root_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
                  path_matcher=PatternFilePathMatcher(included_patterns=["**/*.py"],
                                                      excluded_patterns=["**/.*", "**/__pycache__"]))]
         if files:
-            await syn.mount(syn.component_subpath("project", entry.name),
+            await syn.spawn(syn.unit_path("project", entry.name),
                              process_project, entry.name, files, output_dir)
 ```
 
-Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/) with the Pydantic models in [`models.py`](models.py); the LLM emits Mermaid graph syntax directly (bold for `@syn.fn` functions, thick `==>` arrows for `mount`/`use_mount` calls). Each project mounts as its own processing component, so projects run in parallel and one finishing doesn't wait on the rest.
+Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/) with the Pydantic models in [`models.py`](models.py); the LLM emits Mermaid graph syntax directly (bold for `@syn.task` functions, thick `==>` arrows for `mount`/`call` calls). Each project mounts as its own processing component, so projects run in parallel and one finishing doesn't wait on the rest.
 
 ## Why this example is useful
 
 - **Always fresh, never by hand.** The wiki is a target state regenerated from the code — edit a file and the one-pager updates itself; the docs can't drift from the source.
-- **Incremental by default.** `@syn.fn(memo=True)` caches each file's extraction by content, so re-running only re-analyzes changed files. Add a project and only that project is processed.
+- **Incremental by default.** `@syn.task(cache=True)` caches each file's extraction by content, so re-running only re-analyzes changed files. Add a project and only that project is processed.
 - **Concurrent by construction.** `syn.map(extract_file_info, files)` fans every file out at once while staying visible to the pipeline — far faster than sequential LLM calls.
 - **You pick the granularity.** Here it's one wiki page per project directory, but the same shape works per file, per page, or per semantic unit.
 - **Structured outputs, your stack.** One `CodebaseInfo` Pydantic model drives both file- and project-level extraction; swap `LLM_MODEL` for any [LiteLLM provider](https://docs.litellm.ai/docs/providers).
@@ -76,6 +76,6 @@ ls output/
 cat output/code_embedding.md
 ```
 
-Each page has an **Overview**, a **Components** list (★ marks `@syn.fn` functions), a **Synor Pipeline** Mermaid diagram where applicable, and per-file summaries for multi-file projects. Edit a `.py` file and re-run — only that file is re-analyzed, every other file served from the memo cache.
+Each page has an **Overview**, a **Components** list (★ marks `@syn.task` functions), a **Synor Pipeline** Mermaid diagram where applicable, and per-file summaries for multi-file projects. Edit a `.py` file and re-run — only that file is re-analyzed, every other file served from the memo cache.
 
 ---

@@ -1,6 +1,6 @@
 """Module with v1 class method bodies for logic change detection testing.
 
-Tests that @syn.fn on class methods correctly participates in logic change
+Tests that @syn.task on class methods correctly participates in logic change
 detection when the bound method is used via mount() or called directly.
 """
 
@@ -16,19 +16,19 @@ def set_metrics(metrics: Metrics) -> None:
 
 
 class Processor:
-    """A class with @syn.fn decorated methods."""
+    """A class with @syn.task decorated methods."""
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def transform_memo(self, key: str, value: str) -> str:
         assert _metrics is not None
         _metrics.increment("transform_memo")
         return "v1: " + value
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def declare_entry_memo(self, key: str, value: str) -> None:
         assert _metrics is not None
         _metrics.increment("declare_entry_memo")
-        syn.declare_target_state(GlobalDictTarget.target_state(key, "v1: " + value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, "v1: " + value))
 
 
 processor = Processor()

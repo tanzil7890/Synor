@@ -83,14 +83,14 @@ class DocEmbedding:
     embedding: Annotated[NDArray, EMBEDDER]
 
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: str,
     id_gen: IdGenerator,
     table: postgres.TableTarget[DocEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=DocEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=filename,
@@ -102,7 +102,7 @@ async def process_chunk(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: azure_blob.AzureBlobFile,
     table: postgres.TableTarget[DocEmbedding],
@@ -115,7 +115,7 @@ async def process_file(
     await syn.map(process_chunk, chunks, file.file_path.path.as_posix(), id_gen, table)
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -133,7 +133,7 @@ async def app_main() -> None:
         prefix=AZURE_BLOB_PREFIX,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 
 
 app = syn.App(

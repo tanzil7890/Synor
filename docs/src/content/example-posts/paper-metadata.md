@@ -114,7 +114,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 Three small functions do the extraction. `extract_basic_info` slices the first page out of the PDF (and counts the pages), `pdf_to_markdown` pulls the text off that page, and `extract_metadata` hands it to the LLM with a strict instruction to return only the three fields we want.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 def extract_basic_info(content: bytes) -> PaperBasicInfo:
     reader = PdfReader(io.BytesIO(content))
     output = io.BytesIO()
@@ -124,13 +124,13 @@ def extract_basic_info(content: bytes) -> PaperBasicInfo:
     return PaperBasicInfo(num_pages=len(reader.pages), first_page=output.getvalue())
 
 
-@syn.fn
+@syn.task
 def pdf_to_markdown(content: bytes) -> str:
     reader = PdfReader(io.BytesIO(content))
     return (reader.pages[0].extract_text() if reader.pages else "") or ""
 
 
-@syn.fn
+@syn.task
 def extract_metadata(markdown: str) -> PaperMetadataModel:
     response = openai_client().chat.completions.create(
         model=LLM_MODEL,
@@ -161,7 +161,7 @@ Only the first page is read, and the prompt is capped at `markdown[:4000]` chara
 `process_file` runs once per PDF and ties the steps together. It extracts the metadata, then declares the rows: one metadata row, one author-index row per author, and one embedding row for the title plus one for each abstract chunk.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     metadata_table: postgres.TableTarget[PaperMetadataRow],
@@ -173,7 +173,7 @@ async def process_file(
     first_page_md = pdf_to_markdown(basic_info.first_page)
     metadata = extract_metadata(first_page_md)
 
-    metadata_table.declare_row(
+    metadata_table.ensure_row(
         row=PaperMetadataRow(
             filename=str(file.file_path.path),
             title=metadata.title,
@@ -185,7 +185,7 @@ async def process_file(
 
     for author in metadata.authors:
         if author.name:
-            author_table.declare_row(
+            author_table.ensure_row(
                 row=AuthorPaperRow(
                     author_name=author.name,
                     filename=str(file.file_path.path),
@@ -193,7 +193,7 @@ async def process_file(
             )
 
     title_embedding = await syn.use_context(EMBEDDER).embed(metadata.title)
-    embedding_table.declare_row(
+    embedding_table.ensure_row(
         row=MetadataEmbeddingRow(
             id=uuid.uuid4(), filename=str(file.file_path.path),
             location="title", text=metadata.title, embedding=title_embedding,
@@ -205,7 +205,7 @@ async def process_file(
         chunk_overlap=150, language="abstract",
     )
     for chunk in abstract_chunks:
-        embedding_table.declare_row(
+        embedding_table.ensure_row(
             row=MetadataEmbeddingRow(
                 id=uuid.uuid4(), filename=str(file.file_path.path),
                 location="abstract", text=chunk.text,
@@ -214,14 +214,14 @@ async def process_file(
         )
 ```
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a PDF's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never pay for the LLM call or the embeddings on a PDF you've already processed. We embed the title as one row and the abstract as a few overlapping chunks (a `RecursiveSplitter` tuned to break on sentence boundaries), and `location` marks which is which so a search can tell a title hit from an abstract hit. `table.declare_row` declares each row as a target state; Synor handles inserting, updating, or deleting it to match.
+`@syn.task` with `cache=True` is what makes this incremental: if a PDF's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never pay for the LLM call or the embeddings on a PDF you've already processed. We embed the title as one row and the abstract as a few overlapping chunks (a `RecursiveSplitter` tuned to break on sentence boundaries), and `location` marks which is which so a search can tell a title hit from an abstract hit. `table.ensure_row` declares each row as a target state; Synor handles inserting, updating, or deleting it to match.
 
 ## Define the main function
 
 `app_main` wires the source to the targets. It mounts the three Postgres tables, walks the source directory for PDFs, and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     metadata_table = await postgres.mount_table_target(
         PG_DB, table_name=TABLE_METADATA,
@@ -251,7 +251,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(
+    await syn.spawn_each(
         process_file, files.items(), metadata_table, author_table, embedding_table
     )
 
@@ -263,7 +263,7 @@ app = syn.App(
 )
 ```
 
-Each `mount_table_target` creates and manages a Postgres table for you — schema, idempotent upserts, and orphan cleanup when a PDF disappears. Note the different primary keys: paper metadata is keyed by `filename`, the author index by the `(author_name, filename)` pair, and the embeddings by a generated `id`. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update each PDF independently while writing into all three tables.
+Each `mount_table_target` creates and manages a Postgres table for you — schema, idempotent upserts, and orphan cleanup when a PDF disappears. Note the different primary keys: paper metadata is keyed by `filename`, the author index by the `(author_name, filename)` pair, and the embeddings by a generated `id`. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update each PDF independently while writing into all three tables.
 
 > **No vector index here.** To keep the example minimal, this flow doesn't declare a vector index, so queries do a sequential scan — fine for a few papers. For a larger corpus, add one line — `embedding_table.declare_vector_index(column="embedding")` — exactly as the Semantic Search 101 example does, and pgvector serves approximate-nearest-neighbor queries instead.
 
@@ -313,7 +313,7 @@ With the sample papers indexed, the most semantically similar titles and abstrac
 
 ## Incremental updates
 
-Synor keeps the three tables in sync with your PDFs and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a PDF is skipped when its bytes and the function's code are both unchanged, so neither the LLM nor the embedder ever runs on an unchanged file. `mount_table_target` decides what to *write* — it upserts only the rows that actually changed and deletes rows whose source is gone, across all three tables.
+Synor keeps the three tables in sync with your PDFs and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a PDF is skipped when its bytes and the function's code are both unchanged, so neither the LLM nor the embedder ever runs on an unchanged file. `mount_table_target` decides what to *write* — it upserts only the rows that actually changed and deletes rows whose source is gone, across all three tables.
 
 - **A PDF is added** — only that file is read, extracted, and embedded; its metadata, author, and embedding rows are inserted. The rest is untouched.
 - **A PDF is replaced** — it is re-extracted; the metadata row is updated, author rows are reconciled against the new author list, and the embeddings are recomputed.

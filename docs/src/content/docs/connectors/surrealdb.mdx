@@ -62,7 +62,7 @@ All tables within the same database share a single transaction sink, so changes 
 Declares a table as a target state. Returns a `TableTarget` for declaring records.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey,
     table_name: str,
     table_schema: TableSchema[RowT] | None = None,
@@ -96,7 +96,7 @@ def TableTarget.declare_record(
 
 - `row` — A row object (dict, dataclass, NamedTuple, or Pydantic model). Must include an `id` field.
 
-`declare_row` is an alias for `declare_record`, for compatibility with Postgres and other RDBMS targets.
+`ensure_row` is an alias for `declare_record`, for compatibility with Postgres and other RDBMS targets.
 
 #### Relation tables (parent state)
 
@@ -304,7 +304,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
     )
     yield
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Declare table target state
     table = await surrealdb.mount_table_target(
@@ -339,7 +339,7 @@ class Post:
     id: str
     title: str
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     person_schema = await surrealdb.TableSchema.from_class(Person)
     person_target = await surrealdb.mount_table_target(SURREAL_DB, "person", person_schema)

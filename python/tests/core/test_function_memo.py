@@ -42,17 +42,17 @@ _dict_source_data: dict[str, DictSourceDataEntry] = {}
 _metrics = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_entry(entry: SourceDataEntry) -> str:
     _metrics.increment("call.transform_entry")
     return f"processed: {entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_plain_source_data() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = _transform_entry(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_pure_function() -> None:
@@ -122,17 +122,17 @@ def test_memo_pure_function() -> None:
     }
 
 
-@syn.fn.as_async(memo=True)
+@syn.task.as_async(cache=True)
 def _transform_entry_async(entry: SourceDataEntry) -> str:
     _metrics.increment("call.transform_entry_async")
     return f"processed: {entry.content}"
 
 
-@syn.fn
+@syn.task
 async def _process_plain_source_data_async() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = await _transform_entry_async(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_pure_function_async() -> None:
@@ -202,13 +202,13 @@ def test_memo_pure_function_async() -> None:
     }
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_data_entry(key: str, entry: SourceDataEntry) -> None:
     _metrics.increment("call.declare_data_entry")
-    syn.declare_target_state(GlobalDictTarget.target_state(key, entry.content))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, entry.content))
 
 
-@syn.fn
+@syn.task
 def _declare_plain_data() -> None:
     for key, value in _plain_source_data.items():
         _declare_data_entry(key, value)
@@ -269,13 +269,13 @@ def test_memo_function_with_target_states() -> None:
     }
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _declare_data_entry_async(key: str, entry: SourceDataEntry) -> None:
     _metrics.increment("call.declare_data_entry_async")
-    syn.declare_target_state(GlobalDictTarget.target_state(key, entry.content))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, entry.content))
 
 
-@syn.fn
+@syn.task
 async def _declare_plain_data_async() -> None:
     for key, value in _plain_source_data.items():
         await _declare_data_entry_async(key, value)
@@ -369,14 +369,14 @@ def test_memo_function_with_target_states_with_exception() -> None:
     }
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _declare_dict_data_entry(entry: DictSourceDataEntry) -> None:
     _metrics.increment("call.declare_dict_data_entry")
     for key, value in entry.content.items():
         _declare_data_entry(key, value)
 
 
-@syn.fn
+@syn.task
 def _declare_dict_data() -> None:
     for entry in _dict_source_data.values():
         _declare_dict_data_entry(entry)
@@ -469,14 +469,14 @@ def test_memo_nested_functions_with_target_states() -> None:
     }
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _declare_dict_data_entry_w_components(entry: DictSourceDataEntry) -> None:
     _metrics.increment("call.declare_dict_data_entry_w_components")
     for key, value in entry.content.items():
-        await syn.mount(syn.component_subpath(key), _declare_data_entry, key, value)
+        await syn.spawn(syn.unit_path(key), _declare_data_entry, key, value)
 
 
-@syn.fn
+@syn.task
 async def _declare_dict_data_w_components() -> None:
     for entry in _dict_source_data.values():
         await _declare_dict_data_entry_w_components(entry)
@@ -506,16 +506,16 @@ def test_memo_nested_functions_with_components() -> None:
         app.update_blocking()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _declare_dict_data_entry_w_components_async(
     entry: DictSourceDataEntry,
 ) -> None:
     _metrics.increment("call.declare_dict_data_entry_w_components_async")
     for key, value in entry.content.items():
-        await syn.mount(syn.component_subpath(key), _declare_data_entry, key, value)
+        await syn.spawn(syn.unit_path(key), _declare_data_entry, key, value)
 
 
-@syn.fn
+@syn.task
 async def _declare_dict_data_w_components_async() -> None:
     for entry in _dict_source_data.values():
         await _declare_dict_data_entry_w_components_async(entry)
@@ -551,18 +551,18 @@ def test_memo_nested_functions_with_components_async() -> None:
 # ============================================================================
 
 
-@syn.fn.as_async(memo=True, batching=True)
+@syn.task.as_async(cache=True, batching=True)
 def _batched_transform(inputs: list[SourceDataEntry]) -> list[str]:
     for inp in inputs:
         _metrics.increment("call.batched_transform")
     return [f"batched: {entry.content}" for entry in inputs]
 
 
-@syn.fn
+@syn.task
 async def _process_with_batched_transform() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = await _batched_transform(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_with_batching() -> None:
@@ -610,18 +610,18 @@ def test_memo_with_batching() -> None:
     assert _metrics.collect() == {}
 
 
-@syn.fn.as_async(memo=True, batching=True)
+@syn.task.as_async(cache=True, batching=True)
 async def _batched_transform_async(inputs: list[SourceDataEntry]) -> list[str]:
     for inp in inputs:
         _metrics.increment("call.batched_transform_async")
     return [f"batched_async: {entry.content}" for entry in inputs]
 
 
-@syn.fn
+@syn.task
 async def _process_with_batched_transform_async() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = await _batched_transform_async(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_with_batching_async() -> None:
@@ -683,17 +683,17 @@ class MockRunner(Runner):
 _test_runner = MockRunner()
 
 
-@syn.fn.as_async(memo=True, runner=_test_runner)
+@syn.task.as_async(cache=True, runner=_test_runner)
 def _runner_transform(entry: SourceDataEntry) -> str:
     _metrics.increment("call.runner_transform")
     return f"runner: {entry.content}"
 
 
-@syn.fn
+@syn.task
 async def _process_with_runner_transform() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = await _runner_transform(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_with_runner() -> None:
@@ -745,17 +745,17 @@ def test_memo_with_runner() -> None:
 _test_runner_async = MockRunner()
 
 
-@syn.fn.as_async(memo=True, runner=_test_runner_async)
+@syn.task.as_async(cache=True, runner=_test_runner_async)
 def _runner_transform_async(entry: SourceDataEntry) -> str:
     _metrics.increment("call.runner_transform_async")
     return f"runner_async: {entry.content}"
 
 
-@syn.fn
+@syn.task
 async def _process_with_runner_transform_async() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = await _runner_transform_async(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_with_runner_async() -> None:
@@ -795,13 +795,13 @@ def test_memo_with_runner_async() -> None:
 
 
 # ============================================================================
-# Bound method memo tests — verifies that @syn.fn(memo=True) on a class method
+# Bound method memo tests — verifies that @syn.task(memo=True) on a class method
 # is respected when the bound method is called directly (function-level memo).
 # ============================================================================
 
 
 class _MemoMethodTransformer:
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def transform(self, entry: SourceDataEntry) -> str:
         _metrics.increment("call.bound_transform")
         return f"bound: {entry.content}"
@@ -810,15 +810,15 @@ class _MemoMethodTransformer:
 _memo_transformer = _MemoMethodTransformer()
 
 
-@syn.fn
+@syn.task
 def _process_with_bound_method() -> None:
     for key, value in _plain_source_data.items():
         transformed_value = _memo_transformer.transform(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_bound_method() -> None:
-    """@syn.fn(memo=True) on a bound method should memoize when called directly."""
+    """@syn.task(memo=True) on a bound method should memoize when called directly."""
     GlobalDictTarget.store.clear()
     _plain_source_data.clear()
     _metrics.clear()
@@ -852,17 +852,17 @@ _memo_key_source_data: dict[str, SourceDataEntry] = {}
 
 
 # 'content' is excluded from the memo key; only 'name' and 'version' matter.
-@syn.fn(memo=True, memo_key={"entry": lambda e: (e.name, e.version)})
+@syn.task(cache=True, memo_key={"entry": lambda e: (e.name, e.version)})
 def _transform_entry_with_memo_key(entry: SourceDataEntry) -> str:
     _metrics.increment("call.transform_entry_with_memo_key")
     return f"processed: {entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_with_memo_key() -> None:
     for key, value in _memo_key_source_data.items():
         transformed_value = _transform_entry_with_memo_key(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_key_callable_controls_invalidation() -> None:
@@ -921,18 +921,18 @@ _memo_key_none_extra_data: dict[str, str] = {}
 
 
 # 'extra' is excluded; only 'entry' matters for memoization.
-@syn.fn(memo=True, memo_key={"extra": None})
+@syn.task(cache=True, memo_key={"extra": None})
 def _transform_with_excluded_arg(entry: SourceDataEntry, extra: str) -> str:
     _metrics.increment("call.transform_with_excluded_arg")
     return f"processed: {entry.content} [{extra}]"
 
 
-@syn.fn
+@syn.task
 def _process_with_excluded_arg() -> None:
     for key, value in _memo_key_none_source_data.items():
         extra = _memo_key_none_extra_data.get(key, "default")
         transformed_value = _transform_with_excluded_arg(value, extra)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_key_none_excludes_arg_from_invalidation() -> None:
@@ -983,21 +983,21 @@ def test_memo_key_none_excludes_arg_from_invalidation() -> None:
     }
 
 
-@syn.fn.as_async(memo=True, memo_key={"entry": lambda e: (e.name, e.version)})
+@syn.task.as_async(cache=True, memo_key={"entry": lambda e: (e.name, e.version)})
 def _transform_entry_with_memo_key_async(entry: SourceDataEntry) -> str:
     _metrics.increment("call.transform_entry_with_memo_key_async")
     return f"processed_async: {entry.content}"
 
 
-@syn.fn
+@syn.task
 async def _process_with_memo_key_async() -> None:
     for key, value in _memo_key_source_data.items():
         transformed_value = await _transform_entry_with_memo_key_async(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, transformed_value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, transformed_value))
 
 
 def test_memo_key_callable_controls_invalidation_async() -> None:
-    """memo_key with callable should work for @syn.fn.as_async as well."""
+    """memo_key with callable should work for @syn.task.as_async as well."""
     GlobalDictTarget.store.clear()
     _memo_key_source_data.clear()
     _metrics.clear()
@@ -1051,7 +1051,7 @@ def test_memo_key_callable_controls_invalidation_async() -> None:
 def test_memo_key_validation_rejects_unknown_parameter() -> None:
     with pytest.raises(ValueError, match="Unknown memo_key parameter"):
 
-        @syn.fn(memo=True, memo_key={"missing": None})
+        @syn.task(cache=True, memo_key={"missing": None})
         def _invalid_unknown(entry: SourceDataEntry) -> str:
             return entry.content
 
@@ -1061,6 +1061,6 @@ def test_memo_key_validation_rejects_non_callable_value() -> None:
 
     with pytest.raises(TypeError, match="must be a callable or None"):
 
-        @syn.fn(memo=True, memo_key=cast(Any, {"entry": 123}))
+        @syn.task(cache=True, memo_key=cast(Any, {"entry": 123}))
         def _invalid_non_callable(entry: SourceDataEntry) -> str:
             return entry.content

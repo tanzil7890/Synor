@@ -25,19 +25,19 @@ def _reset() -> None:
     _captured.clear()
 
 
-@syn.fn()
+@syn.task()
 async def _emit_root(key: str, value: int) -> None:
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
-@syn.fn()
+@syn.task()
 async def _emit_grp(key: str, value: int) -> None:
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
-@syn.fn()
+@syn.task()
 async def _emit_inner(key: str, value: int) -> None:
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
 def _has(keys: Any, needle: str) -> bool:
@@ -56,13 +56,13 @@ async def _drive_to_ready(
 # --- 2. split-out aggregation ---
 
 
-@syn.fn()
+@syn.task()
 async def _main_split() -> None:
-    await syn.mount(syn.component_subpath("root_item"), _emit_root, "r0", 1)
+    await syn.spawn(syn.unit_path("root_item"), _emit_root, "r0", 1)
     with syn.stats_group("grp") as sg:
         _captured["sg"] = sg
         for k in ("a", "b", "c"):
-            await syn.mount(syn.component_subpath(f"g_{k}"), _emit_grp, k, ord(k))
+            await syn.spawn(syn.unit_path(f"g_{k}"), _emit_grp, k, ord(k))
 
 
 @pytest.mark.asyncio
@@ -117,19 +117,19 @@ async def test_stats_group_watch_ready() -> None:
 # --- 4. non-blocking exit ---
 
 
-@syn.fn()
+@syn.task()
 async def _slow_child() -> None:
     # Stays in-progress for a while so the test can observe that the
     # `with` block exited before this member became ready.
     await asyncio.sleep(2.0)
-    syn.declare_target_state(GlobalDictTarget.target_state("blk", 1))
+    syn.ensure_target_state(GlobalDictTarget.target_state("blk", 1))
 
 
-@syn.fn()
+@syn.task()
 async def _main_nonblock() -> None:
     with syn.stats_group("g") as sg:
         _captured["sg"] = sg
-        await syn.mount(syn.component_subpath("blk"), _slow_child)
+        await syn.spawn(syn.unit_path("blk"), _slow_child)
     _captured["exited"] = True
 
 
@@ -161,14 +161,14 @@ async def test_stats_group_nonblocking_exit() -> None:
 # --- 5. nested groups ---
 
 
-@syn.fn()
+@syn.task()
 async def _main_nested() -> None:
     with syn.stats_group("outer") as og:
         _captured["og"] = og
-        await syn.mount(syn.component_subpath("a"), _emit_root, "a", 1)
+        await syn.spawn(syn.unit_path("a"), _emit_root, "a", 1)
         with syn.stats_group("inner") as ig:
             _captured["ig"] = ig
-            await syn.mount(syn.component_subpath("b"), _emit_inner, "b", 2)
+            await syn.spawn(syn.unit_path("b"), _emit_inner, "b", 2)
 
 
 @pytest.mark.asyncio
@@ -198,7 +198,7 @@ async def test_stats_group_nested() -> None:
 # --- 6. empty group ---
 
 
-@syn.fn()
+@syn.task()
 async def _main_empty() -> None:
     with syn.stats_group("empty") as sg:
         _captured["sg"] = sg
@@ -227,15 +227,15 @@ async def test_stats_group_empty() -> None:
 # --- 7. body exception ---
 
 
-@syn.fn()
+@syn.task()
 async def _emit_then_ok(key: str, value: int) -> None:
-    syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
-@syn.fn()
+@syn.task()
 async def _main_raises() -> None:
     with syn.stats_group("g"):
-        await syn.mount(syn.component_subpath("x"), _emit_then_ok, "x", 1)
+        await syn.spawn(syn.unit_path("x"), _emit_then_ok, "x", 1)
         raise ValueError("boom in body")
 
 
@@ -253,17 +253,17 @@ async def test_stats_group_body_exception() -> None:
 # --- 8. foreground use_mount only ---
 
 
-@syn.fn()
+@syn.task()
 async def _produce(value: int) -> int:
-    syn.declare_target_state(GlobalDictTarget.target_state(f"u{value}", value))
+    syn.ensure_target_state(GlobalDictTarget.target_state(f"u{value}", value))
     return value * 2
 
 
-@syn.fn()
+@syn.task()
 async def _main_use_mount() -> None:
     with syn.stats_group("fg") as sg:
         _captured["sg"] = sg
-        r = await syn.use_mount(syn.component_subpath("u"), _produce, 5)
+        r = await syn.call(syn.unit_path("u"), _produce, 5)
         _captured["use_mount_result"] = r
 
 
@@ -285,12 +285,12 @@ async def test_stats_group_use_mount_foreground() -> None:
 # --- 9. report_to_stdout plain (non-TTY under pytest) ---
 
 
-@syn.fn()
+@syn.task()
 async def _main_report() -> None:
     with syn.stats_group("Indexing", report_to_stdout=True) as sg:
         _captured["sg"] = sg
         for k in ("a", "b"):
-            await syn.mount(syn.component_subpath(f"r_{k}"), _emit_grp, k, ord(k))
+            await syn.spawn(syn.unit_path(f"r_{k}"), _emit_grp, k, ord(k))
 
 
 @pytest.mark.asyncio
@@ -318,18 +318,18 @@ class _GroupLiveComponent:
     """A live component that catches up and marks ready, then returns."""
 
     async def process(self) -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("live", 1))
+        syn.ensure_target_state(GlobalDictTarget.target_state("live", 1))
 
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
         await operator.mark_ready()
 
 
-@syn.fn()
+@syn.task()
 async def _main_live_group() -> None:
     with syn.stats_group("livegrp") as sg:
         _captured["sg"] = sg
-        await syn.mount(syn.component_subpath("live"), _GroupLiveComponent)
+        await syn.spawn(syn.unit_path("live"), _GroupLiveComponent)
 
 
 @pytest.mark.asyncio
@@ -366,12 +366,12 @@ def test_resolve_report_to_stdout() -> None:
             _resolve_report_to_stdout(bad)
 
 
-@syn.fn()
+@syn.task()
 async def _main_report_interval() -> None:
     with syn.stats_group("Indexing", report_to_stdout=timedelta(milliseconds=50)) as sg:
         _captured["sg"] = sg
         for k in ("a", "b"):
-            await syn.mount(syn.component_subpath(f"ri_{k}"), _emit_grp, k, ord(k))
+            await syn.spawn(syn.unit_path(f"ri_{k}"), _emit_grp, k, ord(k))
 
 
 @pytest.mark.asyncio

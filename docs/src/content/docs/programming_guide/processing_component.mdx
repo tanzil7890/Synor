@@ -2,8 +2,8 @@
 title: The *processing component*
 description: >
   Processing components are the units of incremental execution and the sync
-  boundaries for target states. Covers mounting APIs (mount, use_mount,
-  mount_each, mount_target), component paths, and granularity tradeoffs.
+  boundaries for target states. Covers mounting APIs (mount, call,
+  spawn_each, attach_target), component paths, and granularity tradeoffs.
 ---
 import ParentChildCalls from '/src/components/diagrams/concepts/ParentChildCalls.astro';
 
@@ -17,11 +17,11 @@ Most apps process many independent source items — files, rows, or entities. A 
 
 A **component path** is the stable identifier for a processing component across runs (think of it like a path in a tree). Synor uses it to match a component to its previous run, detect what changed for that item, and sync that component's target states as a unit when it finishes. This sync happens per component; Synor does not wait for other components in the same app to complete.
 
-Component paths are hierarchical and form a tree structure. You specify child paths using `syn.component_subpath()` with stable identifiers like string literals, file names, row keys, or entity IDs:
+Component paths are hierarchical and form a tree structure. You specify child paths using `syn.unit_path()` with stable identifiers like string literals, file names, row keys, or entity IDs:
 
 ```python
-syn.component_subpath(filename)           # e.g., syn.component_subpath("hello.pdf")
-syn.component_subpath("user", user_id)    # e.g., syn.component_subpath("user", 12345)
+syn.unit_path(filename)           # e.g., syn.unit_path("hello.pdf")
+syn.unit_path("user", user_id)    # e.g., syn.unit_path("user", 12345)
 ```
 
 Choose paths that are stable for the "same" item (e.g., file path, primary key). If an item disappears and its path is no longer present, Synor cleans up the target states owned by that path (and its sub-paths).
@@ -35,7 +35,7 @@ Here's an example component path tree for a pipeline that processes files:
     └── "world.pdf"            ← process_file component
 ```
 
-The tree is populated dynamically as the app runs — each `mount()` / `mount_each()` call adds a subpath.
+The tree is populated dynamically as the app runs — each `spawn()` / `spawn_each()` call adds a subpath.
 
 See [StableKey](./sdk_overview#stablekey) in the SDK Overview for details on what values can be used in component paths.
 
@@ -45,49 +45,49 @@ Mounting is how you declare (instantiate) a processing component within an app a
 
 Synor provides two core mounting APIs:
 
-- **`mount()`** — sets up a processing component in a child path without depending on data from it. This allows the component to refresh independently in live mode.
-- **`use_mount()`** — returns a value from the component's execution to the caller. The component at that path cannot refresh independently without re-executing the caller.
+- **`spawn()`** — sets up a processing component in a child path without depending on data from it. This allows the component to refresh independently in live mode.
+- **`call()`** — returns a value from the component's execution to the caller. The component at that path cannot refresh independently without re-executing the caller.
 
 <ParentChildCalls />
 
-**Which one you reach for comes down to a single question: does the caller need a value back?** `use_mount()` consumes the child's return value, which *couples* the two — the call blocks until the child finishes and commits its target states, and the child can't refresh on its own without re-running the caller. `mount()` takes nothing back and returns as soon as the child is scheduled, so the child runs on its own and can [refresh independently in live mode](./live_mode) when its inputs change.
+**Which one you reach for comes down to a single question: does the caller need a value back?** `call()` consumes the child's return value, which *couples* the two — the call blocks until the child finishes and commits its target states, and the child can't refresh on its own without re-running the caller. `spawn()` takes nothing back and returns as soon as the child is scheduled, so the child runs on its own and can [refresh independently in live mode](./live_mode) when its inputs change.
 
 And two sugar APIs that simplify common patterns:
 
-- **`mount_each()`** — mounts one component per item in a keyed iterable
-- **`mount_target()`** — mounts a target without an explicit subpath
+- **`spawn_each()`** — mounts one component per item in a keyed iterable
+- **`attach_target()`** — mounts a target without an explicit subpath
 
 See also [`map()`](#map) for a utility API that operates within a component without creating new ones.
 
 ### Automatic subpath derivation
-`mount()`, `use_mount()`, and `mount_each()` all accept an optional `ComponentSubpath` as their first argument. When omitted, the subpath is **auto-derived** from the function name using `Symbol(fn.__name__)`.
+`spawn()`, `call()`, and `spawn_each()` all accept an optional `UnitPath` as their first argument. When omitted, the subpath is **auto-derived** from the function name using `Symbol(fn.__name__)`.
 
 ```python
 # These are equivalent:
-await syn.mount(process_file, file, target)
-await syn.mount(syn.component_subpath(syn.Symbol("process_file")), process_file, file, target)
+await syn.spawn(process_file, file, target)
+await syn.spawn(syn.unit_path(syn.Symbol("process_file")), process_file, file, target)
 ```
 
 This means the component path for a `process_file` function is `parent / Symbol("process_file")`. The function must have a `__name__` attribute; if it doesn't (e.g., a lambda), provide an explicit subpath.
 
 Since sibling component paths must not collide, you need an explicit subpath when:
-- **The same function is mounted more than once** — auto-derived paths would be identical, so each call needs a distinct path (e.g., `syn.component_subpath("session", youtube_id)`)
+- **The same function is mounted more than once** — auto-derived paths would be identical, so each call needs a distinct path (e.g., `syn.unit_path("session", youtube_id)`)
 - **Different functions happen to share a `__name__`** — rare, but possible with wrappers or closures
 - **You want a specific path name** — different from the function name
 
-### `mount()`
+### `spawn()`
 
-Use `mount()` when you don't need a return value from the processing component. It schedules the processing component to run and returns a handle:
+Use `spawn()` when you don't need a return value from the processing component. It schedules the processing component to run and returns a handle:
 
 ```python
-handle = await syn.mount(process_file, file, target)
+handle = await syn.spawn(process_file, file, target)
 ```
 
 With an explicit subpath, for example when mounting multiple components of the same function:
 
 ```python
-handle = await syn.mount(
-    syn.component_subpath("process", filename),
+handle = await syn.spawn(
+    syn.unit_path("process", filename),
     process_file,
     file,
     target,
@@ -102,62 +102,62 @@ await handle.ready()
 
 You usually only need to call `ready()` when you have logic that depends on the processing component's target states being applied — for example, querying the latest data from a target table after syncing it.
 
-`mount()` also accepts **LiveComponent classes** — components that process continuously and react to changes incrementally instead of rescanning everything. See [Live Components](../advanced_topics/live_component) for details.
+`spawn()` also accepts **LiveComponent classes** — components that process continuously and react to changes incrementally instead of rescanning everything. See [Live Components](../advanced_topics/live_component) for details.
 
-### `use_mount()`
+### `call()`
 
-Use `use_mount()` when you need the processing component's return value. It mounts the component, waits until it's ready, and returns the value directly:
+Use `call()` when you need the processing component's return value. It mounts the component, waits until it's ready, and returns the value directly:
 
 ```python
-table = await syn.use_mount(setup_table, table_name="docs")
+table = await syn.call(setup_table, table_name="docs")
 ```
 
 With an explicit subpath:
 
 ```python
-table = await syn.use_mount(
-    syn.component_subpath("setup"),
+table = await syn.call(
+    syn.unit_path("setup"),
     setup_table,
     table_name="docs",
 )
 ```
 
-A common use of `use_mount()` is to obtain a [target](./target_state#where-do-targets-come-from) after its container target state is applied.
+A common use of `call()` is to obtain a [target](./target_state#where-do-targets-come-from) after its container target state is applied.
 
-### `mount_each()`
-`mount_each()` mounts one processing component per item in a keyed iterable.
+### `spawn_each()`
+`spawn_each()` mounts one processing component per item in a keyed iterable.
 
 ```python
 files = localfs.walk_dir(sourcedir, path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]))
-await syn.mount_each(process_file, files.items(), target)
+await syn.spawn_each(process_file, files.items(), target)
 ```
 
 Each item in the iterable is a `(key, value)` tuple. The value is passed as the first argument to the function, and any additional arguments are passed through. Items are mounted under an [auto-derived subpath](#automatic-subpath-derivation) (`Symbol(fn.__name__)`), so the component path for each item is `parent / Symbol("process_file") / key`.
 
-In the static case this is just the keyed-loop form of [`mount()`](#mount), using the stable ownership model shown in [Core Concepts](./core_concepts#a-processing-component-owns-a-work-unit). The snippet above is equivalent to looping over the items and calling `mount(syn.component_subpath(syn.Symbol("process_file"), key), process_file, value, target)` for each one. The per-item `key` is what keeps each component's path stable across runs, so the engine matches, updates, and cleans up each item individually.
+In the static case this is just the keyed-loop form of [`spawn()`](#mount), using the stable ownership model shown in [Core Concepts](./core_concepts#a-processing-component-owns-a-work-unit). The snippet above is equivalent to looping over the items and calling `spawn(syn.unit_path(syn.Symbol("process_file"), key), process_file, value, target)` for each one. The per-item `key` is what keeps each component's path stable across runs, so the engine matches, updates, and cleans up each item individually.
 
 You can provide an explicit subpath as the first argument:
 
 ```python
-await syn.mount_each(syn.component_subpath("files"), process_file, files.items(), target)
+await syn.spawn_each(syn.unit_path("files"), process_file, files.items(), target)
 ```
 
 Source connectors provide an `items()` method that returns `(StableKey, T)` pairs. For example, `localfs.walk_dir(...).items()` yields `(relative_path, File)` tuples.
 
-It also does one thing a hand-written loop can't: when a source connector supports live watching, its `items()` returns a `LiveMapView` or `LiveMapFeed` instead of a plain iterable, and `mount_each()` detects this and automatically adds, updates, and removes per-item components as the source changes — no changes to `mount_each()` itself are needed. See [Live Mode](./live_mode).
+It also does one thing a hand-written loop can't: when a source connector supports live watching, its `items()` returns a `LiveMapView` or `LiveMapFeed` instead of a plain iterable, and `spawn_each()` detects this and automatically adds, updates, and removes per-item components as the source changes — no changes to `spawn_each()` itself are needed. See [Live Mode](./live_mode).
 
-### `mount_target()`
-`mount_target()` mounts a target without requiring an explicit subpath.
+### `attach_target()`
+`attach_target()` mounts a target without requiring an explicit subpath.
 
 ```python
 from synor.connectors import localfs
 
-dir_target = await syn.mount_target(localfs.dir_target(outdir))
+dir_target = await syn.attach_target(localfs.dir_target(outdir))
 ```
 
-The component path is derived automatically from the target's globally unique key — you don't need to create a `component_subpath` for it. This is sugar over calling `use_mount()` with a target declaration function.
+The component path is derived automatically from the target's globally unique key — you don't need to create a `unit_path` for it. This is sugar over calling `call()` with a target declaration function.
 
-Connectors also provide convenience methods that wrap `mount_target()`:
+Connectors also provide convenience methods that wrap `attach_target()`:
 
 ```python
 # Equivalent to the above
@@ -171,15 +171,15 @@ table = await postgres.mount_table_target(
 )
 ```
 
-### Using `component_subpath` as a context manager
+### Using `unit_path` as a context manager
 
-You can use `component_subpath()` as a context manager to create nested paths without repeating common prefixes:
+You can use `unit_path()` as a context manager to create nested paths without repeating common prefixes:
 
 ```python
-with syn.component_subpath("process"):
+with syn.unit_path("process"):
     for f in files:
-        await syn.mount(
-            syn.component_subpath(str(f.relative_path)),
+        await syn.spawn(
+            syn.unit_path(str(f.relative_path)),
             process_file,
             f,
             target,
@@ -190,8 +190,8 @@ This is equivalent to:
 
 ```python
 for f in files:
-    await syn.mount(
-        syn.component_subpath("process", str(f.relative_path)),
+    await syn.spawn(
+        syn.unit_path("process", str(f.relative_path)),
         process_file,
         f,
         target,
@@ -199,7 +199,7 @@ for f in files:
 ```
 
 :::tip
-When iterating over keyed items, prefer [`mount_each()`](#mount_each) — it handles the loop and subpath creation for you.
+When iterating over keyed items, prefer [`spawn_each()`](#spawn_each) — it handles the loop and subpath creation for you.
 :::
 
 ## How target states sync
@@ -226,8 +226,8 @@ Synor processes each component in two phases: **processing** (running your funct
 
 The framework's general rule: **a call raises on failure iff the failed work was on the critical path for the call to return.**
 
-- **`use_mount()`** — you're awaiting the child's *value*, so the child succeeding is on the critical path. The child's exception propagates to the parent.
-- **`mount()` and `mount_each()`** — these return as soon as the work is *scheduled* (you get a handle back). The child's execution runs in the background, off your critical path. A failure in one child does **not** affect the parent or siblings — by default the exception is logged and other components continue. One bad file shouldn't take down the entire pipeline.
+- **`call()`** — you're awaiting the child's *value*, so the child succeeding is on the critical path. The child's exception propagates to the parent.
+- **`spawn()` and `spawn_each()`** — these return as soon as the work is *scheduled* (you get a handle back). The child's execution runs in the background, off your critical path. A failure in one child does **not** affect the parent or siblings — by default the exception is logged and other components continue. One bad file shouldn't take down the entire pipeline.
 
 To react to background failures, you can:
 
@@ -249,9 +249,9 @@ When defining processing components, think about granularity — what one path r
 
 For example, if you're processing files:
 
-- **Coarse**: one component for "all files" (`syn.component_subpath("process")`)
-- **Medium**: one component per file (`syn.component_subpath("process", file_path)`)
-- **Fine**: one component per chunk (`syn.component_subpath("process", file_path, chunk_id)`)
+- **Coarse**: one component for "all files" (`syn.unit_path("process")`)
+- **Medium**: one component per file (`syn.unit_path("process", file_path)`)
+- **Fine**: one component per chunk (`syn.unit_path("process", file_path, chunk_id)`)
 
 In general:
 
@@ -269,7 +269,7 @@ Use `syn.get_component_context()` to capture the current context, and `context.a
 ```python
 from concurrent.futures import ThreadPoolExecutor
 
-@syn.fn
+@syn.task
 def app_main() -> None:
     # Capture the current context
     ctx = syn.get_component_context()
@@ -289,10 +289,10 @@ This pattern ensures that Synor can track component relationships and target sta
 ## Processing helpers
 
 ### `map()`
-`map()` applies an async function to each item in a collection, running all calls concurrently within the current processing component. Unlike [`mount()`](#mount) and [`mount_each()`](#mount_each), it does **not** create child processing components — it's purely concurrent execution (similar to `asyncio.gather()`).
+`map()` applies an async function to each item in a collection, running all calls concurrently within the current processing component. Unlike [`spawn()`](#mount) and [`spawn_each()`](#spawn_each), it does **not** create child processing components — it's purely concurrent execution (similar to `asyncio.gather()`).
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[DocEmbedding]) -> None:
     chunks = splitter.split(await file.read_text())
     id_gen = IdGenerator()
@@ -301,7 +301,7 @@ async def process_file(file: FileLike, table: postgres.TableTarget[DocEmbedding]
 
 The first argument to the function receives each item; additional arguments are passed through to every call. `map()` returns a `list` of the results, in the same order as the input items.
 
-#### When to use `map()` vs `mount_each()`
+#### When to use `map()` vs `spawn_each()`
 
-- Use **`mount_each()`** when each item should be its own processing component — with its own component path, target state ownership, and target states sync boundary.
+- Use **`spawn_each()`** when each item should be its own processing component — with its own component path, target state ownership, and target states sync boundary.
 - Use **`map()`** when you want to process items concurrently *within* the current component, without creating new component boundaries. This is common for sub-item work like processing chunks within a file. See [A processing component owns a work unit](./core_concepts#a-processing-component-owns-a-work-unit) for the ownership boundary.

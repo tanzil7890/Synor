@@ -11,7 +11,7 @@ serves similarity search.
 | Concern          | Python                                   | Rust (this example)                                  |
 | ---------------- | ---------------------------------------- | ---------------------------------------------------- |
 | Source           | `amazon_s3.list_objects` (aiobotocore)   | `synor::amazon_s3::list_objects` (aws-sdk-s3)    |
-| Per-file compute | `@syn.fn(memo=True) process_file`       | `#[synor::function(memo)] process_file`          |
+| Per-file compute | `@syn.task(cache=True) process_file`       | `#[synor::function(memo)] process_file`          |
 | Chunking         | `RecursiveSplitter` (markdown, 2000/500) | `synor_ops_text` `RecursiveChunker` (markdown)   |
 | Embeddings       | `sentence-transformers/all-MiniLM-L6-v2` | `fastembed` `AllMiniLML6V2` (same model, 384-dim)    |
 | Target           | `postgres.mount_table_target` + pgvector | `postgres::mount_table_target` + `declare_vector_index` |

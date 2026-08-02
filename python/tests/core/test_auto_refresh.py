@@ -29,12 +29,12 @@ def test_auto_refresh_catch_up_runs_once() -> None:
 
     async def fn(value: int) -> None:
         counter["calls"] += 1
-        syn.declare_target_state(GlobalDictTarget.target_state("k", value))
+        syn.ensure_target_state(GlobalDictTarget.target_state("k", value))
 
     AutoRefresh = syn.auto_refresh(fn, interval=datetime.timedelta(milliseconds=10))
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("ar"), AutoRefresh, 7)
+        await syn.spawn(syn.unit_path("ar"), AutoRefresh, 7)
 
     app = syn.App(
         syn.AppConfig(name="test_auto_refresh_catch_up", environment=synor_env),
@@ -56,12 +56,12 @@ def test_auto_refresh_forwards_args_and_kwargs() -> None:
 
     async def fn(*args: int, **kwargs: int) -> None:
         received.append((args, dict(kwargs)))
-        syn.declare_target_state(GlobalDictTarget.target_state("k", 0))
+        syn.ensure_target_state(GlobalDictTarget.target_state("k", 0))
 
     AutoRefresh = syn.auto_refresh(fn, interval=datetime.timedelta(milliseconds=10))
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("ar"), AutoRefresh, 1, 2, x=3)
+        await syn.spawn(syn.unit_path("ar"), AutoRefresh, 1, 2, x=3)
 
     app = syn.App(
         syn.AppConfig(name="test_auto_refresh_forward_args", environment=synor_env),
@@ -90,12 +90,12 @@ async def test_auto_refresh_live_runs_periodically() -> None:
         counter["calls"] += 1
         if counter["calls"] >= 3:
             cycle_event.set()
-        syn.declare_target_state(GlobalDictTarget.target_state("k", counter["calls"]))
+        syn.ensure_target_state(GlobalDictTarget.target_state("k", counter["calls"]))
 
     AutoRefresh = syn.auto_refresh(fn, interval=datetime.timedelta(milliseconds=20))
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("ar"), AutoRefresh)
+        await syn.spawn(syn.unit_path("ar"), AutoRefresh)
 
     app = syn.App(
         syn.AppConfig(name="test_auto_refresh_live_periodic", environment=synor_env),
@@ -149,12 +149,12 @@ async def test_auto_refresh_cycle_exception_reported_and_loop_continues() -> Non
             raise ValueError("cycle 2 fails")
         if counter["calls"] >= 3:
             after_failure_event.set()
-        syn.declare_target_state(GlobalDictTarget.target_state("k", counter["calls"]))
+        syn.ensure_target_state(GlobalDictTarget.target_state("k", counter["calls"]))
 
     AutoRefresh = syn.auto_refresh(fn, interval=datetime.timedelta(milliseconds=20))
 
     async def _main() -> None:
-        await syn.mount(syn.component_subpath("ar"), AutoRefresh)
+        await syn.spawn(syn.unit_path("ar"), AutoRefresh)
 
     app = syn.App(
         syn.AppConfig(name="test_auto_refresh_cycle_err", environment=env),

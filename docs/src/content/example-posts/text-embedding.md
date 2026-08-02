@@ -101,7 +101,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 `process_file` runs once per file. It reads the file, splits the text into overlapping chunks, and maps each chunk to `process_chunk`.
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: postgres.TableTarget[DocEmbedding],
@@ -116,21 +116,21 @@ async def process_file(
 
 Chunking keeps each embedded unit small and focused, and the overlap means an idea that straddles a boundary still lands whole in at least one chunk.
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run. `syn.map` fans out to one `process_chunk` call per chunk.
+`@syn.task` with `cache=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run. `syn.map` fans out to one `process_chunk` call per chunk.
 
 ## Process a chunk
 
 `process_chunk` embeds the chunk with the shared embedder and declares the target row.
 
 ```python
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
     id_gen: IdGenerator,
     table: postgres.TableTarget[DocEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=DocEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=str(filename),
@@ -142,7 +142,7 @@ async def process_chunk(
     )
 ```
 
-We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast model that runs locally with no API key. There are 12k+ sentence-transformer models on [Hugging Face](https://huggingface.co/models?other=sentence-transformers), so swap in whichever you prefer. `table.declare_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match.
+We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast model that runs locally with no API key. There are 12k+ sentence-transformer models on [Hugging Face](https://huggingface.co/models?other=sentence-transformers), so swap in whichever you prefer. `table.ensure_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match.
 
 ## Define the main function
 
@@ -151,7 +151,7 @@ We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast m
 `app_main` wires the source to the target. It mounts the Postgres table (with a vector index), walks the source directory, and mounts one processing component per file.
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -168,10 +168,10 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
-`mount_table_target` creates and manages the Postgres table for you: schema, the pgvector index, idempotent upserts, and orphan cleanup when a file disappears. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update them independently.
+`mount_table_target` creates and manages the Postgres table for you: schema, the pgvector index, idempotent upserts, and orphan cleanup when a file disappears. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update them independently.
 
 ## Create the App
 
@@ -235,7 +235,7 @@ The most semantically similar chunks come back ranked — even when they share n
 
 ## Incremental updates
 
-Synor keeps the index in sync with your files and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to embed, upsert, and delete. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged. `mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
+Synor keeps the index in sync with your files and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to embed, upsert, and delete. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged. `mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
 
 - **A file is added** — only that file is chunked and embedded, and its rows are inserted. The rest is untouched.
 - **A file is edited** — it is re-chunked; chunks whose text is unchanged keep their `id` and embedding and are left as-is, genuinely new chunks are embedded and inserted, and chunks that no longer exist are deleted.

@@ -20,7 +20,7 @@ The indexing path is short — there's no text to chunk, just one embedding per 
 The whole point is one shared space: the **same** CLIP model embeds images at index time and text at query time, so a cosine search with a text vector finds the nearest *image* vectors. Each image runs as its own processing component, so delete a photo and its point is removed automatically. Read it in [`pipeline.py`](pipeline.py):
 
 ```python
-@syn.fn(memo=True)   # unchanged image is never re-embedded
+@syn.task(cache=True)   # unchanged image is never re-embedded
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     content = await file.read()
     embedding = embed_image_bytes(content)
@@ -45,7 +45,7 @@ def embed_query(text: str) -> list[float]:                  # query side — sam
 
 - **One model, two encoders.** CLIP embeds images at index time and text at query time into the *same* 768-d space — search matches by meaning, never by metadata.
 - **Live by default.** The flow runs in live mode inside the API server; drop a photo into `img/` and it's searchable within a second, no rebuild step.
-- **Incremental & self-cleaning.** `@syn.fn(memo=True)` skips unchanged images; each photo is its own processing component, so deleting one removes its Qdrant point automatically.
+- **Incremental & self-cleaning.** `@syn.task(cache=True)` skips unchanged images; each photo is its own processing component, so deleting one removes its Qdrant point automatically.
 - **Managed Qdrant target.** `mount_collection_target` creates and reconciles the collection — the vector size comes straight from `model.config.projection_dim`, so swapping CLIP variants just works.
 - **Plain Python, your stack.** FastAPI + React + Qdrant, no DSL — the indexing logic is a handful of ordinary async functions.
 

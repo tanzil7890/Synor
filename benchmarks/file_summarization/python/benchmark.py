@@ -64,12 +64,12 @@ def file_patterns() -> list[str]:
     return ["**/*.md"]
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_sections(relative_path: str, file: FileLike) -> list[SectionInput]:
     return split_into_sections(relative_path, await file.read_text())
 
 
-@syn.fn.as_async(memo=True, batching=True, max_batch_size=128)
+@syn.task.as_async(cache=True, batching=True, max_batch_size=128)
 def analyze_sections(inputs: list[SectionInput]) -> list[SectionAnalysis]:
     state = run_state()
     state.metrics.batch_calls += 1
@@ -77,7 +77,7 @@ def analyze_sections(inputs: list[SectionInput]) -> list[SectionAnalysis]:
     return [analyze_section(section, profile=state.profile) for section in inputs]
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def build_summary(
     kind: str,
     name: str,
@@ -86,7 +86,7 @@ async def build_summary(
     return summarize_collection(kind, name, analyses)
 
 
-@syn.fn
+@syn.task
 async def process_project(project_dir: pathlib.Path) -> None:
     state = run_state()
     project_name = project_dir.name
@@ -121,13 +121,13 @@ async def process_project(project_dir: pathlib.Path) -> None:
     )
 
 
-@syn.fn
+@syn.task
 async def app_main(dataset_dir: pathlib.Path, output_dir: pathlib.Path) -> None:
     state = run_state()
     projects = sorted(
         (path.name, path) for path in dataset_dir.iterdir() if path.is_dir()
     )
-    handle = await syn.mount_each(process_project, projects)
+    handle = await syn.spawn_each(process_project, projects)
     await handle.ready()
 
     if len(state.summaries) != len(projects):

@@ -39,7 +39,7 @@ from synor.resources.chunk import Chunk
 
 ### StableKey
 
-`StableKey` is a type alias defining what values can be used when creating component paths via `syn.component_subpath()`:
+`StableKey` is a type alias defining what values can be used when creating component paths via `syn.unit_path()`:
 
 ```python
 StableKey = None | bool | int | str | bytes | uuid.UUID | Symbol | tuple[StableKey, ...]
@@ -58,7 +58,7 @@ Synor's API is **async-first**. The APIs fall into three categories:
 
 The APIs that shape your pipeline are async:
 
-`mount()`, `use_mount()`, `mount_each()`, `mount_target()`, `map()`
+`spawn()`, `call()`, `spawn_each()`, `attach_target()`, `map()`
 
 ### Entry-point APIs (async + sync)
 
@@ -76,7 +76,7 @@ APIs for starting and running your pipeline have both async and sync variants. S
 
 ### Processing functions (your choice)
 
-The `@syn.fn` decorator preserves the sync/async nature of your function — your processing functions can be sync or async. See [Function](./function) for details.
+The `@syn.task` decorator preserves the sync/async nature of your function — your processing functions can be sync or async. See [Function](./function) for details.
 
 ## How sync and async work together
 
@@ -85,7 +85,7 @@ Like any async Python program, **async functions can call into sync code, but no
 Synor provides two ways for async code to call into sync functions:
 
 - **Mounting** — When you mount a processing component, the function is scheduled on Synor's runtime, not called directly. So an async function can mount a sync processing function.
-- **`@syn.fn.as_async`** — Wraps a sync function with an async interface (runs on a thread pool). Useful for compute-intensive leaf functions. See [Function](./function) for details.
+- **`@syn.task.as_async`** — Wraps a sync function with an async interface (runs on a thread pool). Useful for compute-intensive leaf functions. See [Function](./function) for details.
 
 ### Example: async orchestration mounting sync leaf functions
 
@@ -101,16 +101,16 @@ from docling.document_converter import DocumentConverter
 
 _converter = DocumentConverter()
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def process_file(file: localfs.File, outdir: pathlib.Path) -> None:
     # Sync leaf function — does the actual computation
     markdown = _converter.convert(
         file.file_path.resolve()
     ).document.export_to_markdown()
     outname = file.file_path.path.stem + ".md"
-    localfs.declare_file(outdir / outname, markdown, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, markdown, create_parent_dirs=True)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     # Async — orchestrates the pipeline, mounts child components
     files = localfs.walk_dir(
@@ -118,13 +118,13 @@ async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 
 app = syn.App("PdfToMarkdown", app_main,
                sourcedir=pathlib.Path("./pdf_files"), outdir=pathlib.Path("./out"))
 ```
 
-Here `app_main` is async because it uses mounting APIs (`mount_each`), while `process_file` is sync because it only does computation. The sync `process_file` is mounted as a child component — mounting schedules it on Synor's runtime, so the async parent can mount a sync child without issues.
+Here `app_main` is async because it uses mounting APIs (`spawn_each`), while `process_file` is sync because it only does computation. The sync `process_file` is mounted as a child component — mounting schedules it on Synor's runtime, so the async parent can mount a sync child without issues.
 
 ## Running an app
 

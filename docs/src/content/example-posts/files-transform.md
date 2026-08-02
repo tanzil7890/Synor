@@ -42,35 +42,35 @@ from markdown_it import MarkdownIt
 _markdown_it = MarkdownIt("gfm-like")
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, outdir: pathlib.Path) -> None:
     html = _markdown_it.render(await file.read_text())
     outname = "__".join(file.file_path.path.parts) + ".html"
-    localfs.declare_file(outdir / outname, html, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, html, create_parent_dirs=True)
 ```
 
 The transform itself is just two lines: read the text, render it. The output name joins the source path parts with `__` so `subdir/file.md` becomes `subdir__file.html` — a flat, collision-free name in the output folder.
 
-`localfs.declare_file` declares the `.html` file as a target state on the local filesystem. You describe the file you *want to exist*; Synor handles writing it, overwriting it when the content changes, and deleting it when the source Markdown is gone.
+`localfs.ensure_file` declares the `.html` file as a target state on the local filesystem. You describe the file you *want to exist*; Synor handles writing it, overwriting it when the content changes, and deleting it when the source Markdown is gone.
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run, and its HTML output is left exactly as it is.
+`@syn.task` with `cache=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run, and its HTML output is left exactly as it is.
 
 ## Define the main function
 
 `app_main` wires the source to the target. It walks the source directory for Markdown files and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 ```
 
-`walk_dir` lists the source folder, filtered to `*.md` by the `PatternFilePathMatcher`. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update each one independently — add, edit, or delete a Markdown file and only that file's HTML moves.
+`walk_dir` lists the source folder, filtered to `*.md` by the `PatternFilePathMatcher`. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update each one independently — add, edit, or delete a Markdown file and only that file's HTML moves.
 
 ## Create the App
 
@@ -113,7 +113,7 @@ The converted files appear in `./output_html/`, one `.html` per source `.md`.
 
 ## Incremental updates
 
-Synor keeps the output folder in sync with your source files and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to re-render and re-write. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged. `localfs.declare_file` decides what to *write* — the output file is created, overwritten, or deleted to match the declared target state.
+Synor keeps the output folder in sync with your source files and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to re-render and re-write. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged. `localfs.ensure_file` decides what to *write* — the output file is created, overwritten, or deleted to match the declared target state.
 
 - **A file is added** — only that file is rendered, and its `.html` is written. The rest is untouched.
 - **A file is edited** — it is re-rendered and its `.html` is overwritten in place.

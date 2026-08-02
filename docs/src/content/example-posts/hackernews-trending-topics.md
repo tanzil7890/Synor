@@ -98,7 +98,7 @@ Avoid acronyms unless very popular and unambiguous for common people even withou
 ```
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def extract_topics(text: str | None) -> list[str]:
     """Extract topics from text using LLM."""
     if not text or not text.strip():
@@ -192,7 +192,7 @@ Each thread is processed by its own component. `process_thread` fetches the thre
 
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_thread(
     thread_id: str,
     targets: TableTargets,
@@ -203,7 +203,7 @@ async def process_thread(
     thread_topics = await extract_topics(thread.text)
 
     # Declare thread message row
-    targets.messages.declare_row(
+    targets.messages.ensure_row(
         row=HnMessage(
             id=thread.id,
             thread_id=thread.id,
@@ -216,7 +216,7 @@ async def process_thread(
     )
     # Declare thread topic rows
     for topic in thread_topics:
-        targets.topics.declare_row(
+        targets.topics.ensure_row(
             row=HnTopic(
                 topic=topic,
                 message_id=thread.id,
@@ -229,7 +229,7 @@ async def process_thread(
     for comment in thread.comments:
         comment_topics = await extract_topics(comment.text)
 
-        targets.messages.declare_row(
+        targets.messages.ensure_row(
             row=HnMessage(
                 id=comment.id,
                 thread_id=thread.id,
@@ -241,7 +241,7 @@ async def process_thread(
             ),
         )
         for topic in comment_topics:
-            targets.topics.declare_row(
+            targets.topics.ensure_row(
                 row=HnTopic(
                     topic=topic,
                     message_id=comment.id,
@@ -260,7 +260,7 @@ You *declare* what rows should exist — you don't write inserts or deletes. Whe
 
 ## Wire up the app
 
-The main function mounts the two Postgres table targets, fetches the recent thread IDs, and fans out one `process_thread` component per thread with `mount_each`.
+The main function mounts the two Postgres table targets, fetches the recent thread IDs, and fans out one `process_thread` component per thread with `spawn_each`.
 
 ```python title="main.py"
 @dataclass
@@ -271,7 +271,7 @@ class TableTargets:
     topics: postgres.TableTarget[HnTopic]
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     """Main pipeline function."""
     # Set up table targets
@@ -298,7 +298,7 @@ async def app_main() -> None:
         thread_ids = await fetch_thread_list(session)
 
     # Process threads (each component fetches its own thread data)
-    await syn.mount_each(process_thread, ((tid, tid) for tid in thread_ids), targets)
+    await syn.spawn_each(process_thread, ((tid, tid) for tid in thread_ids), targets)
 
 
 app = syn.App(
@@ -307,7 +307,7 @@ app = syn.App(
 )
 ```
 
-`mount_each` takes one `(component_key, *args)` tuple per item, so each thread gets a stable component path keyed on its ID. The `TableSchema.from_class` calls derive the SQL columns straight from the dataclasses, and the Postgres pool is provided once in the lifespan:
+`spawn_each` takes one `(component_key, *args)` tuple per item, so each thread gets a stable component path keyed on its ID. The `TableSchema.from_class` calls derive the SQL columns straight from the dataclasses, and the Postgres pool is provided once in the lifespan:
 
 ```python title="main.py"
 @syn.lifespan

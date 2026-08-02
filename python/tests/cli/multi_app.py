@@ -6,7 +6,7 @@ import pathlib
 from typing import AsyncGenerator
 
 import synor as syn
-from synor.connectors.localfs import declare_dir_target
+from synor.connectors.localfs import ensure_dir_target
 
 
 _ROOT_PATH = syn.ContextKey[pathlib.Path]("root_path")
@@ -21,24 +21,24 @@ async def lifespan(builder: syn.EnvironmentBuilder) -> AsyncGenerator[None]:
     yield
 
 
-@syn.fn
+@syn.task
 async def build1() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         syn.use_context(_ROOT_PATH) / "out_multi_1",
     )
-    dir_target.declare_file("hello.txt", "Hello from MultiApp1\n")
+    dir_target.ensure_file("hello.txt", "Hello from MultiApp1\n")
 
 
-@syn.fn
+@syn.task
 async def build2() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         syn.use_context(_ROOT_PATH) / "out_multi_2",
     )
-    dir_target.declare_file("world.txt", "Hello from MultiApp2\n")
+    dir_target.ensure_file("world.txt", "Hello from MultiApp2\n")
 
 
 # Two apps in the same module

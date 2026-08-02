@@ -117,7 +117,7 @@ _action_sink_with_child = syn.TargetActionSink["_EntryAction", "_EntryHandler"].
 def _reconcile_entry(
     base_dir_key: str | None,
     path_str: str,
-    desired_state: _EntrySpec | syn.NonExistenceType,
+    desired_state: _EntrySpec | syn.AbsentType,
     prev_possible_records: Collection[_EntryTrackingRecord],
     prev_may_be_missing: bool,
 ) -> (
@@ -125,7 +125,7 @@ def _reconcile_entry(
     | None
 ):
     """Common reconcile logic for both root and non-root entries."""
-    if syn.is_non_existence(desired_state):
+    if syn.is_absent(desired_state):
         # Determine entry type from previous state (None fingerprint = dir)
         entry_type: Literal["file", "dir"] = "file"
         for prev in prev_possible_records:
@@ -136,7 +136,7 @@ def _reconcile_entry(
         return syn.TargetReconcileOutput(
             action=_EntryAction(base_dir_key, path_str, entry_type, None, False),
             sink=_action_sink_with_child,
-            tracking_record=syn.NON_EXISTENCE,
+            tracking_record=syn.ABSENT,
         )
 
     entry_spec = desired_state.entry_spec
@@ -192,7 +192,7 @@ class _EntryHandler(
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _EntrySpec | syn.NonExistenceType,
+        desired_state: _EntrySpec | syn.AbsentType,
         prev_possible_records: Collection[_EntryTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -243,7 +243,7 @@ class _RootHandler(syn.TargetHandler[_EntrySpec, _EntryTrackingRecord, _EntryHan
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _EntrySpec | syn.NonExistenceType,
+        desired_state: _EntrySpec | syn.AbsentType,
         prev_possible_records: Collection[_EntryTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -295,7 +295,7 @@ class DirTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["DirTarget"]):
     ) -> None:
         self._provider = provider
 
-    def declare_file(
+    def ensure_file(
         self: "DirTarget",
         filename: str | pathlib.PurePath,
         content: bytes | str,
@@ -320,9 +320,9 @@ class DirTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["DirTarget"]):
         target_state = cast(
             syn.TargetState[None], self._provider.target_state(name, spec)
         )
-        syn.declare_target_state(target_state)
+        syn.ensure_target_state(target_state)
 
-    def declare_dir_target(
+    def ensure_dir_target(
         self: "DirTarget",
         path: str | pathlib.PurePath,
         *,
@@ -341,7 +341,7 @@ class DirTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["DirTarget"]):
         """
         name = str(path) if isinstance(path, pathlib.PurePath) else path
         spec = _EntrySpec(entry_spec=_DirSpec(), create_parent_dirs=create_parent_dirs)
-        provider = syn.declare_target_state_with_child(
+        provider = syn.ensure_target_state_with_child(
             self._provider.target_state(name, spec)
         )
         return DirTarget(provider)
@@ -350,8 +350,8 @@ class DirTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["DirTarget"]):
         return self._provider.memo_key
 
 
-@syn.fn
-def declare_dir_target(
+@syn.task
+def ensure_dir_target(
     path: FilePath | pathlib.Path | ContextKey[pathlib.Path],
     *,
     create_parent_dirs: bool = True,
@@ -371,8 +371,8 @@ def declare_dir_target(
 
     Example:
         ```python
-        target = syn.use_mount(
-            syn.component_subpath("setup"),
+        target = syn.call(
+            syn.unit_path("setup"),
             localfs.declare_dir_target,
             Path("./output"),
         )
@@ -380,7 +380,7 @@ def declare_dir_target(
         target.declare_file("hello.txt", content="Hello, world!")
         ```
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         dir_target(path, create_parent_dirs=create_parent_dirs)
     )
     return DirTarget(provider)
@@ -394,7 +394,7 @@ def dir_target(
     """
     Create a TargetState for a local directory target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``mount_dir_target()`` for a convenience wrapper.
 
     Args:
@@ -427,7 +427,7 @@ async def mount_dir_target(
     """
     Mount a directory target and return a ready-to-use DirTarget.
 
-    Sugar over ``dir_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``dir_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         path: The filesystem path for the directory. Can be a FilePath, a
@@ -439,14 +439,14 @@ async def mount_dir_target(
     Returns:
         A DirTarget that can be used to declare files and subdirectories.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         dir_target(path, create_parent_dirs=create_parent_dirs)
     )
     return DirTarget(provider)
 
 
-@syn.fn
-def declare_file(
+@syn.task
+def ensure_file(
     path: FilePath | pathlib.Path | ContextKey[pathlib.Path],
     content: bytes | str,
     *,
@@ -468,8 +468,8 @@ def declare_file(
 
     Example:
         ```python
-        syn.mount(
-            syn.component_subpath("output"),
+        syn.spawn(
+            syn.unit_path("output"),
             localfs.declare_file,
             Path("./output/hello.txt"),
             content="Hello, world!",
@@ -492,13 +492,13 @@ def declare_file(
     # Files don't have children, but the provider type allows for them (for directories).
     # Cast is safe since file entries never produce child handlers at runtime.
     target_state = cast(syn.TargetState[None], _root_provider.target_state(key, spec))
-    syn.declare_target_state(target_state)
+    syn.ensure_target_state(target_state)
 
 
 __all__ = [
     "DirTarget",
-    "declare_dir_target",
-    "declare_file",
+    "ensure_dir_target",
+    "ensure_file",
     "dir_target",
     "mount_dir_target",
 ]

@@ -32,11 +32,11 @@ async def wait_for_condition(
 # ============================================================================
 
 
-@syn.fn.as_async(batching=True)
+@syn.task.as_async(batching=True)
 def _double_sync(inputs: list[int]) -> list[int]:
     """Sync batched function that doubles inputs.
 
-    Note: With batching=True via syn.fn.as_async, this becomes an async function externally,
+    Note: With batching=True via syn.task.as_async, this becomes an async function externally,
     even though the underlying implementation is sync.
     """
     return [x * 2 for x in inputs]
@@ -49,7 +49,7 @@ async def test_batching_basic_sync() -> None:
     assert result == 10
 
 
-@syn.fn.as_async(batching=True)
+@syn.task.as_async(batching=True)
 async def _double_async(inputs: list[int]) -> list[int]:
     """Async batched function that doubles inputs."""
     await asyncio.sleep(0.01)  # Simulate async work
@@ -91,7 +91,7 @@ class TrackedBatcher:
         """Create a tracked batched function."""
         tracker = self
 
-        @syn.fn.as_async(batching=True)
+        @syn.task.as_async(batching=True)
         async def tracked_double(inputs: list[int]) -> list[int]:
             """Async batched function that tracks calls and waits for signals."""
             tracker.batch_call_count += 1
@@ -166,7 +166,7 @@ class MaxBatchTracker:
         """Create a batched function with max_batch_size."""
         tracker = self
 
-        @syn.fn.as_async(batching=True, max_batch_size=tracker.max_batch_size)
+        @syn.task.as_async(batching=True, max_batch_size=tracker.max_batch_size)
         async def limited_double(inputs: list[int]) -> list[int]:
             """Batched function that tracks sizes and waits for signal."""
             tracker.batch_sizes.append(len(inputs))
@@ -221,7 +221,7 @@ class BatchedProcessor:
         self.input_events[value] = event
         return event
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     async def multiply(self, inputs: list[int]) -> list[int]:
         """Batched method that multiplies inputs, waits for signals."""
         self.call_count += 1
@@ -296,7 +296,7 @@ async def test_batching_out_of_component() -> None:
     """Test that batched functions work outside of Synor app."""
     # This should work without any component context
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     def standalone_double(inputs: list[int]) -> list[int]:
         return [x * 2 for x in inputs]
 
@@ -326,7 +326,7 @@ async def test_batching_error_preserves_type_for_all_callers() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     async def failing(inputs: list[int]) -> list[int]:
         started.set()
         await release.wait()
@@ -365,7 +365,7 @@ async def test_batching_error_preserves_type_for_all_callers() -> None:
 _async_batch_count = 0
 
 
-@syn.fn.as_async(batching=True)
+@syn.task.as_async(batching=True)
 async def _async_tracked_double(inputs: list[int]) -> list[int]:
     """Async batched function that tracks calls."""
     global _async_batch_count
@@ -425,7 +425,7 @@ async def test_runner_basic() -> None:
     """Test basic runner functionality."""
     runner = MockRunner()
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     def add_one(x: int) -> int:
         return x + 1
 
@@ -439,7 +439,7 @@ async def test_runner_with_batching() -> None:
     """Test runner combined with batching."""
     runner = MockRunner()
 
-    @syn.fn.as_async(batching=True, runner=runner)
+    @syn.task.as_async(batching=True, runner=runner)
     def double_batch(inputs: list[int]) -> list[int]:
         return [x * 2 for x in inputs]
 
@@ -460,7 +460,7 @@ async def test_runner_queue_sharing() -> None:
     execution_order: list[str] = []
     fn_events: list[asyncio.Event] = []
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     async def fn_a(x: int) -> int:
         execution_order.append("a")
         event = asyncio.Event()
@@ -468,7 +468,7 @@ async def test_runner_queue_sharing() -> None:
         await event.wait()
         return x + 1
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     async def fn_b(x: int) -> int:
         execution_order.append("b")
         event = asyncio.Event()
@@ -506,7 +506,7 @@ async def test_runner_multiple_args() -> None:
     """Test runner with multiple positional arguments."""
     runner = MockRunner()
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     def add(a: int, b: int, c: int) -> int:
         return a + b + c
 
@@ -520,7 +520,7 @@ async def test_runner_with_kwargs() -> None:
     """Test runner with keyword arguments."""
     runner = MockRunner()
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     def greet(name: str, greeting: str = "Hello") -> str:
         return f"{greeting}, {name}!"
 
@@ -538,7 +538,7 @@ async def test_runner_mixed_args_kwargs() -> None:
     """Test runner with both positional and keyword arguments."""
     runner = MockRunner()
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     def format_message(
         template: str, *values: int, prefix: str = "", suffix: str = ""
     ) -> str:
@@ -555,7 +555,7 @@ async def test_runner_multiple_args_async() -> None:
     """Test async runner with multiple arguments."""
     runner = MockRunner()
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     async def async_add(a: int, b: int, c: int) -> int:
         return a + b + c
 
@@ -569,7 +569,7 @@ async def test_runner_with_kwargs_async() -> None:
     """Test async runner with keyword arguments."""
     runner = MockRunner()
 
-    @syn.fn.as_async(runner=runner)
+    @syn.task.as_async(runner=runner)
     async def async_greet(name: str, greeting: str = "Hello") -> str:
         return f"{greeting}, {name}!"
 
@@ -589,12 +589,12 @@ class RunnerProcessor:
     def __init__(self, multiplier: int):
         self.multiplier = multiplier
 
-    @syn.fn.as_async(runner=syn.GPU)
+    @syn.task.as_async(runner=syn.GPU)
     def multiply_sync(self, x: int) -> int:
         """Sync method with runner."""
         return x * self.multiplier
 
-    @syn.fn.as_async(runner=syn.GPU)
+    @syn.task.as_async(runner=syn.GPU)
     async def multiply_async(self, x: int) -> int:
         """Async method with runner."""
         return x * self.multiplier
@@ -642,7 +642,7 @@ async def test_memo_with_batching() -> None:
     """Test that memo=True works with batching (no warning, memo is supported)."""
 
     # This should not raise any warnings - memo is now supported with batching
-    @syn.fn.as_async(batching=True, memo=True)
+    @syn.task.as_async(batching=True, cache=True)
     def batched_with_memo(inputs: list[int]) -> list[int]:
         return [x * 2 for x in inputs]
 
@@ -657,7 +657,7 @@ async def test_memo_with_runner() -> None:
     runner = MockRunner()
 
     # This should not raise any warnings - memo is now supported with runner
-    @syn.fn.as_async(runner=runner, memo=True)
+    @syn.task.as_async(runner=runner, cache=True)
     def runner_with_memo(x: int) -> int:
         return x + 1
 
@@ -670,7 +670,7 @@ async def test_memo_with_runner() -> None:
 # ============================================================================
 # GPU Runner tests (in-process by default, subprocess with SYNOR_RUN_GPU_IN_SUBPROCESS=1)
 #
-# The @syn.fn decorator with runner=syn.GPU works with normal syntax.
+# The @syn.task decorator with runner=syn.GPU works with normal syntax.
 # In subprocess mode, functions and methods are pickled using __reduce__ which
 # stores (module, qualname) and reconstructs via __wrapped__ on unpickle.
 # ============================================================================
@@ -686,7 +686,7 @@ def _reset_gpu_runner() -> Iterator[None]:
 # --- In-process mode (default) tests ---
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def _gpu_add_one(x: int) -> int:
     """GPU runner test function."""
     return x + 1
@@ -699,7 +699,7 @@ async def test_gpu_runner_basic() -> None:
     assert result == 6
 
 
-@syn.fn.as_async(batching=True, runner=syn.GPU)
+@syn.task.as_async(batching=True, runner=syn.GPU)
 def _gpu_double_batch(inputs: list[int]) -> list[int]:
     """GPU runner + batching test function."""
     return [x * 2 for x in inputs]
@@ -712,7 +712,7 @@ async def test_gpu_runner_with_batching() -> None:
     assert result == 10
 
 
-@syn.fn.as_async(batching=True, max_batch_size=10, runner=syn.GPU)
+@syn.task.as_async(batching=True, max_batch_size=10, runner=syn.GPU)
 def _gpu_double_batch_concurrent(inputs: list[int]) -> list[int]:
     """GPU runner + batching concurrent test function."""
     return [x * 2 for x in inputs]
@@ -739,7 +739,7 @@ class GPUBatchedProcessor:
     def __init__(self, multiplier: int):
         self.multiplier = multiplier
 
-    @syn.fn.as_async(batching=True, runner=syn.GPU)
+    @syn.task.as_async(batching=True, runner=syn.GPU)
     def multiply(self, inputs: list[int]) -> list[int]:
         """Batched method that multiplies inputs."""
         return [x * self.multiplier for x in inputs]
@@ -773,7 +773,7 @@ async def test_gpu_runner_inprocess_serialization() -> None:
     """Test that in-process GPU runner serializes concurrent calls."""
     execution_order: list[int] = []
 
-    @syn.fn.as_async(runner=syn.GPU)
+    @syn.task.as_async(runner=syn.GPU)
     async def _track_execution(task_id: int) -> int:
         execution_order.append(task_id)
         await asyncio.sleep(0.01)
@@ -794,19 +794,19 @@ async def test_gpu_runner_inprocess_serialization() -> None:
 # from in-process tests (batcher cache is per-function and holds event loop refs).
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def _gpu_add_one_subprocess(x: int) -> int:
     """GPU runner subprocess test function."""
     return x + 1
 
 
-@syn.fn.as_async(batching=True, runner=syn.GPU)
+@syn.task.as_async(batching=True, runner=syn.GPU)
 def _gpu_double_batch_subprocess(inputs: list[int]) -> list[int]:
     """GPU runner subprocess + batching test function."""
     return [x * 2 for x in inputs]
 
 
-@syn.fn.as_async(batching=True, max_batch_size=10, runner=syn.GPU)
+@syn.task.as_async(batching=True, max_batch_size=10, runner=syn.GPU)
 def _gpu_double_batch_concurrent_subprocess(inputs: list[int]) -> list[int]:
     """GPU runner subprocess + batching concurrent test function."""
     return [x * 2 for x in inputs]
@@ -818,7 +818,7 @@ class GPUBatchedProcessorSubprocess:
     def __init__(self, multiplier: int):
         self.multiplier = multiplier
 
-    @syn.fn.as_async(batching=True, runner=syn.GPU)
+    @syn.task.as_async(batching=True, runner=syn.GPU)
     def multiply(self, inputs: list[int]) -> list[int]:
         return [x * self.multiplier for x in inputs]
 
@@ -898,7 +898,7 @@ async def test_gpu_runner_lazy_env_var(
     assert syn.GPU._should_use_subprocess() is True  # still cached
 
 
-@syn.fn.as_async(batching=True)  # type: ignore[arg-type]
+@syn.task.as_async(batching=True)  # type: ignore[arg-type]
 def batched_with_extra_arg(inputs: list[str], prefix: str) -> list[str]:
     return [f"{prefix}:{x}" for x in inputs]
 
@@ -925,7 +925,7 @@ async def test_batching_extra_arg_separates_batchers() -> None:
     assert r1 == "X:a" and r2 == "Y:a"
 
 
-@syn.fn.as_async(batching=True)  # type: ignore[arg-type]
+@syn.task.as_async(batching=True)  # type: ignore[arg-type]
 def batched_with_extra_kwarg(inputs: list[str], *, suffix: str) -> list[str]:
     return [f"{x}:{suffix}" for x in inputs]
 
@@ -958,7 +958,7 @@ class BatchedProcessorWithExtraArgs:
     def __init__(self, base: int) -> None:
         self.base = base
 
-    @syn.fn.as_async(batching=True)  # type: ignore[arg-type]
+    @syn.task.as_async(batching=True)  # type: ignore[arg-type]
     def process(self, inputs: list[int], multiplier: int, *, offset: int) -> list[int]:
         return [self.base + x * multiplier + offset for x in inputs]
 
@@ -992,7 +992,7 @@ async def test_batching_method_extra_args_separates_batchers() -> None:
 # ============================================================================
 
 
-@syn.fn.as_async(batching=True)
+@syn.task.as_async(batching=True)
 async def _idle_double(inputs: list[int]) -> list[int]:
     await asyncio.sleep(0.01)
     return [x * 2 for x in inputs]
@@ -1042,7 +1042,7 @@ class _SimpleBatchedAdder:
     def __init__(self, base: int) -> None:
         self.base = base
 
-    @syn.fn.as_async(batching=True)  # type: ignore[arg-type]
+    @syn.task.as_async(batching=True)  # type: ignore[arg-type]
     async def add(self, inputs: list[int]) -> list[int]:
         return [self.base + x for x in inputs]
 
@@ -1075,7 +1075,7 @@ async def test_retry_with_smaller_batch_splits_until_success() -> None:
     started = asyncio.Event()
     release = asyncio.Event()
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     async def limited(inputs: list[int]) -> list[int]:
         batch_sizes.append(len(inputs))
         if len(batch_sizes) == 1:
@@ -1107,7 +1107,7 @@ async def test_retry_with_smaller_batch_isolates_poison_item() -> None:
     release = asyncio.Event()
     call_count = 0
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     async def embed(inputs: list[int]) -> list[int]:
         nonlocal call_count
         call_count += 1
@@ -1137,7 +1137,7 @@ async def test_retry_with_smaller_batch_isolates_poison_item() -> None:
 async def test_retry_with_smaller_batch_single_item_raises_cause() -> None:
     """At batch size 1 the wrapped original error surfaces, not the signal."""
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     async def always_split(inputs: list[int]) -> list[int]:
         raise syn.RetryWithSmallerBatch() from ValueError("real error")
 
@@ -1149,7 +1149,7 @@ async def test_retry_with_smaller_batch_single_item_raises_cause() -> None:
 async def test_retry_with_smaller_batch_single_item_without_cause() -> None:
     """Signal raised bare (no cause) at size 1 propagates as itself."""
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     async def always_split(inputs: list[int]) -> list[int]:
         raise syn.RetryWithSmallerBatch()
 
@@ -1205,7 +1205,7 @@ def test_retry_with_smaller_batch_pickle_preserves_cause() -> None:
     assert str(cause) == "original failure"
 
 
-@syn.fn.as_async(batching=True, runner=syn.GPU)
+@syn.task.as_async(batching=True, runner=syn.GPU)
 def _rwsb_subprocess_fn(inputs: list[int]) -> list[int]:
     """Raises the split signal unconditionally — including at batch size 1."""
     raise syn.RetryWithSmallerBatch() from ValueError("original failure")

@@ -107,7 +107,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
 Declares a table as a target state. Returns a `TableTarget` for declaring rows.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[ManagedConnection],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -132,7 +132,7 @@ def declare_table_target(
 Once a `TableTarget` is resolved, declare rows to be upserted:
 
 ```python
-def TableTarget.declare_row(
+def TableTarget.ensure_row(
     self,
     *,
     row: RowT,
@@ -262,7 +262,7 @@ schema = sqlite.TableSchema(
 
 ### Virtual tables
 
-SQLite virtual tables allow custom storage backends and specialized functionality. The `sqlite` connector supports creating virtual tables through the same `declare_table_target()` API used for regular tables.
+SQLite virtual tables allow custom storage backends and specialized functionality. The `sqlite` connector supports creating virtual tables through the same `ensure_table_target()` API used for regular tables.
 
 #### Vec0 virtual tables
 
@@ -298,7 +298,7 @@ virtual_table_def = Vec0TableDef(
 
 #### Creating vec0 virtual tables
 
-Pass `virtual_table_def` to `declare_table_target()`:
+Pass `virtual_table_def` to `ensure_table_target()`:
 
 ```python
 @dataclass
@@ -356,7 +356,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
         builder.provide(SQLITE_DB, conn)
         yield
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Declare table target state
     table = await sqlite.mount_table_target(
@@ -370,7 +370,7 @@ async def app_main() -> None:
 
     # Declare rows
     for product in products:
-        table.declare_row(row=product)
+        table.ensure_row(row=product)
 ```
 
 ### Example: Vec0 Virtual Table
@@ -403,7 +403,7 @@ def synor_lifespan(builder: syn.EnvironmentBuilder) -> Iterator[None]:
         builder.provide(SQLITE_DB, conn)
         yield
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Create vec0 virtual table with partition key and auxiliary column
     table = await sqlite.mount_table_target(
@@ -433,5 +433,5 @@ async def app_main() -> None:
     ]
 
     for doc in docs:
-        table.declare_row(row=doc)
+        table.ensure_row(row=doc)
 ```

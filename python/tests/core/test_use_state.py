@@ -43,13 +43,13 @@ class _SerCounter:
         self.n = state["n"]
 
 
-@syn.fn
+@syn.task
 async def _root(items: list[str]) -> None:
     for item in items:
-        await syn.mount(syn.component_subpath(item), _process_item, item)
+        await syn.spawn(syn.unit_path(item), _process_item, item)
 
 
-@syn.fn
+@syn.task
 def _process_item(item: str) -> None:
     handle = syn.use_state("counter", 0)
     _captured[item] = handle.value
@@ -146,16 +146,16 @@ def test_use_state_defaults_to_none() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process_no_initial(item: str) -> None:
         handle = syn.use_state("flag")  # no initial_value
         _captured[item] = handle.value
         handle.value = "set"
 
-    @syn.fn
+    @syn.task
     async def _root_no_initial(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process_no_initial, item)
+            await syn.spawn(syn.unit_path(item), _process_no_initial, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_no_initial", environment=synor_env),
@@ -178,17 +178,17 @@ def test_use_state_writes_serialize_once_at_flush() -> None:
 
     _seen: dict[str, object] = {}
 
-    @syn.fn
+    @syn.task
     def _process_writes(item: str) -> None:
         s = syn.use_state("obj")  # initial None — does not touch the counter
         _seen[item] = s.value
         for i in range(5):
             s.value = _SerCounter(i)
 
-    @syn.fn
+    @syn.task
     async def _root_writes(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process_writes, item)
+            await syn.spawn(syn.unit_path(item), _process_writes, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_write_serialize", environment=synor_env),
@@ -217,16 +217,16 @@ def test_use_state_initial_not_serialized_when_stored_value_exists() -> None:
 
     _seen: dict[str, object] = {}
 
-    @syn.fn
+    @syn.task
     def _process_initial(item: str) -> None:
         # A fresh initial object each run; from run 2 on it is discarded.
         s = syn.use_state("init_obj", _SerCounter(7))
         _seen[item] = s.value
 
-    @syn.fn
+    @syn.task
     async def _root_initial(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process_initial, item)
+            await syn.spawn(syn.unit_path(item), _process_initial, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_initial_serialize", environment=synor_env),
@@ -255,17 +255,17 @@ def test_use_state_first_run_reuses_initial_object_without_roundtrip() -> None:
     sentinel = _SerCounter(123)
     _info: dict[str, object] = {}
 
-    @syn.fn
+    @syn.task
     def _proc(item: str) -> None:
         s = syn.use_state("rt", sentinel)
         _info["is_same"] = s.value is sentinel
         _info["ser_during"] = _SerCounter.serialize_count
         _info["deser_during"] = _SerCounter.deserialize_count
 
-    @syn.fn
+    @syn.task
     async def _root_rt(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _proc, item)
+            await syn.spawn(syn.unit_path(item), _proc, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_roundtrip", environment=synor_env),
@@ -291,7 +291,7 @@ def test_use_state_reload_deserializes_lazily_once() -> None:
 
     _info: dict[str, int] = {}
 
-    @syn.fn
+    @syn.task
     def _proc(item: str) -> None:
         s = syn.use_state("lazy", _SerCounter(5))
         before = _SerCounter.deserialize_count
@@ -300,10 +300,10 @@ def test_use_state_reload_deserializes_lazily_once() -> None:
         _ = s.value
         _info[item] = _SerCounter.deserialize_count - before
 
-    @syn.fn
+    @syn.task
     async def _root_lazy(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _proc, item)
+            await syn.spawn(syn.unit_path(item), _proc, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_lazy_deser", environment=synor_env),
@@ -328,19 +328,19 @@ def test_use_state_unserializable_value_errors_at_commit_with_key() -> None:
 
     captured: list[BaseException] = []
 
-    @syn.fn
+    @syn.task
     def _process_bad(item: str) -> None:
         s = syn.use_state("bad_key")
         s.value = _Unserializable()  # no error here — deferred to commit
 
-    @syn.fn
+    @syn.task
     async def _root_bad(items: list[str]) -> None:
         def handler(exc: BaseException, ctx: syn.ExceptionContext) -> None:
             captured.append(exc)
 
         async with syn.exception_handler(handler):
             for item in items:
-                await syn.mount(syn.component_subpath(item), _process_bad, item)
+                await syn.spawn(syn.unit_path(item), _process_bad, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_unserializable", environment=synor_env),
@@ -363,7 +363,7 @@ def test_use_state_raises_inside_memoized_function() -> None:
 
     _raised: dict[str, bool] = {}
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def _memoized_helper(item: str) -> None:
         try:
             syn.use_state("counter", 0)
@@ -371,16 +371,16 @@ def test_use_state_raises_inside_memoized_function() -> None:
         except RuntimeError:
             _raised[item] = True
 
-    @syn.fn
+    @syn.task
     def _component_fn(item: str) -> None:
         _memoized_helper(
             item
         )  # inline call — memo is function-level, not component-level
 
-    @syn.fn
+    @syn.task
     async def _root_with_memo(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _component_fn, item)
+            await syn.spawn(syn.unit_path(item), _component_fn, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_memo_guard", environment=synor_env),
@@ -400,7 +400,7 @@ def test_use_state_raises_inside_async_memoized_function() -> None:
 
     _raised: dict[str, bool] = {}
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     async def _async_memoized_helper(item: str) -> None:
         try:
             syn.use_state("counter", 0)
@@ -408,14 +408,14 @@ def test_use_state_raises_inside_async_memoized_function() -> None:
         except RuntimeError:
             _raised[item] = True
 
-    @syn.fn
+    @syn.task
     async def _component_fn(item: str) -> None:
         await _async_memoized_helper(item)  # inline call, not mounted
 
-    @syn.fn
+    @syn.task
     async def _root_async_memo(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _component_fn, item)
+            await syn.spawn(syn.unit_path(item), _component_fn, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_async_memo_guard", environment=synor_env),
@@ -440,7 +440,7 @@ def test_use_state_raises_inside_indirect_sync_memoized_function() -> None:
 
     _raised: dict[str, bool] = {}
 
-    @syn.fn
+    @syn.task
     def _non_memoized_helper(item: str) -> None:
         try:
             syn.use_state("counter", 0)
@@ -448,18 +448,18 @@ def test_use_state_raises_inside_indirect_sync_memoized_function() -> None:
         except RuntimeError:
             _raised[item] = True
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def _memoized_outer(item: str) -> None:
         _non_memoized_helper(item)  # indirect: use_state called via non-memoized child
 
-    @syn.fn
+    @syn.task
     def _component_fn(item: str) -> None:
         _memoized_outer(item)  # inline memo call — not mounted
 
-    @syn.fn
+    @syn.task
     async def _root_indirect_sync(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _component_fn, item)
+            await syn.spawn(syn.unit_path(item), _component_fn, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_indirect_sync_memo_guard", environment=synor_env),
@@ -479,7 +479,7 @@ def test_use_state_raises_inside_indirect_async_memoized_function() -> None:
 
     _raised: dict[str, bool] = {}
 
-    @syn.fn
+    @syn.task
     async def _non_memoized_helper(item: str) -> None:
         try:
             syn.use_state("counter", 0)
@@ -487,18 +487,18 @@ def test_use_state_raises_inside_indirect_async_memoized_function() -> None:
         except RuntimeError:
             _raised[item] = True
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     async def _memoized_outer(item: str) -> None:
         await _non_memoized_helper(item)
 
-    @syn.fn
+    @syn.task
     async def _component_fn(item: str) -> None:
         await _memoized_outer(item)  # inline memo call — not mounted
 
-    @syn.fn
+    @syn.task
     async def _root_indirect_async(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _component_fn, item)
+            await syn.spawn(syn.unit_path(item), _component_fn, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(
@@ -520,7 +520,7 @@ def test_use_state_raises_on_duplicate_key() -> None:
 
     _raised: dict[str, bool] = {}
 
-    @syn.fn
+    @syn.task
     def _process_duplicate(item: str) -> None:
         syn.use_state("counter", 0)
         try:
@@ -529,10 +529,10 @@ def test_use_state_raises_on_duplicate_key() -> None:
         except RuntimeError:
             _raised[item] = True
 
-    @syn.fn
+    @syn.task
     async def _root_duplicate(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process_duplicate, item)
+            await syn.spawn(syn.unit_path(item), _process_duplicate, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_duplicate_key", environment=synor_env),
@@ -553,7 +553,7 @@ def test_use_state_accepts_non_string_stable_keys() -> None:
 
     keys: list[syn.StableKey] = [42, ("ns", 1), syn.Symbol("sym"), b"raw"]
 
-    @syn.fn
+    @syn.task
     def _process_multikey(item: str) -> None:
         snapshot: dict[syn.StableKey, object] = {}
         for k in keys:
@@ -562,10 +562,10 @@ def test_use_state_accepts_non_string_stable_keys() -> None:
             handle.value = handle.value + 1
         _captured[item] = snapshot
 
-    @syn.fn
+    @syn.task
     async def _root_multikey(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process_multikey, item)
+            await syn.spawn(syn.unit_path(item), _process_multikey, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_non_string_keys", environment=synor_env),
@@ -587,10 +587,10 @@ def test_use_state_raises_inside_component_subpath_block() -> None:
 
     _raised: dict[str, bool] = {}
 
-    @syn.fn
+    @syn.task
     async def _root_with_subpath(items: list[str]) -> None:
         for item in items:
-            with syn.component_subpath(item):
+            with syn.unit_path(item):
                 try:
                     syn.use_state("counter", 0)
                     _raised[item] = False
@@ -617,7 +617,7 @@ def test_use_state_type_hint_deserializes_into_dataclass() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process(item: str) -> None:
         s = syn.use_state("cur", type_hint=_Cursor, initial_value=_Cursor(0, "init"))
         v = s.value
@@ -625,10 +625,10 @@ def test_use_state_type_hint_deserializes_into_dataclass() -> None:
         _captured[item] = v
         s.value = _Cursor(v.pos + 1, "next")
 
-    @syn.fn
+    @syn.task
     async def _root_typed(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process, item)
+            await syn.spawn(syn.unit_path(item), _process, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_type_hint", environment=synor_env),
@@ -652,17 +652,17 @@ def test_use_state_type_hint_without_initial() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process(item: str) -> None:
         s = syn.use_state("cur", type_hint=_Cursor)
         v = s.value
         _captured[item] = v
         s.value = _Cursor(42, "set")
 
-    @syn.fn
+    @syn.task
     async def _root_no_initial(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process, item)
+            await syn.spawn(syn.unit_path(item), _process, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_type_hint_no_initial", environment=synor_env),
@@ -684,7 +684,7 @@ def test_use_state_type_hint_with_positional_none_initial() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process(item: str) -> None:
         # Exercises the overload: use_state(key, None, *, type_hint=...)
         s = syn.use_state("cur", None, type_hint=_Cursor)
@@ -692,10 +692,10 @@ def test_use_state_type_hint_with_positional_none_initial() -> None:
         _captured[item] = v
         s.value = _Cursor(99, "pos")
 
-    @syn.fn
+    @syn.task
     async def _root(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process, item)
+            await syn.spawn(syn.unit_path(item), _process, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(
@@ -724,7 +724,7 @@ def test_use_state_type_hint_deserializes_into_namedtuple() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process(item: str) -> None:
         s = syn.use_state("pt", type_hint=_Point, initial_value=_Point(1, 2))
         v = s.value
@@ -732,10 +732,10 @@ def test_use_state_type_hint_deserializes_into_namedtuple() -> None:
         _captured[item] = v
         s.value = _Point(v.x + 1, v.y + 1)
 
-    @syn.fn
+    @syn.task
     async def _root_typed(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process, item)
+            await syn.spawn(syn.unit_path(item), _process, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_type_hint_namedtuple", environment=synor_env),
@@ -764,7 +764,7 @@ def test_use_state_type_hint_deserializes_into_msgspec_struct() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process(item: str) -> None:
         s = syn.use_state(
             "pt", type_hint=_MsgSpecPoint, initial_value=_MsgSpecPoint(1, 2)
@@ -774,10 +774,10 @@ def test_use_state_type_hint_deserializes_into_msgspec_struct() -> None:
         _captured[item] = v
         s.value = _MsgSpecPoint(v.x + 1, v.y + 1)
 
-    @syn.fn
+    @syn.task
     async def _root_typed(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process, item)
+            await syn.spawn(syn.unit_path(item), _process, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_type_hint_msgspec", environment=synor_env),
@@ -807,7 +807,7 @@ def test_use_state_type_hint_deserializes_into_pydantic_model() -> None:
     _source_items.clear()
     _captured.clear()
 
-    @syn.fn
+    @syn.task
     def _process(item: str) -> None:
         s = syn.use_state(
             "pt", type_hint=_PydanticPoint, initial_value=_PydanticPoint(x=1, y=2)
@@ -817,10 +817,10 @@ def test_use_state_type_hint_deserializes_into_pydantic_model() -> None:
         _captured[item] = v
         s.value = _PydanticPoint(x=v.x + 1, y=v.y + 1)
 
-    @syn.fn
+    @syn.task
     async def _root_typed(items: list[str]) -> None:
         for item in items:
-            await syn.mount(syn.component_subpath(item), _process, item)
+            await syn.spawn(syn.unit_path(item), _process, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_type_hint_pydantic", environment=synor_env),
@@ -847,19 +847,19 @@ def test_use_state_type_hint_mismatch_raises_deserialization_error() -> None:
     captured: list[BaseException] = []
     _store_mode: list[bool] = [True]  # mutable flag to switch behavior between runs
 
-    @syn.fn
+    @syn.task
     def _process_store_int(item: str) -> None:
         # Store an int without any type hint.
         s = syn.use_state("cur", 123)
         _captured[item] = s.value
 
-    @syn.fn
+    @syn.task
     def _process_load_as_cursor(item: str) -> None:
         # On the next run, try to deserialize the stored int as a _Cursor.
         s = syn.use_state("cur", type_hint=_Cursor)
         _captured[item] = s.value  # should raise DeserializationError
 
-    @syn.fn
+    @syn.task
     async def _root_mismatch(items: list[str]) -> None:
         def handler(exc: BaseException, ctx: syn.ExceptionContext) -> None:
             captured.append(exc)
@@ -867,12 +867,12 @@ def test_use_state_type_hint_mismatch_raises_deserialization_error() -> None:
         async with syn.exception_handler(handler):
             for item in items:
                 if _store_mode[0]:
-                    await syn.mount(
-                        syn.component_subpath(item), _process_store_int, item
+                    await syn.spawn(
+                        syn.unit_path(item), _process_store_int, item
                     )
                 else:
-                    await syn.mount(
-                        syn.component_subpath(item), _process_load_as_cursor, item
+                    await syn.spawn(
+                        syn.unit_path(item), _process_load_as_cursor, item
                     )
 
     app = syn.App(  # type: ignore[type-arg]

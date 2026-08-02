@@ -250,9 +250,9 @@ def test_table_target_tracks_raw_rows_and_encodes_on_write(
     )
     provider = FakeTargetStateProvider()
     declared: list[object] = []
-    monkeypatch.setattr(syn, "declare_target_state", declared.append)
+    monkeypatch.setattr(syn, "ensure_target_state", declared.append)
 
-    bigquery.TableTarget(cast(Any, provider), schema).declare_row(
+    bigquery.TableTarget(cast(Any, provider), schema).ensure_row(
         row={"id": 1, "elapsed": datetime.timedelta(seconds=90)}
     )
 

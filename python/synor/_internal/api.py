@@ -32,7 +32,7 @@ from .update_stats import (
 )
 from .pending_marker import ResolvesTo
 from .component_ctx import (
-    ComponentSubpath,
+    UnitPath,
     ExceptionContext,
     ExceptionHandler,
     build_child_path,
@@ -49,7 +49,7 @@ from .function import (
     AsyncCallable,
     LogicTracking,
     create_core_component_processor,
-    fn,
+    task,
     fn_ret_deserializer,
 )
 from .stable_path import Symbol
@@ -57,7 +57,7 @@ from .target_state import (
     TargetState,
     TargetStateProvider,
     TargetHandler,
-    declare_target_state_with_child,
+    ensure_target_state_with_child,
 )
 from .live_component import (
     LiveComponent,
@@ -83,7 +83,7 @@ from .target_state import (
     TargetReconcileOutput,
     TargetActionSink,
     PendingTargetStateProvider,
-    declare_target_state,
+    ensure_target_state,
     register_root_target_states_provider,
 )
 
@@ -119,7 +119,7 @@ from .pending_marker import PendingS, ResolvedS, MaybePendingS
 
 from .component_ctx import (
     ComponentContext,
-    component_subpath,
+    unit_path,
     use_context,
     get_component_context,
 )
@@ -128,7 +128,7 @@ from .setting import Settings, LmdbSettings
 
 from .stable_path import ROOT_PATH, StablePath
 
-from .typing import NonExistenceType, NON_EXISTENCE, is_non_existence, MemoStateOutcome
+from .typing import AbsentType, ABSENT, is_absent, MemoStateOutcome
 
 
 # ============================================================================
@@ -145,7 +145,7 @@ _ValueT = TypeVar("_ValueT")
 _ChildHandlerT = TypeVar("_ChildHandlerT", bound="TargetHandler[Any, Any, Any] | None")
 
 
-class ComponentMountHandle:
+class SpawnHandle:
     """Handle for processing unit(s) started with `mount()` or `mount_each()`. Allows waiting until ready."""
 
     __slots__ = ("_cores", "_lock", "_next_ready_index")
@@ -177,58 +177,58 @@ class ComponentMountHandle:
 
 
 @overload
-async def use_mount(
-    subpath: ComponentSubpath,
+async def call(
+    subpath: UnitPath,
     processor_fn: AsyncCallable[P, ResolvesTo[ReturnT]],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
-    subpath: ComponentSubpath,
+async def call(
+    subpath: UnitPath,
     processor_fn: Callable[P, ResolvesTo[ReturnT]],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
-    subpath: ComponentSubpath,
+async def call(
+    subpath: UnitPath,
     processor_fn: AsyncCallable[P, ReturnT],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
-    subpath: ComponentSubpath,
+async def call(
+    subpath: UnitPath,
     processor_fn: Callable[P, ReturnT],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
+async def call(
     processor_fn: AsyncCallable[P, ResolvesTo[ReturnT]],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
+async def call(
     processor_fn: Callable[P, ResolvesTo[ReturnT]],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
+async def call(
     processor_fn: AsyncCallable[P, ReturnT],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
 @overload
-async def use_mount(
+async def call(
     processor_fn: Callable[P, ReturnT],
     *args: P.args,
     **kwargs: P.kwargs,
 ) -> ReturnT: ...
-async def use_mount(*pos_args: Any, **kwargs: Any) -> Any:
+async def call(*pos_args: Any, **kwargs: Any) -> Any:
     """
     Mount a dependent processing component and return its result.
 
@@ -237,7 +237,7 @@ async def use_mount(*pos_args: Any, **kwargs: Any) -> Any:
     ``use_context()``) signals that the caller creates a dependency on the
     child's result.
 
-    Accepts an optional ``ComponentSubpath`` as the first argument. When omitted,
+    Accepts an optional ``UnitPath`` as the first argument. When omitted,
     the subpath is auto-derived from ``Symbol(fn.__name__)``.
 
     Args:
@@ -250,15 +250,15 @@ async def use_mount(*pos_args: Any, **kwargs: Any) -> Any:
         The return value of processor_fn.
 
     Example:
-        target = await syn.use_mount(declare_table_target, table_name)
+        target = await syn.call(declare_table_target, table_name)
 
         # With explicit subpath:
-        target = await syn.use_mount(
-            syn.component_subpath("setup"), declare_table_target, table_name
+        target = await syn.call(
+            syn.unit_path("setup"), declare_table_target, table_name
         )
     """
     check_cancellation()
-    if pos_args and isinstance(pos_args[0], ComponentSubpath):
+    if pos_args and isinstance(pos_args[0], UnitPath):
         subpath = pos_args[0]
         processor_fn = pos_args[1]
         args = pos_args[2:]
@@ -268,12 +268,12 @@ async def use_mount(*pos_args: Any, **kwargs: Any) -> Any:
         name = _default_subpath_name(processor_fn)
         if name is None:
             raise TypeError(
-                "use_mount() requires a ComponentSubpath when the function has no "
+                "use_mount() requires a UnitPath when the function has no "
                 "__name__. Provide an explicit subpath as the first argument."
             )
-        subpath = ComponentSubpath(Symbol(name))
+        subpath = UnitPath(Symbol(name))
 
-    check_not_in_process_live("syn.use_mount")
+    check_not_in_process_live("syn.call")
 
     if is_live_component_class(processor_fn):
         raise TypeError(
@@ -310,13 +310,13 @@ async def _mount_live_component(
     parent_ctx: ComponentContext,
     child_path: core.StablePath,
     instance: Any,
-) -> ComponentMountHandle:
+) -> SpawnHandle:
     """Mount a pre-constructed LiveComponent instance.
 
     Wraps `instance.process_live(operator)` in `_process_live_wrapper` so
     `_in_process_live = True` is set inside the asyncio Task that runs
     the body (the wrapper Coroutine inherits this `Context` value through
-    asyncio's standard Task-context inheritance, and any `syn.mount*`
+    asyncio's standard Task-context inheritance, and any `syn.spawn*`
     call within will raise).
     """
     from .live_component import _process_live_wrapper
@@ -332,31 +332,31 @@ async def _mount_live_component(
 
     controller.start(_process_live_wrapper(instance, operator))
 
-    return ComponentMountHandle([readiness_handle])
+    return SpawnHandle([readiness_handle])
 
 
 @overload
-async def mount(
-    subpath: ComponentSubpath,
+async def spawn(
+    subpath: UnitPath,
     processor_fn: AnyCallable[P, Any],
     *args: P.args,
     **kwargs: P.kwargs,
-) -> ComponentMountHandle: ...
+) -> SpawnHandle: ...
 
 
 @overload
-async def mount(
+async def spawn(
     processor_fn: AnyCallable[P, Any],
     *args: P.args,
     **kwargs: P.kwargs,
-) -> ComponentMountHandle: ...
+) -> SpawnHandle: ...
 
 
-async def mount(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
+async def spawn(*pos_args: Any, **kwargs: Any) -> SpawnHandle:
     """
     Mount a processing unit in the background and return a handle to wait until ready.
 
-    Accepts an optional ``ComponentSubpath`` as the first argument. When omitted,
+    Accepts an optional ``UnitPath`` as the first argument. When omitted,
     the subpath is auto-derived from ``Symbol(fn.__name__)``.
 
     Args:
@@ -370,15 +370,15 @@ async def mount(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
         A handle that can be used to wait until the processing unit is ready.
 
     Example:
-        await syn.mount(process_file, file, target)
+        await syn.spawn(process_file, file, target)
 
         # With explicit subpath:
-        await syn.mount(syn.component_subpath("process", filename), process_file, file, target)
+        await syn.spawn(syn.unit_path("process", filename), process_file, file, target)
     """
     check_cancellation()
-    check_not_in_process_live("syn.mount")
+    check_not_in_process_live("syn.spawn")
 
-    if pos_args and isinstance(pos_args[0], ComponentSubpath):
+    if pos_args and isinstance(pos_args[0], UnitPath):
         subpath = pos_args[0]
         processor_fn = pos_args[1]
         args = pos_args[2:]
@@ -388,10 +388,10 @@ async def mount(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
         name = _default_subpath_name(processor_fn)
         if name is None:
             raise TypeError(
-                "mount() requires a ComponentSubpath when the function has no "
+                "mount() requires a UnitPath when the function has no "
                 "__name__. Provide an explicit subpath as the first argument."
             )
-        subpath = ComponentSubpath(Symbol(name))
+        subpath = UnitPath(Symbol(name))
 
     parent_ctx = get_context_from_ctx()
     child_path = build_child_path(parent_ctx, subpath)
@@ -415,7 +415,7 @@ async def mount(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
         parent_ctx._core_fn_call_ctx,
         resolved,
     )
-    return ComponentMountHandle([core_handle])
+    return SpawnHandle([core_handle])
 
 
 _ItemsType = (
@@ -426,29 +426,29 @@ _ItemsType = (
 
 
 @overload
-async def mount_each(
-    subpath: ComponentSubpath,
+async def spawn_each(
+    subpath: UnitPath,
     fn: AnyCallable[Concatenate[T, P], Any],
     items: _ItemsType[T],
     *args: P.args,
     **kwargs: P.kwargs,
-) -> ComponentMountHandle: ...
+) -> SpawnHandle: ...
 
 
 @overload
-async def mount_each(
+async def spawn_each(
     fn: AnyCallable[Concatenate[T, P], Any],
     items: _ItemsType[T],
     *args: P.args,
     **kwargs: P.kwargs,
-) -> ComponentMountHandle: ...
+) -> SpawnHandle: ...
 
 
-async def mount_each(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
+async def spawn_each(*pos_args: Any, **kwargs: Any) -> SpawnHandle:
     """
     Mount one independent component per item in a keyed iterable.
 
-    Accepts an optional ``ComponentSubpath`` as the first argument. When omitted,
+    Accepts an optional ``UnitPath`` as the first argument. When omitted,
     the subpath is auto-derived from ``Symbol(fn.__name__)``.
 
     When *items* is a ``LiveMapFeed`` or ``LiveMapView``, an internal
@@ -468,9 +468,9 @@ async def mount_each(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
         A handle that can be used to wait until all processing units are ready.
     """
     check_cancellation()
-    check_not_in_process_live("syn.mount_each")
+    check_not_in_process_live("syn.spawn_each")
 
-    if pos_args and isinstance(pos_args[0], ComponentSubpath):
+    if pos_args and isinstance(pos_args[0], UnitPath):
         subpath = pos_args[0]
         fn = pos_args[1]
         items = pos_args[2]
@@ -482,10 +482,10 @@ async def mount_each(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
         name = _default_subpath_name(fn)
         if name is None:
             raise TypeError(
-                "mount_each() requires a ComponentSubpath when the function has no "
+                "mount_each() requires a UnitPath when the function has no "
                 "__name__. Provide an explicit subpath as the first argument."
             )
-        subpath = ComponentSubpath(Symbol(name))
+        subpath = UnitPath(Symbol(name))
 
     parent_ctx = get_context_from_ctx()
     child_path = build_child_path(parent_ctx, subpath)
@@ -534,7 +534,7 @@ async def mount_each(*pos_args: Any, **kwargs: Any) -> ComponentMountHandle:
     else:
         for key, item in items:
             await _mount_one(key, item)
-    return ComponentMountHandle(core_handles)
+    return SpawnHandle(core_handles)
 
 
 # Keep map task failures wrapped so a user function can return an Exception
@@ -634,7 +634,7 @@ async def map(
 _MOUNT_TARGET_SYMBOL = Symbol("synor/mount_target")
 
 
-async def mount_target(
+async def attach_target(
     target_state: TargetState[TargetHandler[_ValueT, Any, _ChildHandlerT]],
 ) -> TargetStateProvider[_ValueT, _ChildHandlerT]:
     """
@@ -655,16 +655,16 @@ async def mount_target(
 
     Example::
 
-        provider = await syn.mount_target(
+        provider = await syn.attach_target(
             target_db.table_target(table_name=TABLE_NAME, table_schema=schema)
         )
     """
     check_cancellation()
-    subpath = ComponentSubpath(_MOUNT_TARGET_SYMBOL) / (
+    subpath = UnitPath(_MOUNT_TARGET_SYMBOL) / (
         *target_state._provider._core.stable_key_chain(),
         target_state._key,
     )
-    return await use_mount(subpath, declare_target_state_with_child, target_state)  # type: ignore[no-any-return, return-value]
+    return await call(subpath, ensure_target_state_with_child, target_state)  # type: ignore[no-any-return, return-value]
 
 
 # ============================================================================
@@ -831,7 +831,7 @@ def use_state(
                       failures — logged by default but not propagated to
                       `app.update()` unless a custom exception handler re-raises:
 
-                      - Inside a `with syn.component_subpath()` block: state
+                      - Inside a `with syn.unit_path()` block: state
                         is owned by the component's stable path, not the shifted
                         subpath, so the key would silently read/write under the
                         wrong identity.
@@ -860,7 +860,7 @@ def use_state(
     ctx = get_context_from_ctx()
     if ctx._core_path != ctx._core_processor_ctx.stable_path:
         raise RuntimeError(
-            "syn.use_state() cannot be called inside a `with syn.component_subpath()` block"
+            "syn.use_state() cannot be called inside a `with syn.unit_path()` block"
         )
 
     if ctx._in_memo_fn:
@@ -903,7 +903,7 @@ __all__ = [
     "UpdateStats",
     "UpdateStatus",
     # .function
-    "fn",
+    "task",
     "LogicTracking",
     "timeout",
     "check_cancellation",
@@ -921,8 +921,8 @@ __all__ = [
     "TargetHandler",
     "TargetActionSink",
     "PendingTargetStateProvider",
-    "declare_target_state",
-    "declare_target_state_with_child",
+    "ensure_target_state",
+    "ensure_target_state_with_child",
     "register_root_target_states_provider",
     # .environment
     "Environment",
@@ -952,10 +952,10 @@ __all__ = [
     "ResolvesTo",
     # .component_ctx
     "ComponentContext",
-    "ComponentSubpath",
+    "UnitPath",
     "ExceptionContext",
     "ExceptionHandler",
-    "component_subpath",
+    "unit_path",
     "exception_handler",
     "stats_group",
     "use_context",
@@ -969,9 +969,9 @@ __all__ = [
     "StableKey",
     "Symbol",
     # .typing
-    "NON_EXISTENCE",
-    "NonExistenceType",
-    "is_non_existence",
+    "ABSENT",
+    "AbsentType",
+    "is_absent",
     "MemoStateOutcome",
     # .live_component
     "LiveComponent",
@@ -984,12 +984,12 @@ __all__ = [
     "StateHandle",
     "use_state",
     # Mount APIs
-    "ComponentMountHandle",
-    "mount",
-    "mount_each",
-    "mount_target",
+    "SpawnHandle",
+    "spawn",
+    "spawn_each",
+    "attach_target",
     "map",
-    "use_mount",
+    "call",
     # Start/stop/runtime
     "start",
     "stop",

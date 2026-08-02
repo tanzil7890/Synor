@@ -47,7 +47,7 @@ class _TopicSpec:
 
 class _TopicAction(NamedTuple):
     key: _TopicKey
-    spec: _TopicSpec | syn.NonExistenceType
+    spec: _TopicSpec | syn.AbsentType
 
 
 class _MessageAction(NamedTuple):
@@ -102,14 +102,14 @@ class _MessageHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_target_state: bytes | str | syn.NonExistenceType,
+        desired_target_state: bytes | str | syn.AbsentType,
         prev_possible_records: Collection[_MessageFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_MessageAction, _MessageFingerprint] | None:
         assert isinstance(key, (bytes, str))
 
-        if syn.is_non_existence(desired_target_state):
+        if syn.is_absent(desired_target_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             deletion_value: bytes | str | None = None
@@ -118,7 +118,7 @@ class _MessageHandler:
             return syn.TargetReconcileOutput(
                 action=_MessageAction(key=key, value=deletion_value),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         # Upsert case
@@ -160,7 +160,7 @@ class _TopicHandler:
     ) -> list[syn.ChildTargetDef[_MessageHandler] | None]:
         outputs: list[syn.ChildTargetDef[_MessageHandler] | None] = []
         for action in actions:
-            if syn.is_non_existence(action.spec):
+            if syn.is_absent(action.spec):
                 outputs.append(None)
             else:
                 producer = context_provider.get(action.key.producer_key, AIOProducer)
@@ -175,16 +175,16 @@ class _TopicHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_target_state: _TopicSpec | syn.NonExistenceType,
+        desired_target_state: _TopicSpec | syn.AbsentType,
         prev_possible_records: Collection[None],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_TopicAction, None, _MessageHandler]:
         topic_key = _TopicKey(*_TOPIC_KEY_CHECKER.check(key))
 
-        tracking_record: None | syn.NonExistenceType
-        if syn.is_non_existence(desired_target_state):
-            tracking_record = syn.NON_EXISTENCE
+        tracking_record: None | syn.AbsentType
+        if syn.is_absent(desired_target_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = None
 
@@ -215,18 +215,18 @@ class KafkaTopicTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["KafkaTopicTar
     """
 
     _provider: syn.TargetStateProvider[
-        bytes | str | syn.NonExistenceType, None, syn.MaybePendingS
+        bytes | str | syn.AbsentType, None, syn.MaybePendingS
     ]
 
     def __init__(
         self,
         provider: syn.TargetStateProvider[
-            bytes | str | syn.NonExistenceType, None, syn.MaybePendingS
+            bytes | str | syn.AbsentType, None, syn.MaybePendingS
         ],
     ) -> None:
         self._provider = provider
 
-    def declare_target_state(
+    def ensure_target_state(
         self: "KafkaTopicTarget", *, key: bytes | str, value: bytes | str
     ) -> None:
         """
@@ -239,7 +239,7 @@ class KafkaTopicTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["KafkaTopicTar
             key: The message key (used as the stable identity).
             value: The message value.
         """
-        syn.declare_target_state(self._provider.target_state(key, value))
+        syn.ensure_target_state(self._provider.target_state(key, value))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -254,7 +254,7 @@ def kafka_topic_target(
     """
     Create a TargetState for a Kafka topic target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``mount_kafka_topic_target()`` for a convenience wrapper.
 
     Args:
@@ -271,7 +271,7 @@ def kafka_topic_target(
     return _topic_provider.target_state(key, spec)
 
 
-@syn.fn
+@syn.task
 def declare_kafka_topic_target(
     producer: ContextKey[AIOProducer],
     topic: str,
@@ -290,7 +290,7 @@ def declare_kafka_topic_target(
     Returns:
         A KafkaTopicTarget that can be used to declare target states.
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         kafka_topic_target(producer, topic, deletion_value_fn=deletion_value_fn)
     )
     return KafkaTopicTarget(provider)
@@ -305,7 +305,7 @@ async def mount_kafka_topic_target(
     """
     Mount a Kafka topic target and return a ready-to-use KafkaTopicTarget.
 
-    Sugar over ``kafka_topic_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``kafka_topic_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         producer: ContextKey for the AIOProducer connection.
@@ -316,7 +316,7 @@ async def mount_kafka_topic_target(
     Returns:
         A KafkaTopicTarget that can be used to declare target states.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         kafka_topic_target(producer, topic, deletion_value_fn=deletion_value_fn)
     )
     return KafkaTopicTarget(provider)

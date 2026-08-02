@@ -176,7 +176,7 @@ class DocTriples:
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_summary(content: str) -> DocumentSummary:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -191,7 +191,7 @@ async def extract_summary(content: str) -> DocumentSummary:
     return DocumentSummary.model_validate(result.model_dump())
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_relationships(content: str) -> list[Triple]:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -211,7 +211,7 @@ async def extract_relationships(content: str) -> list[Triple]:
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: localfs.File,
     document_table: neo4j.TableTarget[Document],
@@ -233,7 +233,7 @@ async def process_file(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def build_graph(
     docs: list[DocTriples],
     entity_table: neo4j.TableTarget[Entity],
@@ -269,7 +269,7 @@ async def build_graph(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     # --- Mount node tables ---
     document_table = await neo4j.mount_table_target(
@@ -310,8 +310,8 @@ async def app_main(sourcedir: pathlib.Path) -> None:
     file_coros = []
     async for path_key, file in files.items():
         file_coros.append(
-            syn.use_mount(
-                syn.component_subpath("file", path_key),
+            syn.call(
+                syn.unit_path("file", path_key),
                 process_file,
                 file,
                 document_table,
@@ -320,8 +320,8 @@ async def app_main(sourcedir: pathlib.Path) -> None:
     docs: list[DocTriples] = list(await asyncio.gather(*file_coros))
 
     # --- Phase 2: build the concept graph ---
-    await syn.mount(
-        syn.component_subpath("build_graph"),
+    await syn.spawn(
+        syn.unit_path("build_graph"),
         build_graph,
         docs,
         entity_table,

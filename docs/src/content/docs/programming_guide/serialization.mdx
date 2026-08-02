@@ -10,7 +10,7 @@ description: >
 Synor serializes and caches the return values of [memoized functions](./function#memoization) so that unchanged work can be skipped on subsequent runs. Most Python types work automatically — the key thing to get right is the **return type annotation**, which tells Synor how to reconstruct your objects:
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_chunk(chunk: Chunk) -> Embedding:  # return type annotation
     return embed(chunk.text)
 ```

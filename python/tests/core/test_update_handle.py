@@ -11,13 +11,13 @@ synor_env = create_test_env(__file__)
 _source_data: dict[str, int] = {}
 
 
-@syn.fn()
+@syn.task()
 async def _process_items() -> None:
     for key, value in _source_data.items():
-        syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
-@syn.fn()
+@syn.task()
 async def _trivial_fn(s: str) -> str:
     return s
 

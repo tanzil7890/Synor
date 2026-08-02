@@ -222,17 +222,17 @@ import synor as syn
 from synor.connectors import azure_blob
 from synor.resources.file import FileLike, PatternFilePathMatcher
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     client = syn.use_context(AZURE_CONTAINER_CLIENT)
     matcher = PatternFilePathMatcher(included_patterns=["**/*.md"])
     files = azure_blob.list_blobs(client, prefix="docs/", path_matcher=matcher)
 
-    with syn.component_subpath("file"):
+    with syn.unit_path("file"):
         async for key, file in files.items():
-            await syn.mount(syn.component_subpath(key), process_file, file)
+            await syn.spawn(syn.unit_path(key), process_file, file)
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike[str]) -> None:
     text = await file.read_text()
     # Process the file content.

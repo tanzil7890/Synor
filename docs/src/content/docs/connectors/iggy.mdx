@@ -128,7 +128,7 @@ target = await iggy.mount_iggy_topic_target(
     partition=0,
 )
 
-target.declare_target_state(key="order-123", value=b'{"status":"ready"}')
+target.ensure_target_state(key="order-123", value=b'{"status":"ready"}')
 ```
 
 Deletes need an application-level delete payload because Iggy does not have

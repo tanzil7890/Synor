@@ -27,13 +27,13 @@ class AudioTranscription:
     filename: str
     text: str
 
-@syn.fn(memo=True)   # unchanged file is never re-transcribed
+@syn.task(cache=True)   # unchanged file is never re-transcribed
 async def process_file(
     file: localfs.File,
     table: postgres.TableTarget[AudioTranscription],
 ) -> None:
     transcript = await _transcriber.transcribe(file)
-    table.declare_row(
+    table.ensure_row(
         row=AudioTranscription(filename=str(file.file_path.path), text=transcript),
     )
 ```
@@ -44,7 +44,7 @@ async def process_file(
 
 - **Swap the model with one string.** `LiteLLMTranscriber("whisper-1")` wraps LiteLLM's transcription API — change that string (and the matching credential) for `elevenlabs/scribe_v1`, a self-hosted endpoint, whatever.
 - **The table is the index.** `filename` is the primary key, so the output table doubles as a record of which files have been transcribed — no separate bookkeeping.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a file when its content and the function's code are both unchanged, so you never pay for the same transcription twice.
+- **Incremental by default.** `@syn.task(cache=True)` skips a file when its content and the function's code are both unchanged, so you never pay for the same transcription twice.
 - **Managed Postgres target.** `mount_table_target` handles schema, idempotent upserts, and orphan cleanup — delete a file and its row is removed automatically.
 - **Logic changes reconcile too.** Swap the transcription model and Synor re-transcribes against it, compares with what's in Postgres, and applies only the difference.
 

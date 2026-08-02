@@ -49,18 +49,18 @@ _dc_metrics = Metrics()
 _dc_returned_values: dict[str, Any] = {}
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_dc(entry: SourceEntry) -> Result:
     _dc_metrics.increment("call.transform_dc")
     return Result(count=len(entry.content), label=entry.content)
 
 
-@syn.fn
+@syn.task
 def _process_dc() -> None:
     for key, value in _dc_source_data.items():
         result = _transform_dc(value)
         _dc_returned_values[key] = result
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(key, f"{result.label}:{result.count}")
         )
 
@@ -113,17 +113,17 @@ def test_memo_roundtrip_pydantic_return() -> None:
         score: float
         tag: str
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def _transform_pydantic(entry: SourceEntry) -> PydanticResult:
         _pydantic_metrics.increment("call.transform_pydantic")
         return PydanticResult(score=len(entry.content) * 1.5, tag=entry.content)
 
-    @syn.fn
+    @syn.task
     def _process_pydantic() -> None:
         for key, value in _pydantic_source_data.items():
             result: Any = _transform_pydantic(value)
             _pydantic_returned_values[key] = result
-            syn.declare_target_state(
+            syn.ensure_target_state(
                 GlobalDictTarget.target_state(key, f"{result.tag}:{result.score}")  # type: ignore[attr-defined]
             )
 
@@ -176,19 +176,19 @@ _nohint_metrics = Metrics()
 _nohint_returned_values: dict[str, Any] = {}
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_nohint(entry: NohintSourceEntry):  # type: ignore[no-untyped-def]
     """No return type annotation -- returns a dict."""
     _nohint_metrics.increment("call.transform_nohint")
     return {"text": entry.content, "length": len(entry.content)}
 
 
-@syn.fn
+@syn.task
 def _process_nohint() -> None:
     for key, value in _nohint_source_data.items():
         result = _transform_nohint(value)
         _nohint_returned_values[key] = result
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(key, f"{result['text']}:{result['length']}")
         )
 
@@ -238,19 +238,19 @@ _dedup_source_data: dict[str, DedupSourceEntry] = {}
 _dedup_metrics = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_dedup(entry: DedupSourceEntry) -> str:
     _dedup_metrics.increment("call.transform_dedup")
     return f"processed:{entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_dedup() -> None:
     for key, value in _dedup_source_data.items():
         # Call the same memo function twice with the same entry in one update
         result1 = _transform_dedup(value)
         result2 = _transform_dedup(value)
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(key, f"{result1}|{result2}")
         )
 
@@ -304,7 +304,7 @@ class StateEntry:
 
     def __synor_memo_state__(self, prev_state: MTimeState) -> syn.MemoStateOutcome:
         _state_received_prev_types.append(type(prev_state))
-        if syn.is_non_existence(prev_state):
+        if syn.is_absent(prev_state):
             return syn.MemoStateOutcome(
                 state=MTimeState(mtime=self.mtime), memo_valid=True
             )
@@ -314,17 +314,17 @@ class StateEntry:
         )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_state(entry: StateEntry) -> str:
     _state_metrics.increment("call.transform_state")
     return f"v:{entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_state() -> None:
     for key, value in _state_source_data.items():
         result = _transform_state(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result))
 
 
 def test_memo_state_typed_deserialization() -> None:
@@ -379,7 +379,7 @@ class ReuseEntry:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         new_state = (self.mtime, self.fingerprint)
-        if syn.is_non_existence(prev_state):
+        if syn.is_absent(prev_state):
             return syn.MemoStateOutcome(state=new_state, memo_valid=True)
         prev_mtime, prev_fp = prev_state
         if self.mtime == prev_mtime:
@@ -394,17 +394,17 @@ _reuse_source_data: dict[str, ReuseEntry] = {}
 _reuse_metrics = Metrics()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_reuse(entry: ReuseEntry) -> str:
     _reuse_metrics.increment("call.transform_reuse")
     return f"result:{entry.content}"
 
 
-@syn.fn
+@syn.task
 def _process_reuse() -> None:
     for key, value in _reuse_source_data.items():
         result = _transform_reuse(value)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result))
 
 
 def test_memo_state_reuse_with_changed_states() -> None:
@@ -456,7 +456,7 @@ def test_memo_state_reuse_with_changed_states() -> None:
 
 
 # ============================================================================
-# Forward reference return type (defined after @syn.fn decoration)
+# Forward reference return type (defined after @syn.task decoration)
 # ============================================================================
 
 
@@ -466,7 +466,7 @@ _fwd_returned_values: dict[str, Any] = {}
 
 
 # Decorate BEFORE ForwardResult is defined — tests forward reference handling.
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _transform_fwd(entry: SourceEntry) -> "ForwardResult":
     _fwd_metrics.increment("call.transform_fwd")
     return ForwardResult(value=entry.content.upper())
@@ -477,12 +477,12 @@ class ForwardResult:
     value: str
 
 
-@syn.fn
+@syn.task
 def _process_fwd() -> None:
     for key, value in _fwd_source_data.items():
         result = _transform_fwd(value)
         _fwd_returned_values[key] = result
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result.value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result.value))
 
 
 def test_memo_roundtrip_forward_reference_return() -> None:
@@ -519,7 +519,7 @@ def test_memo_roundtrip_forward_reference_return() -> None:
 
 
 # ============================================================================
-# Memo state with NonExistenceType in union (real FileLike via localfs)
+# Memo state with AbsentType in union (real FileLike via localfs)
 # ============================================================================
 
 import pathlib
@@ -529,25 +529,25 @@ _filelike_metrics = Metrics()
 _filelike_source_dir: pathlib.Path | None = None
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _transform_filelike(f: localfs.File) -> str:
     _filelike_metrics.increment("call.transform_filelike")
     return f"content:{await f.read_text()}"
 
 
-@syn.fn
+@syn.task
 async def _process_filelike() -> None:
     assert _filelike_source_dir is not None
     walker = localfs.walk_dir(_filelike_source_dir)
     async for key, f in walker.items():
         result = await _transform_filelike(f)
-        syn.declare_target_state(GlobalDictTarget.target_state(key, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, result))
 
 
 def test_memo_state_filelike_non_existence_type(tmp_path: pathlib.Path) -> None:
-    """FileLike.__synor_memo_state__ has ``tuple[datetime, bytes] | NonExistenceType``.
+    """FileLike.__synor_memo_state__ has ``tuple[datetime, bytes] | AbsentType``.
 
-    Verifies that the NonExistenceType is stripped from the union before building
+    Verifies that the AbsentType is stripped from the union before building
     the deserializer, and the stored state round-trips correctly on run 2.
     """
     global _filelike_source_dir

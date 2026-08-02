@@ -11,7 +11,7 @@ everything across three Postgres tables — then serves similarity search.
 | Concern          | Python                                       | Rust (this example)                                       |
 | ---------------- | -------------------------------------------- | --------------------------------------------------------- |
 | Source           | `localfs.walk_dir` (`**/*.pdf`, live)        | `synor::fs::walk` (`**/*.pdf`)                        |
-| Per-file compute | `@syn.fn(memo=True) process_file`           | `#[synor::function(memo)] process_file`               |
+| Per-file compute | `@syn.task(cache=True) process_file`           | `#[synor::function(memo)] process_file`               |
 | PDF parsing      | `pypdf` (first-page text + page count)       | `lopdf` (first-page text + page count)                    |
 | LLM extraction   | `openai` chat completions (`gpt-4o`, JSON)   | OpenAI chat completions REST (`gpt-4o`, JSON mode)        |
 | Chunking         | `RecursiveSplitter` + custom "abstract" lang | `RecursiveChunker` + `CustomLanguageConfig` ("abstract")  |

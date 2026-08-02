@@ -27,7 +27,7 @@ The type parameter (`asyncpg.Pool`, `SentenceTransformerEmbedder`) enables type 
 
 ### Change detection
 
-By default, context keys have **change detection disabled** — changing the provided value between runs does not automatically invalidate memoized functions that consumed it via `use_context()`. To opt in to change detection, pass `detect_change=True`. When enabled, [context changes](./function#change-detection) are their own category — tracked by `use_context()` at the call site, independent of `@syn.fn`. When a fingerprint changes, any memoized function whose execution involved a `use_context()` call on that key is invalidated.
+By default, context keys have **change detection disabled** — changing the provided value between runs does not automatically invalidate memoized functions that consumed it via `use_context()`. To opt in to change detection, pass `detect_change=True`. When enabled, [context changes](./function#change-detection) are their own category — tracked by `use_context()` at the call site, independent of `@syn.task`. When a fingerprint changes, any memoized function whose execution involved a `use_context()` call on that key is invalidated.
 
 Use `detect_change=True` for resources that affect computation results — models, configuration objects, etc. This ensures memoized functions re-execute when those values change. Resources that don't affect computation results — database connections, loggers, debug flags, monitoring clients — can use the default (`detect_change=False`).
 
@@ -75,17 +75,17 @@ The resource is available for the lifetime of the environment. When the lifespan
 In processing components, use `syn.use_context()` to retrieve provided resources:
 
 ```python
-@syn.fn
+@syn.task
 async def process_chunk(chunk: Chunk, table: postgres.TableTarget[DocEmbedding]) -> None:
     # Retrieve the embedder from context
     embedding = await syn.use_context(EMBEDDER).embed(chunk.text)
-    table.declare_row(row=DocEmbedding(text=chunk.text, embedding=embedding, ...))
+    table.ensure_row(row=DocEmbedding(text=chunk.text, embedding=embedding, ...))
 ```
 
 Some connectors also accept `ContextKey`s directly as a convenience — for example, `postgres.mount_table_target()` takes a `ContextKey[asyncpg.Pool]` and resolves the connection internally:
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     # PG_DB is resolved internally by the connector
     table = await postgres.mount_table_target(
@@ -147,14 +147,14 @@ class DocEmbedding:
 
 
 # 4. Retrieve values in processing functions
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
     id_gen: IdGenerator,
     table: postgres.TableTarget[DocEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=DocEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=str(filename),
@@ -164,7 +164,7 @@ async def process_chunk(
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: postgres.TableTarget[DocEmbedding],
@@ -176,7 +176,7 @@ async def process_file(
 
 
 # 5. PG_DB used directly by the connector (resolved internally)
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     table = await postgres.mount_table_target(
         PG_DB,
@@ -190,7 +190,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(process_file, files.items(), table)
+    await syn.spawn_each(process_file, files.items(), table)
 
 
 app = syn.App(

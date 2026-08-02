@@ -14,7 +14,7 @@
 A checkpoint folder holds four file types, and `process_file` routes on the name: `full.jsonl` is parsed into per-turn transcript chunks, `prompt.txt` is embedded whole, `context.md` is split into overlapping chunks, and `metadata.json` becomes a structured row in a *second* table. The transcript and context paths fan out to many rows via `syn.map(process_chunk, ...)`; the prompt is a single short string embedded inline. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file, emb_table, meta_table) -> None:
     info = extract_session_info(file)
     filename = file.file_path.path.name
@@ -29,7 +29,7 @@ async def process_file(file, emb_table, meta_table) -> None:
     elif filename == "prompt.txt":
         text = (await file.read_text()).strip()
         if text:
-            emb_table.declare_row(row=SessionEmbeddingRow(
+            emb_table.ensure_row(row=SessionEmbeddingRow(
                 id=await id_gen.next_id(text), ..., content_type="prompt", role="user",
                 text=text, embedding=await syn.use_context(EMBEDDER).embed(text)))
 
@@ -38,7 +38,7 @@ async def process_file(file, emb_table, meta_table) -> None:
 
     elif filename == "metadata.json":
         meta = json.loads(await file.read_text())
-        meta_table.declare_row(row=SessionMetadataRow(..., total_tokens=..., files_touched=...))
+        meta_table.ensure_row(row=SessionMetadataRow(..., total_tokens=..., files_touched=...))
 ```
 
 Three content types and a structured record, all from one component. Each embedding row's `id` is derived from its text, so a turn that survives a re-parse keeps its row.
@@ -47,7 +47,7 @@ Three content types and a structured record, all from one component. Each embedd
 
 - **One component, four file types.** A single `included_patterns` list pulls `full.jsonl`, `prompt.txt`, `context.md`, and `metadata.json` into the same `process_file`, which routes on the name — no four separate pipelines.
 - **Two tables, one pass.** Searchable text lands in the embeddings table; structured fields (tokens, files touched, agent percentage) land in a metadata table — declared side by side.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a file whose content and code are unchanged, so a finished session is never re-embedded; `id` derived from text means only genuinely new turns are inserted and vanished turns are deleted.
+- **Incremental by default.** `@syn.task(cache=True)` skips a file whose content and code are unchanged, so a finished session is never re-embedded; `id` derived from text means only genuinely new turns are inserted and vanished turns are deleted.
 - **Live without re-scanning.** The filesystem source declares `live=True` — pass `-L` and new sessions are picked up and embedded as they're written.
 - **Plain Python, your stack.** Local `all-MiniLM-L6-v2` embedder, no API key; swap `EMBED_MODEL` for any of the 12k+ sentence-transformer models on Hugging Face.
 

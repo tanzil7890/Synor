@@ -686,7 +686,7 @@ class _VectorIndexHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _VectorIndexSpec | syn.NonExistenceType,
+        desired_state: _VectorIndexSpec | syn.AbsentType,
         prev_possible_records: Collection[_VectorIndexTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -695,7 +695,7 @@ class _VectorIndexHandler:
         | None
     ):
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             # Recover the field from the most recent tracked spec — needed
@@ -715,7 +715,7 @@ class _VectorIndexHandler:
                     spec=None,
                 ),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         if not prev_may_be_missing and all(
@@ -790,14 +790,14 @@ class _RecordHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _RowValue | syn.NonExistenceType,
+        desired_state: _RowValue | syn.AbsentType,
         prev_possible_records: Collection[_RowFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_RecordAction, _RowFingerprint, None] | None:
         key = _ROW_KEY_CHECKER.check(key)
 
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
@@ -815,7 +815,7 @@ class _RecordHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
                     to_id=None,
                 ),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_object(desired_state)
@@ -918,7 +918,7 @@ def _field_subkey(name: str) -> str:
 
 class _TableAction(NamedTuple):
     key: _TableKey
-    spec: _TableSpec | syn.NonExistenceType
+    spec: _TableSpec | syn.AbsentType
     is_relation: bool
     main_action: statediff.DiffAction | None
     column_actions: dict[str, statediff.DiffAction]
@@ -984,7 +984,7 @@ class _TableHandler(
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _TableSpec | syn.NonExistenceType,
+        desired_state: _TableSpec | syn.AbsentType,
         prev_possible_records: Collection[_TableTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -994,9 +994,9 @@ class _TableHandler(
     ):
         key = _TableKey(*_TABLE_KEY_CHECKER.check(key))
 
-        if syn.is_non_existence(desired_state):
-            tracking_record: _TableTrackingRecord | syn.NonExistenceType = (
-                syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record: _TableTrackingRecord | syn.AbsentType = (
+                syn.ABSENT
             )
             is_relation = False
         else:
@@ -1025,7 +1025,7 @@ class _TableHandler(
         if (
             main_action is None
             and not column_actions
-            and syn.is_non_existence(desired_state)
+            and syn.is_absent(desired_state)
         ):
             return None
 
@@ -1091,7 +1091,7 @@ class _TableHandler(
 
             for i in idxs:
                 action = actions_list[i]
-                if syn.is_non_existence(action.spec):
+                if syn.is_absent(action.spec):
                     if action.is_relation:
                         remove_relation.append(i)
                     else:
@@ -1111,7 +1111,7 @@ class _TableHandler(
                 if action.main_action in ("replace", "delete"):
                     await self._drop_table_artifacts(graph, action.key, action)
 
-                if syn.is_non_existence(spec):
+                if syn.is_absent(spec):
                     outputs[i] = None
                     continue
 
@@ -1244,9 +1244,9 @@ class TableTarget(
         if self._primary_key not in row_dict:
             raise ValueError(f"row is missing primary key field {self._primary_key!r}")
         pk_values = (row_dict[self._primary_key],)
-        syn.declare_target_state(self._provider.target_state(pk_values, row_dict))
+        syn.ensure_target_state(self._provider.target_state(pk_values, row_dict))
 
-    declare_row = declare_record
+    ensure_row = declare_record
 
     def _row_to_dict(self, row: RowT) -> dict[str, Any]:
         if self._table_schema is not None:
@@ -1282,7 +1282,7 @@ class TableTarget(
             raise ValueError(f"Invalid vector dimension: {dimension}")
         spec = _VectorIndexSpec(field=field, metric=metric, dimension=dimension)
         att_provider = self._provider.attachment("vector_index")
-        syn.declare_target_state(att_provider.target_state(name, spec))
+        syn.ensure_target_state(att_provider.target_state(name, spec))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -1381,7 +1381,7 @@ class RelationTarget(
         )
 
         pk_values = (record_id,)
-        syn.declare_target_state(self._provider.target_state(pk_values, row_value))
+        syn.ensure_target_state(self._provider.target_state(pk_values, row_value))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -1422,7 +1422,7 @@ def table_target(
     return _table_provider.target_state(key, spec)
 
 
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[ConnectionFactory],
     table_name: str,
     table_schema: TableSchema[RowT] | None = None,
@@ -1441,7 +1441,7 @@ def declare_table_target(
             f"{table_schema.primary_key!r}"
         )
     pk = table_schema.primary_key if table_schema is not None else primary_key
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         table_target(
             db, table_name, table_schema, primary_key=pk, managed_by=managed_by
         )
@@ -1464,7 +1464,7 @@ async def mount_table_target(
             f"{table_schema.primary_key!r}"
         )
     pk = table_schema.primary_key if table_schema is not None else primary_key
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         table_target(
             db, table_name, table_schema, primary_key=pk, managed_by=managed_by
         )
@@ -1518,7 +1518,7 @@ def declare_relation_target(
 ) -> RelationTarget[RowT, syn.PendingS]:
     """Declare a relation table target."""
     pk = table_schema.primary_key if table_schema is not None else primary_key
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         relation_target(
             db,
             table_name,
@@ -1544,7 +1544,7 @@ async def mount_relation_target(
 ) -> RelationTarget[RowT]:
     """Mount a relation table target ready to receive ``declare_relation`` calls."""
     pk = table_schema.primary_key if table_schema is not None else primary_key
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         relation_target(
             db,
             table_name,
@@ -1571,7 +1571,7 @@ __all__ = [
     "TableTarget",
     "ValueEncoder",
     "declare_relation_target",
-    "declare_table_target",
+    "ensure_table_target",
     "mount_relation_target",
     "mount_table_target",
     "relation_target",

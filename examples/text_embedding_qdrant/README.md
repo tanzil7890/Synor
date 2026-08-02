@@ -14,7 +14,7 @@ This is Semantic Search 101 with one thing changed: instead of Postgres + pgvect
 Read each file, split into overlapping chunks, embed each chunk, then upsert it as a Qdrant point — text and offsets in the `payload`, the embedding as the `vector`. The one Qdrant-specific call is `mount_collection_target`, which derives the vector dimensions straight from the embedder (`QdrantVectorDef(schema=EMBEDDER)` — no hardcoded `384`) and manages the collection for you. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def process_chunk(chunk, filename, id_gen, target: qdrant.CollectionTarget) -> None:
     embedding_vec = await syn.use_context(EMBEDDER).embed(chunk.text)
     point = qdrant.PointStruct(
@@ -25,7 +25,7 @@ async def process_chunk(chunk, filename, id_gen, target: qdrant.CollectionTarget
     )
     target.declare_point(point)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_collection = await qdrant.mount_collection_target(
         QDRANT_DB, collection_name=QDRANT_COLLECTION,
@@ -33,7 +33,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
     )
     files = localfs.walk_dir(sourcedir, recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]), live=True)
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 ```
 
 `target.declare_point` declares the point as a target state; Synor inserts, updates, or deletes it to match — you never write upsert calls yourself.
@@ -42,7 +42,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
 
 - **Managed Qdrant target.** A single `mount_collection_target` handles collection creation, idempotent point upserts, and orphan cleanup when a file disappears — the same managed-target guarantees pgvector gets in the base example.
 - **No hardcoded dimensions.** The collection's vector size comes straight from the embedder via `QdrantVectorDef(schema=EMBEDDER)`, so swap the model and the schema follows.
-- **Incremental by default.** `@syn.fn(memo=True)` on `process_file` skips files whose content and code are unchanged; each point's `id` is derived from its chunk text, so only changed points are upserted and vanished ones are deleted.
+- **Incremental by default.** `@syn.task(cache=True)` on `process_file` skips files whose content and code are unchanged; each point's `id` is derived from its chunk text, so only changed points are upserted and vanished ones are deleted.
 - **Same flow, different store.** The chunk-and-embed half is byte-for-byte the Postgres version — proof that the target is a swappable detail, not a rewrite.
 - **gRPC for fast upserts.** The client connects over gRPC (`prefer_grpc=True`); the same local `all-MiniLM-L6-v2` embedder is reused at query time so indexing and search stay consistent.
 

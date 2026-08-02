@@ -148,8 +148,8 @@ class ComponentContext:
           "no chain → not propagated"; ``app.drop`` uses a Rust-side
           raising handler explicitly to surface root-delete failures).
 
-        Always non-None. Single canonical entry point used by ``syn.mount``,
-        ``syn.mount_each``, and the live-component operator so all
+        Always non-None. Single canonical entry point used by ``syn.spawn``,
+        ``syn.spawn_each``, and the live-component operator so all
         component-failure routing goes through the same Python path.
         """
 
@@ -238,7 +238,7 @@ class ComponentContext:
         )
 
 
-class ComponentSubpath:
+class UnitPath:
     """
     Represents a relative path to create a sub-scope.
 
@@ -247,13 +247,13 @@ class ComponentSubpath:
     - Used as a context manager to apply the subpath to all nested mount calls
 
     Example:
-        with syn.component_subpath("process_file"):
+        with syn.unit_path("process_file"):
             for f in files:
-                syn.mount(syn.component_subpath(str(f.relative_path)), process_file, f, target)
+                syn.spawn(syn.unit_path(str(f.relative_path)), process_file, f, target)
 
     This is equivalent to:
         for f in files:
-            syn.mount(syn.component_subpath("process_file", str(f.relative_path)), process_file, f, target)
+            syn.spawn(syn.unit_path("process_file", str(f.relative_path)), process_file, f, target)
     """
 
     __slots__ = ("_parts", "_token")
@@ -269,7 +269,7 @@ class ComponentSubpath:
     def parts(self) -> tuple[StableKey, ...]:
         return self._parts
 
-    def __enter__(self) -> ComponentSubpath:
+    def __enter__(self) -> UnitPath:
         # Create a new ComponentContext with extended path
         current_ctx = get_context_from_ctx()
         new_ctx = current_ctx._with_extended_path(*self._parts)
@@ -286,15 +286,15 @@ class ComponentSubpath:
             _context_var.reset(self._token)
             self._token = None
 
-    def __truediv__(self, part: StableKey) -> ComponentSubpath:
-        """Allows chaining: syn.component_subpath("a") / "b" / "c" """
-        return ComponentSubpath(*self._parts, part)
+    def __truediv__(self, part: StableKey) -> UnitPath:
+        """Allows chaining: syn.unit_path("a") / "b" / "c" """
+        return UnitPath(*self._parts, part)
 
     def __repr__(self) -> str:
-        return f"ComponentSubpath({', '.join(repr(p) for p in self._parts)})"
+        return f"UnitPath({', '.join(repr(p) for p in self._parts)})"
 
 
-def component_subpath(*key_parts: StableKey) -> ComponentSubpath:
+def unit_path(*key_parts: StableKey) -> UnitPath:
     """
     Create a component subpath for use with mount()/use_mount() or as a context manager.
 
@@ -302,18 +302,18 @@ def component_subpath(*key_parts: StableKey) -> ComponentSubpath:
         *key_parts: One or more StableKey values to form the subpath
 
     Returns:
-        A ComponentSubpath that can be passed to mount/use_mount or used as a context manager
+        A UnitPath that can be passed to mount/use_mount or used as a context manager
 
     Examples:
         # As first argument to mount
-        syn.mount(syn.component_subpath("process", filename), process_file, file, target)
+        syn.spawn(syn.unit_path("process", filename), process_file, file, target)
 
         # As context manager
-        with syn.component_subpath("process_file"):
+        with syn.unit_path("process_file"):
             for f in files:
-                syn.mount(syn.component_subpath(str(f.relative_path)), process_file, f, target)
+                syn.spawn(syn.unit_path(str(f.relative_path)), process_file, f, target)
     """
-    return ComponentSubpath(*key_parts)
+    return UnitPath(*key_parts)
 
 
 @contextlib.contextmanager
@@ -360,7 +360,7 @@ def get_context_from_ctx() -> ComponentContext:
 
 
 def build_child_path(
-    parent_ctx: ComponentContext, subpath: ComponentSubpath
+    parent_ctx: ComponentContext, subpath: UnitPath
 ) -> core.StablePath:
     """Build the child path from parent context and subpath."""
     child_path = parent_ctx._core_path
@@ -388,7 +388,7 @@ def use_context(key: ContextKey[T]) -> T:
     Example:
         PG_DB = syn.ContextKey[postgres.PgDatabase]("pg_db")
 
-        @syn.fn
+        @syn.task
         def app_main() -> None:
             db = syn.use_context(PG_DB)
             ...
@@ -420,7 +420,7 @@ def get_component_context() -> ComponentContext:
             def task():
                 with component_context.attach():
                     # Synor APIs work correctly here
-                    syn.mount(...)
+                    syn.spawn(...)
             executor.submit(task)
     """
     return get_context_from_ctx()
@@ -447,7 +447,7 @@ def stats_group(
     Example::
 
         with syn.stats_group("Indexing docs") as sg:
-            await syn.mount_each(process_file, files.items(), target)
+            await syn.spawn_each(process_file, files.items(), target)
         async for snap in sg.watch():
             ...
     """

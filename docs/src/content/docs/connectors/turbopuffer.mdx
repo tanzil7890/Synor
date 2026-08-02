@@ -94,7 +94,7 @@ def declare_namespace_target(
 Once a `NamespaceTarget` is resolved, declare rows to be upserted using `turbopuffer.Row`:
 
 ```python
-def NamespaceTarget.declare_row(
+def NamespaceTarget.ensure_row(
     self,
     row: turbopuffer.Row,
 ) -> None
@@ -164,7 +164,7 @@ schema = await turbopuffer.NamespaceSchema.create(
 Rows pass the vector directly:
 
 ```python
-target.declare_row(turbopuffer.Row(
+target.ensure_row(turbopuffer.Row(
     id="doc-123",
     vector=embedding,
     attributes={"text": "...", "tags": ["a", "b"]},
@@ -195,7 +195,7 @@ schema = await turbopuffer.NamespaceSchema.create(
 Rows pass a dict of vectors:
 
 ```python
-target.declare_row(turbopuffer.Row(
+target.ensure_row(turbopuffer.Row(
     id="doc-123",
     vector={
         "text_embedding": text_vec,
@@ -234,20 +234,20 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     builder.provide(TPUF, client)
     yield
 
-@syn.fn
+@syn.task
 async def process_document(
     doc_id: str,
     text: str,
     target: turbopuffer.NamespaceTarget,
 ) -> None:
     embedding = await embedder.embed(text)
-    target.declare_row(turbopuffer.Row(
+    target.ensure_row(turbopuffer.Row(
         id=doc_id,
         vector=embedding,
         attributes={"text": text},
     ))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     namespace = await turbopuffer.mount_namespace_target(
         TPUF,
@@ -258,8 +258,8 @@ async def app_main() -> None:
     )
 
     for doc_id, text in documents:
-        await syn.mount(
-            syn.component_subpath("doc", doc_id),
+        await syn.spawn(
+            syn.unit_path("doc", doc_id),
             process_document,
             doc_id,
             text,

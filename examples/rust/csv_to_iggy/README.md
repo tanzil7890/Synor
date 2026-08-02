@@ -13,9 +13,9 @@ and publishes one Iggy message per row via Synor's declarative
 
 | Concern          | Python (`csv_to_kafka` / `iggy`)         | Rust (this example)                                 |
 | ---------------- | ---------------------------------------- | --------------------------------------------------- |
-| Per-file compute | `@syn.fn(memo=True)`                    | `#[synor::function(memo)] process_csv`          |
+| Per-file compute | `@syn.task(cache=True)`                    | `#[synor::function(memo)] process_csv`          |
 | Target           | `mount_kafka_topic_target` / `mount_iggy_topic_target` | `synor::iggy::mount_iggy_topic_target` |
-| Declare a message| `target.declare_target_state(key, value)`| `target.declare_message(key, value)`                |
+| Declare a message| `target.ensure_target_state(key, value)`| `target.declare_message(key, value)`                |
 
 Incrementality (two layers): unchanged CSV files are memo-skipped, and the
 managed `IggyTopicTarget` only *sends* a message when its value changed since the

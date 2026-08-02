@@ -59,7 +59,7 @@ _SLEEP = 0.1  # 100ms — enough to guarantee overlap between concurrent childre
 # ── Component functions ─────────────────────────────────────────────────
 
 
-@syn.fn
+@syn.task
 def _slow_leaf() -> None:
     """Leaf component that sleeps to create overlapping execution windows."""
     _tracker.enter()
@@ -69,15 +69,15 @@ def _slow_leaf() -> None:
         _tracker.exit()
 
 
-@syn.fn
+@syn.task
 def _noop() -> None:
     pass
 
 
-@syn.fn
+@syn.task
 async def _child_mounts_grandchild() -> None:
     """Child that mounts a grandchild — tests permit release on first child mount."""
-    await syn.mount(syn.component_subpath("gc"), _noop)
+    await syn.spawn(syn.unit_path("gc"), _noop)
 
 
 # ── Root functions ───────────────────────────────────────────────────────
@@ -86,13 +86,13 @@ async def _child_mounts_grandchild() -> None:
 async def _main_flat(count: int) -> None:
     """Mount *count* independent slow children."""
     for i in range(count):
-        await syn.mount(syn.component_subpath(str(i)), _slow_leaf)
+        await syn.spawn(syn.unit_path(str(i)), _slow_leaf)
 
 
 async def _main_nested() -> None:
     """Root → child → grandchild nesting."""
     for i in range(4):
-        await syn.mount(syn.component_subpath(str(i)), _child_mounts_grandchild)
+        await syn.spawn(syn.unit_path(str(i)), _child_mounts_grandchild)
 
 
 # ── Test 1: Quota enforcement ───────────────────────────────────────────

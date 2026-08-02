@@ -181,14 +181,14 @@ All entity names must be **self-contained** — no anaphoric references (pronoun
 ```
 input .txt files
   └─ parse URLs → list of video IDs
-       └─ for each session (use_mount per video ID):
-            ├─ [1] Fetch transcript + metadata  (memo=True)
+       └─ for each session (call per video ID):
+            ├─ [1] Fetch transcript + metadata  (cache=True)
             │       → speaker-labeled transcript + yt metadata (channel, title, description, date)
             ├─ [2a] Reformat transcript (empty speaker map → all labels as "(Speaker X)")
-            ├─ [2b] LLM Step 1: extract metadata + identify speakers  (memo=True)
+            ├─ [2b] LLM Step 1: extract metadata + identify speakers  (cache=True)
             │       → SessionMetadata (name, description, date, speaker_label→person mapping)
             ├─ [2c] Reformat transcript (with speaker map → real names where known)
-            ├─ [2d] LLM Step 2: extract statements + involved entities  (memo=True)
+            ├─ [2d] LLM Step 2: extract statements + involved entities  (cache=True)
             │       → StatementExtraction (statements with self-contained entity names)
             ├─ [3] Declare Session node → SurrealDB
             ├─ [4] Declare Statement nodes + session_statement edges → SurrealDB
@@ -199,7 +199,7 @@ input .txt files
 #### Fetch Transcript
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def fetch_transcript(youtube_id: str) -> SessionTranscript:
     """Download audio via yt-dlp, transcribe with speaker diarization via AssemblyAI."""
     # 1. yt-dlp: download audio to temp file + fetch metadata (channel, title, description, upload_date)
@@ -233,7 +233,7 @@ def reformat_transcript(
 #### LLM Step 1: Extract Metadata + Identify Speakers
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_metadata(reformatted_transcript: str, transcript: SessionTranscript) -> SessionMetadata:
     """Give LLM the reformatted transcript + all YouTube metadata to identify speakers."""
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
@@ -262,7 +262,7 @@ The identified speakers (those with non-None names) form the *person_session* re
 #### LLM Step 2: Extract Statements
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_statements(reformatted_transcript: str) -> StatementExtraction:
     """Extract statements and involved entities from the reformatted transcript."""
     ...
@@ -277,7 +277,7 @@ The Step 2 prompt instructs the LLM to:
 #### Declare + Return
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_session(
     youtube_id: str,
     session_table: surrealdb.TableTarget,
@@ -367,7 +367,7 @@ For each entity type (Person, Tech, Org) independently:
 ```python
 import faiss
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def compute_entity_embedding(name: str) -> NDArray:
     embedder = syn.use_context(EMBEDDER)
     return await embedder.embed(name)
@@ -403,7 +403,7 @@ async def resolve_entities(all_raw_entities: set[str]) -> dict[str, str | None]:
 
     return dedup
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def resolve_entity_pair(entity: str, candidates: list[str]) -> str | None:
     """LLM decides if entity matches any candidate; returns canonical or None."""
     client = instructor.from_litellm(litellm.acompletion)
@@ -417,7 +417,7 @@ Person/Tech/Org use their canonical name directly as the ID. Session and stateme
 are carried from Phase 1 via `IdentifiedStatement`.
 
 ```python
-@syn.fn
+@syn.task
 async def create_knowledge_base(
     all_session_raw: list[SessionRawEntities],
     entity_dedup: dict[str, dict[str, str | None]],
@@ -472,7 +472,7 @@ def resolve_canonical(name: str, dedup: dict[str, str | None]) -> str:
 ## App Structure
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(input_dir: pathlib.Path) -> None:
     # --- Setup targets ---
     session_table = await surrealdb.mount_table_target(DB, "session", session_schema)
@@ -506,8 +506,8 @@ async def app_main(input_dir: pathlib.Path) -> None:
             if not line or line.startswith("#"):
                 continue
             youtube_id = extract_video_id(line)
-            raw = await syn.use_mount(
-                syn.component_subpath("session", youtube_id),
+            raw = await syn.call(
+                syn.unit_path("session", youtube_id),
                 process_session, youtube_id,
                 session_table, statement_table, session_statement_rel,
             )
@@ -517,8 +517,8 @@ async def app_main(input_dir: pathlib.Path) -> None:
     entity_dedup = dict(zip(
         [cfg.name for cfg in ENTITY_TYPES],
         await asyncio.gather(*(
-            syn.use_mount(
-                syn.component_subpath("resolve", cfg.name),
+            syn.call(
+                syn.unit_path("resolve", cfg.name),
                 resolve_entities,
                 collect_all_raw(all_session_raw, cfg.name),
             )
@@ -527,8 +527,8 @@ async def app_main(input_dir: pathlib.Path) -> None:
     ))
 
     # --- Phase 3: Declare knowledge base ---
-    await syn.mount(
-        syn.component_subpath("knowledge_base"),
+    await syn.spawn(
+        syn.unit_path("knowledge_base"),
         create_knowledge_base,
         all_session_raw=all_session_raw,
         entity_dedup=entity_dedup,

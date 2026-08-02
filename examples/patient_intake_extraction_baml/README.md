@@ -13,33 +13,33 @@ Intake forms are messy, multi-section PDFs — demographics, insurance, medicati
 
 The schema lives in `baml_src/patient.baml`, not in Python. You describe the `Patient` record as BAML classes; the same file holds the extraction function and the `Gemini` client (pointing at `gemini-3.5-flash-lite`), which reads PDFs natively as vision input — no separate parse or OCR step. Running `baml generate` compiles this into a `baml_client/` package you import from Python: `b.ExtractPatientInfo(...)` and the `Patient` Pydantic model.
 
-The Synor side is two short functions — wrap BAML in a `@syn.fn`, then declare one JSON file per form. Read it in [`main.py`](main.py):
+The Synor side is two short functions — wrap BAML in a `@syn.task`, then declare one JSON file per form. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def extract_patient_info(content: bytes) -> Patient:
     """Extract patient information from PDF content using BAML."""
     pdf = baml_py.Pdf.from_base64(base64.b64encode(content).decode("utf-8"))
     return await b.ExtractPatientInfo(pdf)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_patient_form(file: FileLike, outdir: pathlib.Path) -> None:
     content = await file.read()
     patient_info = await extract_patient_info(content)
     patient_json = patient_info.model_dump_json(indent=2)
     output_filename = file.file_path.path.stem + ".json"
-    localfs.declare_file(outdir / output_filename, patient_json, create_parent_dirs=True)
+    localfs.ensure_file(outdir / output_filename, patient_json, create_parent_dirs=True)
 ```
 
-The return type is `Patient` — the actual Pydantic class BAML generated, not a dict — so everything downstream is typed and validated. There's no prompt engineering or response parsing here; that all lives in the BAML schema, and the LLM call is one `await`. `app_main` walks `data/patient_forms/` for `*.pdf` and runs one `process_patient_form` component per file with `mount_each`.
+The return type is `Patient` — the actual Pydantic class BAML generated, not a dict — so everything downstream is typed and validated. There's no prompt engineering or response parsing here; that all lives in the BAML schema, and the LLM call is one `await`. `app_main` walks `data/patient_forms/` for `*.pdf` and runs one `process_patient_form` component per file with `spawn_each`.
 
 ## Why this example is useful
 
 - **The schema is the contract.** `ExtractPatientInfo(intake_form: pdf) -> Patient` is the whole spec — BAML forces the model's output to conform, so every record has the same shape, ready to load into a database or chart.
 - **Native PDF vision, no OCR.** The `Gemini` client reads the PDF directly as vision input — checkboxes, hand-filled fields, tables — with no separate parse or Markdown step.
 - **Typed all the way down.** `b.ExtractPatientInfo` returns a generated Pydantic `Patient`, not a string to parse — `model_dump_json` serializes the validated model straight to disk.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a form entirely when its bytes and the function's code are unchanged, so you never pay for a second Gemini call on a PDF you've already extracted.
+- **Incremental by default.** `@syn.task(cache=True)` skips a form entirely when its bytes and the function's code are unchanged, so you never pay for a second Gemini call on a PDF you've already extracted.
 - **Compare libraries on one flow.** A DSPy twin runs the exact same task with a DSPy signature instead of BAML — same input, same output, swap the extraction layer.
 
 ## Run it

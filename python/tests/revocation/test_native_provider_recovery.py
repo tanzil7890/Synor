@@ -133,17 +133,17 @@ async def _run_child_phase(
             def reconcile(
                 self,
                 key: syn.StableKey,
-                desired_state: str | syn.NonExistenceType,
+                desired_state: str | syn.AbsentType,
                 prev_possible_records: Collection[str],
                 prev_may_be_missing: bool,
                 /,
             ) -> syn.TargetReconcileOutput[Any, str] | None:
                 del key
-                if syn.is_non_existence(desired_state):
+                if syn.is_absent(desired_state):
                     return syn.TargetReconcileOutput(
                         action=_DeleteAction(),
                         sink=delete_sink.sink,
-                        tracking_record=syn.NON_EXISTENCE,
+                        tracking_record=syn.ABSENT,
                     )
                 if desired_state in prev_possible_records and not prev_may_be_missing:
                     return None
@@ -161,7 +161,7 @@ async def _run_child_phase(
     async def main() -> None:
         if phase == "seed":
             assert provider is not None
-            syn.declare_target_state(provider.target_state("artifact", "owned"))
+            syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = syn.Environment(
         syn.Settings.from_env(db_path=db_path),

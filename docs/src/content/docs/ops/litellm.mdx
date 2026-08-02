@@ -60,7 +60,7 @@ The `embed()` method converts text into a `numpy.ndarray` of `float32`. It's an 
 embedding = await embedder.embed("Hello, world!")
 
 # Use the embedding in a dataclass row, store in a vector database, etc.
-table.declare_row(row=DocEmbedding(text="Hello, world!", embedding=embedding))
+table.ensure_row(row=DocEmbedding(text="Hello, world!", embedding=embedding))
 ```
 
 ### Using as a type annotation

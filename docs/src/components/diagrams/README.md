@@ -71,7 +71,7 @@ concepts/
 ├── SecondRun.astro          first pass compared with a changed second pass
 ├── ReconcileCycle.astro     observe, own, and reconcile around local history
 ├── OwnershipLedger.astro    stable work paths and owned outcomes
-└── ParentChildCalls.astro   mount compared with use_mount
+└── ParentChildCalls.astro   mount compared with call
 ```
 
 These diagrams are original Synor compositions. Keep their narrative tied to

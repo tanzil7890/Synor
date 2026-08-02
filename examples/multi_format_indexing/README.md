@@ -20,7 +20,7 @@ A file fans out to **pages**, so the shape is *file → N pages → N points*:
 One file-splitting function handles every format, and `process_file` fans each page out with `syn.map`. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def file_to_pages(filename: str, content: bytes) -> list[Page]:
     mime_type, _ = mimetypes.guess_type(filename)
     if mime_type == "application/pdf":
@@ -30,7 +30,7 @@ def file_to_pages(filename: str, content: bytes) -> list[Page]:
         return [Page(page_number=None, image=content)]
     return []
 
-@syn.fn(memo=True)   # unchanged file is never re-rendered or re-embedded
+@syn.task(cache=True)   # unchanged file is never re-rendered or re-embedded
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     filename = str(file.file_path.path)
     pages = await file_to_pages(filename, await file.read())
@@ -45,7 +45,7 @@ The Qdrant collection is declared with a `MultiVectorSchema` and `multivector_co
 - **No parsing, no OCR.** ColPali embeds the rendered *page image*, so tables, charts, and figures stay intact — exactly the layout that OCR-and-embed throws away.
 - **MaxSim multi-vector retrieval.** A `MultiVectorSchema` + `max_sim` comparator scores a query against each page's best-matching patches, late-interaction style.
 - **Fan-out done right.** A file expands to N pages with `syn.map`, each its own point keyed by `(filename, page)` — re-running reconciles cleanly instead of duplicating.
-- **Incremental on a GPU runner.** Slow per-page inference runs on `syn.GPU`; `@syn.fn(memo=True)` means adding a document embeds only its pages and leaves the rest untouched.
+- **Incremental on a GPU runner.** Slow per-page inference runs on `syn.GPU`; `@syn.task(cache=True)` means adding a document embeds only its pages and leaves the rest untouched.
 
 ## Run it
 

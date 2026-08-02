@@ -12,7 +12,7 @@ from __future__ import annotations
 import pathlib
 
 import synor as syn
-from synor.connectors.localfs import declare_dir_target
+from synor.connectors.localfs import ensure_dir_target
 
 _HERE = pathlib.Path(__file__).resolve().parent
 
@@ -32,24 +32,24 @@ env1 = syn.Environment(syn.Settings.from_env(db_path=DB_PATH_1))
 env2 = syn.Environment(syn.Settings.from_env(db_path=DB_PATH_2))
 
 
-@syn.fn
+@syn.task
 async def build1() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         OUT_DIR_1,
     )
-    dir_target.declare_file("db1.txt", "Hello from DB1App\n")
+    dir_target.ensure_file("db1.txt", "Hello from DB1App\n")
 
 
-@syn.fn
+@syn.task
 async def build2() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         OUT_DIR_2,
     )
-    dir_target.declare_file("db2.txt", "Hello from DB2App\n")
+    dir_target.ensure_file("db2.txt", "Hello from DB2App\n")
 
 
 # Two apps in different environments (different directories, same db filename)

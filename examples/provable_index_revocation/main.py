@@ -415,7 +415,7 @@ async def run_fake_scenario(
     ) -> tuple[syn.ExecutionReport, syn.ExecutionReport]:
         environment = syn.Environment(syn.Settings(db_path=engine_root / "engine"))
 
-        @syn.fn
+        @syn.task
         async def apply_revocation() -> None:
             planned = await controller.begin_case(request)
             suppressed = await index.guarded_query(
@@ -492,7 +492,7 @@ async def run_fake_scenario(
             app_target="examples/provable_index_revocation/main.py",
         )
 
-        @syn.fn
+        @syn.task
         async def replay_closed_case() -> None:
             replayed = await controller.begin_case(request)
             if replayed.stage is not revocation.RevocationStage.CLOSED:

@@ -375,8 +375,8 @@ class RelRow:
 
 async def _declare_documents_only() -> None:
     schema = await falkor.TableSchema.from_class(Document, primary_key="filename")
-    table: Any = await syn.use_mount(  # type: ignore[call-overload]
-        syn.component_subpath("setup", "doc_table"),
+    table: Any = await syn.call(  # type: ignore[call-overload]
+        syn.unit_path("setup", "doc_table"),
         falkor.mount_table_target,  # type: ignore[arg-type]
         KG_DB,
         "Document",
@@ -390,16 +390,16 @@ async def _declare_documents_only() -> None:
 async def _declare_entities_and_relationships() -> None:
     entity_schema = await falkor.TableSchema.from_class(Entity, primary_key="value")
     rel_schema = await falkor.TableSchema.from_class(RelRow, primary_key="id")
-    entity_table: Any = await syn.use_mount(  # type: ignore[call-overload]
-        syn.component_subpath("setup", "entity_table"),
+    entity_table: Any = await syn.call(  # type: ignore[call-overload]
+        syn.unit_path("setup", "entity_table"),
         falkor.mount_table_target,
         KG_DB,
         "Entity",
         entity_schema,
         primary_key="value",
     )
-    rel_table: Any = await syn.use_mount(  # type: ignore[call-overload]
-        syn.component_subpath("setup", "rel_table"),
+    rel_table: Any = await syn.call(  # type: ignore[call-overload]
+        syn.unit_path("setup", "rel_table"),
         falkor.mount_relation_target,
         KG_DB,
         "REL",
@@ -568,8 +568,8 @@ async def test_vector_index_attached(falkor_graph_name: str) -> None:
         schema = await falkor.TableSchema.from_class(
             _DocWithVec, primary_key="filename"
         )
-        table: Any = await syn.use_mount(  # type: ignore[call-overload]
-            syn.component_subpath("setup", "doc_table"),
+        table: Any = await syn.call(  # type: ignore[call-overload]
+            syn.unit_path("setup", "doc_table"),
             falkor.mount_table_target,
             KG_DB,
             "VecDoc",

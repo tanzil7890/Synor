@@ -15,14 +15,14 @@ def set_metrics(metrics: Metrics) -> None:
     _metrics = metrics
 
 
-@syn.fn
+@syn.task
 def bar(s: str) -> str:
     assert _metrics is not None
     _metrics.increment("bar")
     return "bar_v1: " + s
 
 
-@syn.fn(memo=True, logic_tracking=None)
+@syn.task(cache=True, logic_tracking=None)
 def foo_none(key: str, value: str) -> str:
     assert _metrics is not None
     _metrics.increment("foo_none")

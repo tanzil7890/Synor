@@ -11,12 +11,12 @@ from typing import Any, Collection, NamedTuple
 import synor as syn
 from synor import (
     ContextProvider,
-    NonExistenceType,
-    NON_EXISTENCE,
+    AbsentType,
+    ABSENT,
     StableKey,
     TargetReconcileOutput,
     TargetActionSink,
-    is_non_existence,
+    is_absent,
 )
 
 from tests import common
@@ -62,11 +62,11 @@ class _TypedTrackingStore:
     def _sink(
         self,
         context_provider: ContextProvider,
-        actions: Collection[tuple[str, _RecordWithPrev | NonExistenceType]],
+        actions: Collection[tuple[str, _RecordWithPrev | AbsentType]],
         /,
     ) -> None:
         for key, value in actions:
-            if is_non_existence(value):
+            if is_absent(value):
                 del self.data[key]
                 self.metrics.increment("delete")
             else:
@@ -77,12 +77,12 @@ class _TypedTrackingStore:
     def reconcile(
         self,
         key: StableKey,
-        desired_state: Any | NonExistenceType,
+        desired_state: Any | AbsentType,
         prev_possible_records: Collection[TrackingMeta],
         prev_may_be_missing: bool,
     ) -> (
         TargetReconcileOutput[
-            tuple[str, _RecordWithPrev | NonExistenceType], TrackingMeta
+            tuple[str, _RecordWithPrev | AbsentType], TrackingMeta
         ]
         | None
     ):
@@ -91,13 +91,13 @@ class _TypedTrackingStore:
         for rec in prev_possible_records:
             _received_record_types.append(type(rec))
 
-        if is_non_existence(desired_state):
+        if is_absent(desired_state):
             if len(prev_possible_records) == 0:
                 return None
             return TargetReconcileOutput(
-                action=(key, NON_EXISTENCE),
+                action=(key, ABSENT),
                 sink=TargetActionSink.from_fn(self._sink),
-                tracking_record=NON_EXISTENCE,
+                tracking_record=ABSENT,
             )
 
         # Short-circuit no-change
@@ -133,10 +133,10 @@ _received_record_types: list[type] = []
 _tracking_source_data: dict[str, tuple[int, str]] = {}
 
 
-@syn.fn
+@syn.task
 def _declare_tracking() -> None:
     for key, value in _tracking_source_data.items():
-        syn.declare_target_state(_typed_tracking_provider.target_state(key, value))
+        syn.ensure_target_state(_typed_tracking_provider.target_state(key, value))
 
 
 def test_tracking_record_serialize_by_pickle() -> None:
@@ -221,7 +221,7 @@ class _TypedRecordStore:
         /,
     ) -> None:
         for key, value in actions:
-            if is_non_existence(value):
+            if is_absent(value):
                 del self.data[key]
                 self.metrics.increment("delete")
             else:
@@ -232,7 +232,7 @@ class _TypedRecordStore:
     def reconcile(
         self,
         key: StableKey,
-        desired_state: Any | NonExistenceType,
+        desired_state: Any | AbsentType,
         prev_possible_records: Collection[MyRecord],
         prev_may_be_missing: bool,
     ) -> TargetReconcileOutput[tuple[str, Any], MyRecord] | None:
@@ -240,13 +240,13 @@ class _TypedRecordStore:
         for rec in prev_possible_records:
             self.received_types.append(type(rec))
 
-        if is_non_existence(desired_state):
+        if is_absent(desired_state):
             if len(prev_possible_records) == 0:
                 return None
             return TargetReconcileOutput(
-                action=(key, NON_EXISTENCE),
+                action=(key, ABSENT),
                 sink=TargetActionSink.from_fn(self._sink),
-                tracking_record=NON_EXISTENCE,
+                tracking_record=ABSENT,
             )
 
         if not prev_may_be_missing and all(
@@ -276,10 +276,10 @@ _typed_record_provider = syn.register_root_target_states_provider(
 _typed_record_source_data: dict[str, int] = {}
 
 
-@syn.fn
+@syn.task
 def _declare_typed_record() -> None:
     for key, value in _typed_record_source_data.items():
-        syn.declare_target_state(_typed_record_provider.target_state(key, value))
+        syn.ensure_target_state(_typed_record_provider.target_state(key, value))
 
 
 def test_typed_handler_wrapper_deserializes() -> None:

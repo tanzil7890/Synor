@@ -24,15 +24,15 @@ _source_data: dict[str, dict[str, Any]] = {}
 
 
 async def _declare_dicts_data_together() -> None:
-    with syn.component_subpath("dict"):
+    with syn.unit_path("dict"):
         for name, data in _source_data.items():
-            single_dict_provider = await syn.use_mount(
-                syn.component_subpath(name),
+            single_dict_provider = await syn.call(
+                syn.unit_path(name),
                 DictsTarget.declare_dict_target,
                 name,
             )
             for key, value in data.items():
-                syn.declare_target_state(single_dict_provider.target_state(key, value))
+                syn.ensure_target_state(single_dict_provider.target_state(key, value))
 
 
 def test_dicts_data_together_insert() -> None:
@@ -220,16 +220,16 @@ def test_dicts_data_together_delete_entry() -> None:
 
 
 async def _declare_one_dict(name: str) -> None:
-    dict_provider = await syn.use_mount(
-        syn.component_subpath("setup"), DictsTarget.declare_dict_target, name
+    dict_provider = await syn.call(
+        syn.unit_path("setup"), DictsTarget.declare_dict_target, name
     )
     for key, value in _source_data[name].items():
-        syn.declare_target_state(dict_provider.target_state(key, value))
+        syn.ensure_target_state(dict_provider.target_state(key, value))
 
 
 async def _declare_dicts_in_sub_components() -> None:
     for name in _source_data.keys():
-        await syn.mount(syn.component_subpath(name), _declare_one_dict, name)
+        await syn.spawn(syn.unit_path(name), _declare_one_dict, name)
 
 
 def test_dicts_in_sub_components_insert() -> None:
@@ -439,16 +439,16 @@ def _declare_dict_containers(
 
 def _declare_one_dict_data(name: str, provider: syn.TargetStateProvider[str]) -> None:
     for key, value in _source_data[name].items():
-        syn.declare_target_state(provider.target_state(key, value))
+        syn.ensure_target_state(provider.target_state(key, value))
 
 
 async def _declare_dict_containers_together() -> None:
-    containers = await syn.use_mount(
-        syn.component_subpath("setup"), _declare_dict_containers, _source_data.keys()
+    containers = await syn.call(
+        syn.unit_path("setup"), _declare_dict_containers, _source_data.keys()
     )
     for name, provider in containers.providers.items():
-        await syn.mount(
-            syn.component_subpath(name), _declare_one_dict_data, name, provider
+        await syn.spawn(
+            syn.unit_path(name), _declare_one_dict_data, name, provider
         )
 
 
@@ -729,18 +729,18 @@ def test_prev_may_be_missing_after_failed_update() -> None:
 
 
 async def _declare_one_dict_w_exception(name: str) -> None:
-    dict_provider = await syn.use_mount(
-        syn.component_subpath("setup"), DictsTarget.declare_dict_target, name
+    dict_provider = await syn.call(
+        syn.unit_path("setup"), DictsTarget.declare_dict_target, name
     )
     for key, value in _source_data[name].items():
-        syn.declare_target_state(dict_provider.target_state(key, value))
+        syn.ensure_target_state(dict_provider.target_state(key, value))
     raise ValueError("injected test exception (which is expected)")
 
 
 async def _declare_dicts_in_sub_components_w_exception() -> None:
     for name in _source_data.keys():
-        await syn.mount(
-            syn.component_subpath(name), _declare_one_dict_w_exception, name
+        await syn.spawn(
+            syn.unit_path(name), _declare_one_dict_w_exception, name
         )
 
 
@@ -866,7 +866,7 @@ def test_restore_from_gc_failed_components() -> None:
 
 
 async def _declare_dicts_in_sub_components_mount_each() -> None:
-    await syn.mount_each(_declare_one_dict, [(name, name) for name in _source_data])
+    await syn.spawn_each(_declare_one_dict, [(name, name) for name in _source_data])
 
 
 @pytest.mark.asyncio
@@ -998,13 +998,13 @@ async def test_mount_each_delete() -> None:
 
 async def _declare_async_dicts_data_together() -> None:
     for name, data in _source_data.items():
-        single_dict_provider = await syn.use_mount(
-            syn.component_subpath("dict", name),
+        single_dict_provider = await syn.call(
+            syn.unit_path("dict", name),
             AsyncDictsTarget.declare_dict_target,
             name,
         )
         for key, value in data.items():
-            syn.declare_target_state(single_dict_provider.target_state(key, value))
+            syn.ensure_target_state(single_dict_provider.target_state(key, value))
 
 
 @pytest.mark.asyncio
@@ -1117,7 +1117,7 @@ def test_async_dicts_sync_app() -> None:
 
 
 ##################################################################################
-# Tests for syn.mount_target()
+# Tests for syn.attach_target()
 ##################################################################################
 
 
@@ -1125,11 +1125,11 @@ _mount_target_source_data: dict[str, dict[str, Any]] = {}
 
 
 async def _declare_dicts_with_mount_target() -> None:
-    with syn.component_subpath("dict"):
+    with syn.unit_path("dict"):
         for name, data in _mount_target_source_data.items():
-            single_dict_provider = await syn.mount_target(DictsTarget.dict_target(name))
+            single_dict_provider = await syn.attach_target(DictsTarget.dict_target(name))
             for key, value in data.items():
-                syn.declare_target_state(single_dict_provider.target_state(key, value))
+                syn.ensure_target_state(single_dict_provider.target_state(key, value))
 
 
 def test_mount_target_insert() -> None:
@@ -1227,19 +1227,19 @@ def test_preview_rejects_child_target_providers() -> None:
 _transition_to_component_mode = False
 
 
-@syn.fn
+@syn.task
 async def _dummy_leaf_component() -> None:
     pass
 
 
 async def _declare_transition_to_component() -> None:
-    with syn.component_subpath("transition_test"):
+    with syn.unit_path("transition_test"):
         if not _transition_to_component_mode:
-            single_dict_provider = await syn.mount_target(DictsTarget.dict_target("D1"))
+            single_dict_provider = await syn.attach_target(DictsTarget.dict_target("D1"))
             for key, value in _mount_target_source_data.get("D1", {}).items():
-                syn.declare_target_state(single_dict_provider.target_state(key, value))
+                syn.ensure_target_state(single_dict_provider.target_state(key, value))
         else:
-            await syn.mount(syn.component_subpath("D1"), _dummy_leaf_component)
+            await syn.spawn(syn.unit_path("D1"), _dummy_leaf_component)
 
 
 def test_directory_to_component_transition() -> None:

@@ -33,10 +33,10 @@ Synor connectors provide **targets** with `declare_*` methods:
 
 ```python
 # Declare a file target state
-dir_target.declare_file(filename="output.html", content=html)
+dir_target.ensure_file(filename="output.html", content=html)
 
 # Declare a row target state
-table_target.declare_row(row=DocEmbedding(...))
+table_target.ensure_row(row=DocEmbedding(...))
 ```
 
 ### Where do targets come from?
@@ -55,7 +55,7 @@ For simple cases where each processing component writes a single file, you can d
 from synor.connectors import localfs
 
 # Declare a single file target state directly
-localfs.declare_file(outdir / "output.html", html, create_parent_dirs=True)
+localfs.ensure_file(outdir / "output.html", html, create_parent_dirs=True)
 ```
 
 When you need a `DirTarget` to declare multiple files, use the connector's convenience method:
@@ -65,7 +65,7 @@ When you need a `DirTarget` to declare multiple files, use the connector's conve
 dir_target = await localfs.mount_dir_target(outdir)
 
 # Declare child target states (files)
-dir_target.declare_file(filename="output.html", content=html)
+dir_target.ensure_file(filename="output.html", content=html)
 ```
 
 ### Example: writing a row to PostgreSQL
@@ -90,10 +90,10 @@ table = await postgres.mount_table_target(
 )
 
 # Declare a child target state (a row)
-table.declare_row(row=DocEmbedding(...))
+table.ensure_row(row=DocEmbedding(...))
 ```
 
-These convenience methods wrap [`mount_target()`](./processing_component#mount_target), which automatically derives the component path from the target's globally unique key. See [Processing Component](./processing_component) for more on mounting APIs.
+These convenience methods wrap [`attach_target()`](./processing_component#attach_target), which automatically derives the component path from the target's globally unique key. See [Processing Component](./processing_component) for more on mounting APIs.
 
 :::tip[Type safety]
 Targets like `DirTarget` and `TableTarget` have two statuses: **pending** (just created) and **resolved** (after the container target state is ready). The type system tracks this — if you try to use a pending target before it's resolved, type checkers like mypy will flag the error.
@@ -149,7 +149,7 @@ When a target is dropped and recreated, Synor automatically reprocesses all affe
 
 For cases where connector-specific APIs don't cover your needs, Synor provides generic APIs:
 
-- `declare_target_state()` — declare a leaf target state
-- `declare_target_state_with_child()` — declare a target state that provides child target states
+- `ensure_target_state()` — declare a leaf target state
+- `ensure_target_state_with_child()` — declare a target state that provides child target states
 
 These are exported from `synor` and used internally by connectors. For defining custom targets, see [Custom Target States Connector](../advanced_topics/custom_target_connector).

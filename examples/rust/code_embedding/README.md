@@ -9,7 +9,7 @@ Pipeline: **walk → detect language → tree-sitter chunk → embed → store i
 | Step | Python | Rust (this example) |
 |------|--------|---------------------|
 | Walk files | `localfs.walk_dir` | `synor::walk` |
-| Per-file incremental skip | `@syn.fn(memo=True)` | `#[synor::function(memo)]` |
+| Per-file incremental skip | `@syn.task(cache=True)` | `#[synor::function(memo)]` |
 | Language detection | `detect_code_language` | `synor_ops_text::prog_langs::detect_language` |
 | Chunking | `RecursiveSplitter` | `synor_ops_text::split::RecursiveChunker` |
 | Embeddings | `SentenceTransformerEmbedder` (all-MiniLM-L6-v2) | `fastembed` `AllMiniLML6V2` — **the same model**, local ONNX |

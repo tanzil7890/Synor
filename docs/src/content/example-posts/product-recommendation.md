@@ -54,7 +54,7 @@ class ProductTaxonomyInfo(pydantic.BaseModel):
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_taxonomy(detail: str) -> ProductTaxonomyInfo:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -65,14 +65,14 @@ async def extract_taxonomy(detail: str) -> ProductTaxonomyInfo:
     return ProductTaxonomyInfo.model_validate(result.model_dump())
 ```
 
-Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/) — swap `LLM_MODEL` for any provider. `@syn.fn(memo=True)` caches each extraction by content, so re-running re-tags only changed products.
+Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/) — swap `LLM_MODEL` for any provider. `@syn.task(cache=True)` caches each extraction by content, so re-running re-tags only changed products.
 
 ## Phase 1: per-product extraction
 
 `process_file` renders the product JSON to Markdown (a Jinja template), declares the `Product` node, extracts the taxonomies, and returns the labels for phase 2:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, product_table: neo4j.TableTarget[Product]) -> ProductTaxonomies:
     raw = json.loads(await file.read_text())
     product_id = file.file_path.path.name.removesuffix(".json")
@@ -92,7 +92,7 @@ async def process_file(file: FileLike, product_table: neo4j.TableTarget[Product]
 `Taxonomy` nodes are shared, so they're owned by one graph pass — it declares the deduplicated node set and the two relationship types:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def build_graph(products, taxonomy_table, product_taxonomy_rel, complementary_rel) -> None:
     labels = {t for p in products for t in (*p.taxonomies, *p.complementary)}
     for value in labels:

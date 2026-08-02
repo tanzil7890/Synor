@@ -85,7 +85,7 @@ async def synor_lifespan(
     yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     target: qdrant.CollectionTarget,
@@ -101,7 +101,7 @@ async def process_file(
     target.declare_point(point)
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     model, _ = get_clip_model()
     dim: int = model.config.projection_dim  # type: ignore[assignment]
@@ -125,7 +125,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         ),
         live=True,  # source supports live watch; api.py runs the app with live=True
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 
 
 app = syn.App(

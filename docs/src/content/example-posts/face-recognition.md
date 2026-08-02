@@ -27,7 +27,7 @@ You declare the transformation logic with native Python; Synor works out what to
 
 ## Detect and embed faces
 
-Face detection and embedding are synchronous, CPU/GPU-heavy dlib calls, so each is wrapped with `@syn.fn.as_async(runner=syn.GPU)` to run on a dedicated GPU runner without blocking the async loop. `extract_faces` returns one `Face` (bounding box + cropped PNG) per detected face:
+Face detection and embedding are synchronous, CPU/GPU-heavy dlib calls, so each is wrapped with `@syn.task.as_async(runner=syn.GPU)` to run on a dedicated GPU runner without blocking the async loop. `extract_faces` returns one `Face` (bounding box + cropped PNG) per detected face:
 
 ```python title="main.py"
 @dataclass
@@ -36,7 +36,7 @@ class Face:
     image: bytes          # the cropped face, as PNG
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def extract_faces(content: bytes) -> list[Face]:
     orig = Image.open(io.BytesIO(content)).convert("RGB")
     # The CNN detector is slow on large images, so downscale, then map boxes back.
@@ -50,7 +50,7 @@ def extract_faces(content: bytes) -> list[Face]:
     return faces
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def embed_face(face_png: bytes) -> list[float]:
     img = Image.open(io.BytesIO(face_png)).convert("RGB")
     return face_recognition.face_encodings(
@@ -65,7 +65,7 @@ def embed_face(face_png: bytes) -> list[float]:
 `process_file` runs once per image: detect its faces, then map each face through `process_face`, which embeds it and declares one Qdrant point. The point id is a stable hash of the file path plus the bounding box, so re-running never duplicates and an edited photo reconciles cleanly:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_face(face: Face, filename: str, target: qdrant.CollectionTarget) -> None:
     embedding = await embed_face(face.image)
     target.declare_point(
@@ -78,7 +78,7 @@ async def process_face(face: Face, filename: str, target: qdrant.CollectionTarge
     )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     faces = await extract_faces(await file.read())
     await syn.map(process_face, faces, str(file.file_path.path), target)
@@ -86,14 +86,14 @@ async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
 
 
 
-`@syn.fn(memo=True)` makes it incremental: an unchanged photo is never re-detected. Each image is its own processing component, so deleting a photo removes all its faces from Qdrant automatically. `syn.map` fans out one `process_face` per detected face — the multi-face equivalent of chunking a document.
+`@syn.task(cache=True)` makes it incremental: an unchanged photo is never re-detected. Each image is its own processing component, so deleting a photo removes all its faces from Qdrant automatically. `syn.map` fans out one `process_face` per detected face — the multi-face equivalent of chunking a document.
 
 ## Define the main function
 
 `app_main` mounts the Qdrant collection sized to the 128-d face vector with **Euclidean** distance, then walks the image folder and mounts one component per file:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_collection = await qdrant.mount_collection_target(
         QDRANT_DB,
@@ -110,7 +110,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.jpg", "**/*.jpeg", "**/*.png"]),
         live=True,
     )
-    await syn.mount_each(process_file, files.items(), target_collection)
+    await syn.spawn_each(process_file, files.items(), target_collection)
 
 
 app = syn.App(syn.AppConfig(name="FaceRecognitionV1"), app_main, sourcedir=pathlib.Path("./images"))

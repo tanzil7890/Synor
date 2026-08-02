@@ -313,7 +313,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     builder.provide(QDRANT_DB, client)
     yield
 
-@syn.fn
+@syn.task
 async def process_document(
     doc_id: str,
     text: str,
@@ -328,7 +328,7 @@ async def process_document(
     )
     target.declare_point(point)
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Declare collection target state
     collection = await qdrant.mount_collection_target(
@@ -341,8 +341,8 @@ async def app_main() -> None:
 
     # Declare points
     for doc_id, text in documents:
-        await syn.mount(
-            syn.component_subpath("doc", doc_id),
+        await syn.spawn(
+            syn.unit_path("doc", doc_id),
             process_document,
             doc_id,
             text,
@@ -356,7 +356,7 @@ async def app_main() -> None:
 from synor.resources.schema import VectorSchema
 import numpy as np
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     collection = await qdrant.mount_collection_target(
         QDRANT_DB,
@@ -395,7 +395,7 @@ from qdrant_client.http import models as qdrant_models
 from synor.resources.schema import VectorSchema
 import numpy as np
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     collection = await qdrant.mount_collection_target(
         QDRANT_DB,

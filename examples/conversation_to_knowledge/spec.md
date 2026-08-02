@@ -45,7 +45,7 @@ Users provide a folder, with a list of files, each with a list of source video l
 
 Processing for each session should be mounted as a component, and memoized.
 The component does processing for individual session, and declare target states that don't need cross-session entity resolutions.
-For things that need cross-session entity resolutions, it returns them (i.e. we should use `use_mount()`), for later stages to consume.
+For things that need cross-session entity resolutions, it returns them (i.e. we should use `call()`), for later stages to consume.
 
 #### Get Session
 

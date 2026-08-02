@@ -32,7 +32,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gemini/gemini-2.5-flash")
 _instructor_client = instructor.from_litellm(acompletion, mode=instructor.Mode.JSON)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_file_info(file: FileLike) -> CodebaseInfo:
     """Extract structured information from a single Python file using LLM."""
     content = await file.read_text()
@@ -62,7 +62,7 @@ Instructions:
     return CodebaseInfo.model_validate(result.model_dump())
 
 
-@syn.fn
+@syn.task
 async def aggregate_project_info(
     project_name: str,
     file_infos: list[CodebaseInfo],
@@ -127,7 +127,7 @@ Create a unified CodebaseInfo that:
     return result
 
 
-@syn.fn
+@syn.task
 def generate_markdown(
     project_name: str, info: CodebaseInfo, file_infos: list[CodebaseInfo]
 ) -> str:
@@ -186,7 +186,7 @@ def generate_markdown(
     return "\n".join(lines)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_project(
     project_name: str,
     files: Collection[localfs.File],
@@ -201,12 +201,12 @@ async def process_project(
 
     # Generate and output markdown
     markdown = generate_markdown(project_name, project_info, file_infos)
-    localfs.declare_file(
+    localfs.ensure_file(
         output_dir / f"{project_name}.md", markdown, create_parent_dirs=True
     )
 
 
-@syn.fn
+@syn.task
 async def app_main(
     root_dir: pathlib.Path,
     output_dir: pathlib.Path,
@@ -239,8 +239,8 @@ async def app_main(
 
         if files:
             # Mount a component to process this project
-            await syn.mount(
-                syn.component_subpath("project", project_name),
+            await syn.spawn(
+                syn.unit_path("project", project_name),
                 process_project,
                 project_name,
                 files,

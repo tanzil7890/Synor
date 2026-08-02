@@ -371,13 +371,13 @@ async def test_two_item_synor_lifecycle_suppresses_before_false_success_and_retr
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[Any, str] | None:
             assert isinstance(key, str)
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 if not prev_possible_records:
                     return None
                 if key != "artifact-a":
@@ -388,7 +388,7 @@ async def test_two_item_synor_lifecycle_suppresses_before_false_success_and_retr
                 return syn.TargetReconcileOutput(
                     action=delete_action,
                     sink=verified_sink.sink,
-                    tracking_record=syn.NON_EXISTENCE,
+                    tracking_record=syn.ABSENT,
                 )
 
             if (
@@ -414,8 +414,8 @@ async def test_two_item_synor_lifecycle_suppresses_before_false_success_and_retr
 
     async def main() -> None:
         if include_a:
-            syn.declare_target_state(provider.target_state("artifact-a", "owned-a"))
-        syn.declare_target_state(provider.target_state("artifact-b", "owned-b"))
+            syn.ensure_target_state(provider.target_state("artifact-a", "owned-a"))
+        syn.ensure_target_state(provider.target_state("artifact-b", "owned-b"))
 
     environment = common.create_test_env(__file__, suffix="strict_vertical_slice")
     app = syn.App(

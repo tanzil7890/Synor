@@ -130,7 +130,7 @@ It is up to you to declare the process granularity. It can be
 In this example, we have a projects folder containing 20+ projects. It is natural to pick granularity at the directory level for each project, because we want to create a wiki page per project.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(
     root_dir: pathlib.Path,
     output_dir: pathlib.Path,
@@ -154,8 +154,8 @@ async def app_main(
         ]
 
         if files:
-            await syn.mount(
-                syn.component_subpath("project", project_name),
+            await syn.spawn(
+                syn.unit_path("project", project_name),
                 process_project,
                 project_name,
                 files,
@@ -167,7 +167,7 @@ The main function does two things:
 
 1. **Find all projects** — Loop through each subdirectory in `root_dir`, treating each as a separate project.
 
-2. **Mount a processing component for each project** — For each project with Python files, `await syn.mount()` sets up a processing component. Synor handles the execution and tracks dependencies automatically.
+2. **Mount a processing component for each project** — For each project with Python files, `await syn.spawn()` sets up a processing component. Synor handles the execution and tracks dependencies automatically.
 
 **Why processing components?** A processing component groups an item's processing together with its target states. Each component runs independently and in parallel. In this case, when `project_a` finishes, its results are applied to the external system immediately, without waiting for `project_b` or any other project.
 
@@ -183,7 +183,7 @@ For each project, we will
 
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_project(
     project_name: str,
     files: Collection[localfs.File],
@@ -198,7 +198,7 @@ async def process_project(
 
     # Generate and output markdown
     markdown = generate_markdown(project_name, project_info, file_infos)
-    localfs.declare_file(
+    localfs.ensure_file(
         output_dir / f"{project_name}.md", markdown, create_parent_dirs=True
     )
 ```
@@ -227,7 +227,7 @@ class FunctionInfo(BaseModel):
         description="Function signature, e.g. 'async def foo(x: int) -> str'"
     )
     is_synor_function: bool = Field(
-        description="Whether decorated with @syn.fn"
+        description="Whether decorated with @syn.task"
     )
     summary: str = Field(description="Brief summary of what the function does")
 
@@ -257,7 +257,7 @@ The core extraction function uses memoization to cache LLM results:
 ````python title="main.py"
 _instructor_client = instructor.from_litellm(acompletion, mode=instructor.Mode.JSON)
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_file_info(file: FileLike) -> CodebaseInfo:
     """Extract structured information from a single Python file using LLM."""
     content = await file.read_text()
@@ -287,7 +287,7 @@ Instructions:
     return CodebaseInfo.model_validate(result.model_dump())
 ````
 
-**Why `memo=True` matters:** LLM calls are expensive. With memoization, Synor caches the result keyed by the file content. If you run the pipeline again without changing a file, the cached result is used—no LLM call needed.
+**Why `cache=True` matters:** LLM calls are expensive. With memoization, Synor caches the result keyed by the file content. If you run the pipeline again without changing a file, the cached result is used—no LLM call needed.
 
 [→ Function](/docs/programming_guide/function)
 
@@ -300,7 +300,7 @@ For projects with multiple files, we aggregate into a unified summary:
 
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def aggregate_project_info(
     project_name: str,
     file_infos: list[CodebaseInfo],
@@ -378,7 +378,7 @@ Create output markdown for each project.
 
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 def generate_markdown(
     project_name: str, info: CodebaseInfo, file_infos: list[CodebaseInfo]
 ) -> str:

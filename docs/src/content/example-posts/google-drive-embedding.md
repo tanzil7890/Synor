@@ -49,10 +49,10 @@ source = google_drive.GoogleDriveSource(
 
 ## Define the main function
 
-`app_main` mounts the Postgres table, then fans out one processing component per Drive file with `mount_each`. The processing component is the same `process_file` from the base example — read the file, chunk it, embed each chunk, and `declare_row` a `DocEmbedding` per chunk.
+`app_main` mounts the Postgres table, then fans out one processing component per Drive file with `spawn_each`. The processing component is the same `process_file` from the base example — read the file, chunk it, embed each chunk, and `ensure_row` a `DocEmbedding` per chunk.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     table = await postgres.mount_table_target(
         PG_DB,
@@ -69,10 +69,10 @@ async def app_main() -> None:
         root_folder_ids=root_folder_ids,
     )
 
-    await syn.mount_each(process_file, source.items(), table)
+    await syn.spawn_each(process_file, source.items(), table)
 ```
 
-`source.items()` yields `(key, file)` pairs keyed by the file's name path, which is exactly the shape `mount_each` expects — so the engine tracks each Drive file as its own component and updates them independently. `mount_table_target` creates and manages the Postgres table: schema, idempotent upserts, and orphan cleanup when a file disappears from the folder.
+`source.items()` yields `(key, file)` pairs keyed by the file's name path, which is exactly the shape `spawn_each` expects — so the engine tracks each Drive file as its own component and updates them independently. `mount_table_target` creates and manages the Postgres table: schema, idempotent upserts, and orphan cleanup when a file disappears from the folder.
 
 ## Setup
 
@@ -113,7 +113,7 @@ The most semantically similar chunks come back ranked — even when they share n
 
 ## Incremental updates
 
-Just like the base example, Synor does the **minimum work** to keep the index in sync. `@syn.fn(memo=True)` on `process_file` skips any Drive file whose content and the function's code are both unchanged, and `mount_table_target` derives each row's `id` from its chunk text, so only the rows that actually changed are upserted and rows whose source is gone are deleted.
+Just like the base example, Synor does the **minimum work** to keep the index in sync. `@syn.task(cache=True)` on `process_file` skips any Drive file whose content and the function's code are both unchanged, and `mount_table_target` derives each row's `id` from its chunk text, so only the rows that actually changed are upserted and rows whose source is gone are deleted.
 
 - **A document is added to the folder** — only that file is chunked and embedded, and its rows are inserted.
 - **A document is edited** — it is re-chunked; unchanged chunks keep their `id` and embedding, genuinely new chunks are embedded and inserted, and chunks that no longer exist are deleted.

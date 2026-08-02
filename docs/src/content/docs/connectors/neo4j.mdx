@@ -86,7 +86,7 @@ Each apply batch is wrapped in a single Neo4j transaction (`tx.commit()` on succ
 Declares a node label as a target state. Returns a `TableTarget` for declaring records.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey,
     table_name: str,
     table_schema: TableSchema[RowT] | None = None,
@@ -122,7 +122,7 @@ def TableTarget.declare_record(
 
 - `row` — A row object (dict, dataclass, NamedTuple, or Pydantic model). Must include the `primary_key` field declared above.
 
-`declare_row` is an alias for `declare_record`, for compatibility with Postgres and other RDBMS targets.
+`ensure_row` is an alias for `declare_record`, for compatibility with Postgres and other RDBMS targets.
 
 #### Relation tables (parent state)
 
@@ -353,7 +353,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     schema = await neo4j.TableSchema.from_class(Document, primary_key="filename")
     documents = await neo4j.mount_table_target(
@@ -385,7 +385,7 @@ class RelationshipRow:
     predicate: str
 
 
-@syn.fn
+@syn.task
 async def kg_app_main() -> None:
     documents = await neo4j.mount_table_target(
         KG_DB, "Document",

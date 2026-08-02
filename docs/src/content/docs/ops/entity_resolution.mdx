@@ -35,7 +35,7 @@ from synor.ops.sentence_transformers import SentenceTransformerEmbedder
 EMBEDDER = syn.ContextKey[SentenceTransformerEmbedder]("embedder", detect_change=True)
 LLM_MODEL = syn.ContextKey[str]("llm_model", detect_change=True)
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def resolve_my_entities(raw_entities: set[str]) -> dict[str, str | None]:
     result = await resolve_entities(
         entities=raw_entities,
@@ -226,7 +226,7 @@ resolver = LlmPairResolver(model="openai/gpt-4o-mini", retries=1)  # fewer retri
 
 ### Memoization
 
-Each unique `(entity, candidates)` pair's decision is persisted across runs via [`@syn.fn(memo=True)`](../programming_guide/function). Changing the model or prompt invalidates the cache. No additional memoization wrapper is needed.
+Each unique `(entity, candidates)` pair's decision is persisted across runs via [`@syn.task(cache=True)`](../programming_guide/function). Changing the model or prompt invalidates the cache. No additional memoization wrapper is needed.
 
 ### Parameters
 

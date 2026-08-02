@@ -587,7 +587,7 @@ class TestCollectionDeleteFailureHandling:
                 db_key="test_qdrant",
                 collection_name="must_remain_retryable",
             ),
-            spec=syn.NON_EXISTENCE,
+            spec=syn.ABSENT,
             main_action="delete",
         )
 
@@ -662,7 +662,7 @@ def test_live_dense_sparse_vectors_and_hybrid_query() -> None:
     env = common.create_test_env(__file__, suffix=collection_name)
     env.context_provider.provide(db_key, client)
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         target = await qdrant.mount_collection_target(
             db_key,

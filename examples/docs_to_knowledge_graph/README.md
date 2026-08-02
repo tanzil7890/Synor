@@ -21,7 +21,7 @@ Two node types, two relationship types, and the concept map falls out of the gra
 Because entities are shared across documents, the pipeline runs in two phases — read it top-to-bottom in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)  # Phase 1 — per doc: declare the Document node, carry triples forward
+@syn.task(cache=True)  # Phase 1 — per doc: declare the Document node, carry triples forward
 async def process_file(file: localfs.File, document_table: neo4j.TableTarget[Document]) -> DocTriples:
     content = await file.read_text()
     filename = file.file_path.path.as_posix()
@@ -30,7 +30,7 @@ async def process_file(file: localfs.File, document_table: neo4j.TableTarget[Doc
     triples = await extract_relationships(content)
     return DocTriples(filename=filename, triples=triples)
 
-@syn.fn              # Phase 2 — one pass owns the shared Entity nodes + both edge types
+@syn.task              # Phase 2 — one pass owns the shared Entity nodes + both edge types
 async def build_graph(docs, entity_table, relationship_rel, mention_rel) -> None:
     for doc in docs:
         for t in doc.triples:
@@ -47,7 +47,7 @@ Extraction is [instructor](https://github.com/instructor-ai/instructor) over [Li
 ## Why this example is useful
 
 - **Shared nodes, done right.** Concepts are deduplicated and owned by a single graph pass, so `Incremental Processing` is one `Entity` node every doc can point at — not a copy per doc.
-- **Incremental by default.** `@syn.fn(memo=True)` caches each LLM extraction by content; edit one doc and only that doc re-extracts, then the graph diffs — adding new nodes/edges and removing ones no longer supported anywhere. A no-change re-run makes zero LLM calls.
+- **Incremental by default.** `@syn.task(cache=True)` caches each LLM extraction by content; edit one doc and only that doc re-extracts, then the graph diffs — adding new nodes/edges and removing ones no longer supported anywhere. A no-change re-run makes zero LLM calls.
 - **Stable edge identity.** `generate_id` hashes each triple, so the same `(subject, predicate, object)` always maps to one edge — re-asserting a fact in another doc is a no-op, not a duplicate.
 - **Plain Python, your stack.** Swap `LLM_MODEL` for any [LiteLLM provider](https://docs.litellm.ai/docs/providers) (OpenAI, Ollama, …). No DSL.
 - **Honest cache busting.** `LLM_MODEL` is declared with `detect_change=True`, so swapping the model re-extracts the whole corpus against it with no cache to clear by hand.

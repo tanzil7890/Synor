@@ -19,7 +19,7 @@ _source_data: dict[str, Any] = {}
 
 def declare_global_dict_entries() -> None:
     for key, value in _source_data.items():
-        syn.declare_target_state(GlobalDictTarget.target_state(key, value))
+        syn.ensure_target_state(GlobalDictTarget.target_state(key, value))
 
 
 def test_global_dict_target_state_insert() -> None:
@@ -149,7 +149,7 @@ def test_global_dict_target_state_no_change() -> None:
 
 def declare_async_global_dict_entries() -> None:
     for key, value in _source_data.items():
-        syn.declare_target_state(AsyncGlobalDictTarget.target_state(key, value))
+        syn.ensure_target_state(AsyncGlobalDictTarget.target_state(key, value))
 
 
 def test_async_global_dict_target_state_insert() -> None:

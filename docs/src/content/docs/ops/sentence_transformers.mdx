@@ -49,7 +49,7 @@ The `embed()` method converts text into a `numpy.ndarray` of `float32`. It suppo
 embedding = await embedder.embed("Hello, world!")
 
 # Use the embedding in a dataclass row, store in a vector database, etc.
-table.declare_row(row=CodeEmbedding(code="Hello, world!", embedding=embedding))
+table.ensure_row(row=CodeEmbedding(code="Hello, world!", embedding=embedding))
 ```
 
 ### Using as a type annotation
@@ -126,14 +126,14 @@ class DocEmbedding:
     text: str
     embedding: Annotated[NDArray, _embedder]
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
     id_gen: IdGenerator,
     table: postgres.TableTarget[DocEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=DocEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=str(filename),
@@ -144,7 +144,7 @@ async def process_chunk(
         ),
     )
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: postgres.TableTarget[DocEmbedding],
@@ -156,7 +156,7 @@ async def process_file(
     id_gen = IdGenerator()
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -173,7 +173,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
 ## Configuration options

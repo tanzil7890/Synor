@@ -94,7 +94,7 @@ The SASL block is what a managed broker (StreamNative or similar) wants. For a l
 `process_csv` runs once per file. It reads the text, parses rows with `csv.DictReader` (the header row becomes the keys), and declares each row as a target state — key from the first column, value the JSON-encoded row:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_csv(file: FileLike, topic_target: kafka.KafkaTopicTarget) -> None:
     text = await file.read_text()
     reader = csv.DictReader(io.StringIO(text))
@@ -108,37 +108,37 @@ async def process_csv(file: FileLike, topic_target: kafka.KafkaTopicTarget) -> N
         key_value = row.get(first_col)
         if key_value is not None:
             value = json.dumps(row)
-            topic_target.declare_target_state(key=key_value, value=value)
+            topic_target.ensure_target_state(key=key_value, value=value)
 ```
 
-`@syn.fn(memo=True)` makes the per-file work incremental: if a file's contents and this function's code are both unchanged, `process_csv` doesn't even run. Each file runs as its own processing component (mounted below), so the engine tracks each file's rows independently — and when a file disappears, its rows are cleaned off the topic automatically.
+`@syn.task(cache=True)` makes the per-file work incremental: if a file's contents and this function's code are both unchanged, `process_csv` doesn't even run. Each file runs as its own processing component (mounted below), so the engine tracks each file's rows independently — and when a file disappears, its rows are cleaned off the topic automatically.
 
 ## Declare states, not messages
 
-The one line worth pausing on is `declare_target_state` — deliberately *not* `send_message()` or `produce()`.
+The one line worth pausing on is `ensure_target_state` — deliberately *not* `send_message()` or `produce()`.
 
 ```python
-topic_target.declare_target_state(key=key, value=value)
+topic_target.ensure_target_state(key=key, value=value)
 ```
 
 Synor is state-driven: like a spreadsheet cell or a SQL materialized view, you describe what the target *should be* as a function of the source, and the engine figures out the transitions. You don't compute deltas, and you don't write separate insert / update / delete code paths.
 
 
 
-Kafka makes this vivid because its wire model is the opposite of state: a topic is a *log of events*, not a snapshot. Synor owns the gap. When you call `declare_target_state(key=k, value=v)`:
+Kafka makes this vivid because its wire model is the opposite of state: a topic is a *log of events*, not a snapshot. Synor owns the gap. When you call `ensure_target_state(key=k, value=v)`:
 
 - **`k` is new, or `v` changed** → it produces an **upsert** message `(k, v)`.
 - **`k` was declared before but isn't this time** → it produces a **delete** message `(k, None)` (or a tombstone if you supplied a `deletion_value_fn`).
 - **`k` was declared with the same `v`** → **nothing is sent.** No message, no broker round-trip, no consumer wakeup.
 
-Messages are derived from state transitions; you only ever talk about states. It's the same shape as the Postgres target (`declare_target_state` → INSERT / UPDATE / DELETE) — the wire ops differ, the API doesn't, because the semantics are the same. The payoff: one `process_csv` is correct on the first run, every subsequent run, and after a crash-restart — there's no separate "initial load" versus "incremental update" path.
+Messages are derived from state transitions; you only ever talk about states. It's the same shape as the Postgres target (`ensure_target_state` → INSERT / UPDATE / DELETE) — the wire ops differ, the API doesn't, because the semantics are the same. The payoff: one `process_csv` is correct on the first run, every subsequent run, and after a crash-restart — there's no separate "initial load" versus "incremental update" path.
 
 ## Define the main function
 
 `app_main` wires the source to the target. It mounts the Kafka topic, walks `./data` for CSV files as a live source, and mounts one component per file:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     topic_target = await kafka.mount_kafka_topic_target(KAFKA_PRODUCER, KAFKA_TOPIC)
 
@@ -147,7 +147,7 @@ async def app_main() -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.csv"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_csv, files.items(), topic_target)
+    await syn.spawn_each(process_csv, files.items(), topic_target)
 
 
 app = syn.App(syn.AppConfig(name="CsvToKafka"), app_main)
@@ -156,7 +156,7 @@ app = syn.App(syn.AppConfig(name="CsvToKafka"), app_main)
 Two things to notice:
 
 1. `mount_kafka_topic_target(...)` resolves the producer from the context key and hands back a target handle. The topic itself is **user-managed** — Synor never creates or deletes topics, it just produces into one you already own.
-2. `localfs.walk_dir(..., live=True)` makes the filesystem source a live source: it scans once, then keeps watching `./data` (via [`watchfiles`](https://github.com/samuelcolvin/watchfiles)) and pushes incremental updates downstream. `mount_each` runs one `process_csv` component per file.
+2. `localfs.walk_dir(..., live=True)` makes the filesystem source a live source: it scans once, then keeps watching `./data` (via [`watchfiles`](https://github.com/samuelcolvin/watchfiles)) and pushes incremental updates downstream. `spawn_each` runs one `process_csv` component per file.
 
 That's the whole pipeline — one file, ~60 lines.
 

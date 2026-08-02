@@ -18,7 +18,7 @@ In the call chain `foo(a)` → `bar(b)`:
 
 Logic changes propagate based on **runtime invocations**, not static call graphs. Two consequences:
 
-- **Unannotated functions don't break the chain.** If `f1()` → `f2()` → `f3()`, and `f1` and `f3` are decorated with `@syn.fn` but `f2` is not, a logic change in `f3` still invalidates `f1`'s memo.
+- **Unannotated functions don't break the chain.** If `f1()` → `f2()` → `f3()`, and `f1` and `f3` are decorated with `@syn.task` but `f2` is not, a logic change in `f3` still invalidates `f1`'s memo.
 - **Conditional calls are tracked precisely.** If `f1()` calls `f2()` only in one branch, then invocations of `f1()` that didn't call `f2()` are not invalidated when `f2`'s logic changes — only invocations that actually called `f2()` are affected.
 
 ### What about hidden dependencies like global variables or files?

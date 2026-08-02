@@ -26,7 +26,7 @@ from .serde import (
     qualified_name,
     unwrap_element_type,
 )
-from .typing import NonExistenceType, StableKey
+from .typing import AbsentType, StableKey
 
 ActionT = TypeVar("ActionT")
 ActionT_co = TypeVar("ActionT_co", covariant=True)
@@ -202,7 +202,7 @@ class TargetReconcileOutput(
 ):
     action: ActionT
     sink: TargetActionSink[ActionT, OptChildHandlerT_co]
-    tracking_record: TrackingRecordT_co | NonExistenceType
+    tracking_record: TrackingRecordT_co | AbsentType
     child_invalidation: Literal["destructive", "lossy"] | None = None
 
 
@@ -210,7 +210,7 @@ class TargetHandler(Protocol[ValueT_contra, TrackingRecordT, OptChildHandlerT_co
     def reconcile(
         self,
         key: StableKey,
-        desired_target_state: ValueT_contra | NonExistenceType,
+        desired_target_state: ValueT_contra | AbsentType,
         prev_possible_records: Collection[TrackingRecordT],
         prev_may_be_missing: bool,
         /,
@@ -274,7 +274,7 @@ class TargetState(Generic[OptChildHandlerT]):
         self._value = value
 
 
-def declare_target_state(target_state: TargetState[None]) -> None:
+def ensure_target_state(target_state: TargetState[None]) -> None:
     """
     Declare a target state within the current component context.
 
@@ -291,7 +291,7 @@ def declare_target_state(target_state: TargetState[None]) -> None:
     )
 
 
-def declare_target_state_with_child(
+def ensure_target_state_with_child(
     target_state: TargetState[TargetHandler[ValueT, Any, OptChildHandlerT]],
 ) -> PendingTargetStateProvider[ValueT, OptChildHandlerT]:
     """

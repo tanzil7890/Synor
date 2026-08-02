@@ -14,7 +14,7 @@ A topic is often a firehose of heterogeneous events — orders, users, inventory
 Kafka is a source you treat as a keyed map; each LanceDB table is a target you declare rows on. `process_message` runs once per message: decode the value, `json.loads` it, and dispatch on shape. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def process_message(
     msg: Message,
     products_table: lancedb.TableTarget[Product],
@@ -26,11 +26,11 @@ async def process_message(
     text = value.decode() if isinstance(value, bytes) else value
     row = json.loads(text)
     if "sku" in row:
-        products_table.declare_row(row=Product(**{**row, "price": float(row["price"])}))
+        products_table.ensure_row(row=Product(**{**row, "price": float(row["price"])}))
     elif "emp_id" in row:
-        employees_table.declare_row(row=Employee(**row))
+        employees_table.ensure_row(row=Employee(**row))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     products_table = await lancedb.mount_table_target(
         LANCE_DB, table_name="products",
@@ -42,10 +42,10 @@ async def app_main() -> None:
               "enable.auto.commit": "false", "auto.offset.reset": "earliest"}
     consumer = AIOConsumer(config)
     items = kafka.topic_as_map(consumer, [KAFKA_TOPIC])
-    await syn.mount_each(process_message, items, products_table, employees_table)
+    await syn.spawn_each(process_message, items, products_table, employees_table)
 ```
 
-The line worth pausing on is `declare_row` — deliberately *not* `upsert()`. A new or changed primary key is upserted; a tombstone (null value) removes that key's row; the same row declared again writes nothing. `enable.auto.commit` is **off** on purpose: Synor commits each offset *after* the row is durably written, so the consumer group resumes from the last message it actually persisted.
+The line worth pausing on is `ensure_row` — deliberately *not* `upsert()`. A new or changed primary key is upserted; a tombstone (null value) removes that key's row; the same row declared again writes nothing. `enable.auto.commit` is **off** on purpose: Synor commits each offset *after* the row is durably written, so the consumer group resumes from the last message it actually persisted.
 
 ## Why this example is useful
 

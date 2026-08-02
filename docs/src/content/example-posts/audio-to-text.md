@@ -95,13 +95,13 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 `process_file` runs once per file. It reads the audio, transcribes it, and declares a single target row — no chunking, one row per file.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: localfs.File,
     table: postgres.TableTarget[AudioTranscription],
 ) -> None:
     transcript = await _transcriber.transcribe(file)
-    table.declare_row(
+    table.ensure_row(
         row=AudioTranscription(
             filename=str(file.file_path.path),
             text=transcript,
@@ -109,16 +109,16 @@ async def process_file(
     )
 ```
 
-`_transcriber.transcribe(file)` reads the file's bytes and calls the LiteLLM model, returning plain text. `table.declare_row` declares that row as a target state; Synor handles inserting, updating, or deleting it to match. Because the filename is the primary key, the table doubles as an index of which files have been transcribed.
+`_transcriber.transcribe(file)` reads the file's bytes and calls the LiteLLM model, returning plain text. `table.ensure_row` declares that row as a target state; Synor handles inserting, updating, or deleting it to match. Because the filename is the primary key, the table doubles as an index of which files have been transcribed.
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run — so you don't pay for the same transcription twice.
+`@syn.task` with `cache=True` is what makes this incremental: if a file's content and this function's code are both unchanged, the whole file is skipped on the next run — so you don't pay for the same transcription twice.
 
 ## Define the main function
 
 `app_main` wires the source to the target. It mounts the Postgres table, walks the source directory for audio files, and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -140,10 +140,10 @@ async def app_main(sourcedir: pathlib.Path) -> None:
             ],
         ),
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
-`mount_table_target` creates and manages the Postgres table for you: schema, idempotent upserts, and orphan cleanup when a file disappears. `primary_key=["filename"]` is what makes each file map to exactly one row. `mount_each` runs one component per file so the engine can track and update them independently.
+`mount_table_target` creates and manages the Postgres table for you: schema, idempotent upserts, and orphan cleanup when a file disappears. `primary_key=["filename"]` is what makes each file map to exactly one row. `spawn_each` runs one component per file so the engine can track and update them independently.
 
 ## Create the App
 
@@ -176,7 +176,7 @@ psql "$POSTGRES_URL" -c \
 
 ## Incremental updates
 
-Synor keeps the table in sync with your files and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to transcribe, upsert, and delete. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged, so an unchanged file never hits the transcription API again. `mount_table_target` decides what to *write* — each row is keyed by `filename`, so it upserts only the rows that actually changed and deletes rows whose source file is gone.
+Synor keeps the table in sync with your files and does the **minimum work** to get there. You never compute a diff or write update logic: you change something, and Synor works out exactly what to transcribe, upsert, and delete. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a file is skipped when its content and the function's code are both unchanged, so an unchanged file never hits the transcription API again. `mount_table_target` decides what to *write* — each row is keyed by `filename`, so it upserts only the rows that actually changed and deletes rows whose source file is gone.
 
 - **A file is added** — only that file is transcribed, and its one row is inserted. The rest is untouched.
 - **A file is changed** — it is re-transcribed and its row is updated in place. Files with identical content keep their cached transcript and are left as-is.

@@ -13,8 +13,8 @@ automatically.
 | ---------------- | ---------------------------------------- | ----------------------------------------- |
 | Source           | `localfs.walk_dir` (`**/*.pdf`)          | `synor::fs::walk` (`**/*.pdf`)        |
 | PDF → markdown   | `docling` (PDF → Markdown, ML pipeline)  | `lopdf` text extraction                   |
-| Per-file compute | `@syn.fn(memo=True) process_file`       | `#[synor::function(memo)] convert_pdf` |
-| Output           | `localfs.declare_file` (`<stem>.md`)     | `DirTarget::declare_file` (`<stem>.md`)   |
+| Per-file compute | `@syn.task(cache=True) process_file`       | `#[synor::function(memo)] convert_pdf` |
+| Output           | `localfs.ensure_file` (`<stem>.md`)     | `DirTarget::ensure_file` (`<stem>.md`)   |
 
 **Deviation from Python:** Python uses `docling` (a heavy ML document-understanding
 pipeline) for high-fidelity PDF→Markdown. There is no Rust equivalent, so this

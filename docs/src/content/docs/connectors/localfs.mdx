@@ -3,8 +3,8 @@ title: "*Local filesystem* connector"
 toc_max_heading_level: 4
 description: >
   Walk local directories with path-matcher filtering, watch for changes in live
-  mode via watchfiles, and write outputs with declare_file() and
-  declare_dir_target() — with memo-stable FilePath across project moves.
+  mode via watchfiles, and write outputs with ensure_file() and
+  ensure_dir_target() — with memo-stable FilePath across project moves.
 ---
 The `localfs` connector provides utilities for reading files from and writing files to the local file system.
 
@@ -18,7 +18,7 @@ A key feature of the `localfs` connector is [**stable memoization**](../programm
 
 ### Using ContextKey for stable base directories
 
-Define a `ContextKey[pathlib.Path]` with a stable string identifier. Provide the actual path in your app's lifespan, then pass the key directly to `walk_dir()`, `declare_dir_target()`, and related functions.
+Define a `ContextKey[pathlib.Path]` with a stable string identifier. Provide the actual path in your app's lifespan, then pass the key directly to `walk_dir()`, `ensure_dir_target()`, and related functions.
 
 ```python
 import pathlib
@@ -28,7 +28,7 @@ from synor.connectors import localfs
 # Define a stable key (the string "source_dir" is the stable memo identifier)
 SOURCE_DIR = syn.ContextKey[pathlib.Path]("source_dir")
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     async for file in localfs.walk_dir(SOURCE_DIR, recursive=True):
         # file.file_path has a stable memo key based on "source_dir"
@@ -82,7 +82,7 @@ def walk_dir(
 **Parameters:**
 
 - `path` — The root directory path to walk through. Can be a `FilePath`, a `pathlib.Path`, or a `ContextKey[Path]` (equivalent to `FilePath(base_dir=path)`).
-- `live` — If `True`, `items()` returns a [`LiveMapView`](../advanced_topics/live_component#livemapfeed-and-livemapview) that supports live file watching via `mount_each()`.
+- `live` — If `True`, `items()` returns a [`LiveMapView`](../advanced_topics/live_component#livemapfeed-and-livemapview) that supports live file watching via `spawn_each()`.
 - `recursive` — If `True`, recursively walk subdirectories.
 - `path_matcher` — Optional filter for files and directories. See [PatternFilePathMatcher](../common_resources/data_types#patternfilepathmatcher).
 
@@ -129,7 +129,7 @@ async for file in localfs.walk_dir("/path/to/project", recursive=True, path_matc
 
 ### Live file watching
 
-When `live=True`, `items()` returns a [`LiveMapView`](../advanced_topics/live_component#livemapfeed-and-livemapview) instead of a plain `AsyncIterable`. Combined with [`mount_each()`](../programming_guide/processing_component#mount_each), this enables automatic incremental file watching — new, modified, and deleted files are processed without a full rescan:
+When `live=True`, `items()` returns a [`LiveMapView`](../advanced_topics/live_component#livemapfeed-and-livemapview) instead of a plain `AsyncIterable`. Combined with [`spawn_each()`](../programming_guide/processing_component#spawn_each), this enables automatic incremental file watching — new, modified, and deleted files are processed without a full rescan:
 
 ```python
 files = localfs.walk_dir(
@@ -137,7 +137,7 @@ files = localfs.walk_dir(
     path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     live=True,
 )
-await syn.mount_each(process_file, files.items(), target)
+await syn.spawn_each(process_file, files.items(), target)
 ```
 
 See [Live Mode](../programming_guide/live_mode) for how this works and how to enable it on the app.
@@ -152,18 +152,18 @@ from synor.resources.file import FileLike, PatternFilePathMatcher
 
 SOURCE_DIR = syn.ContextKey[pathlib.Path]("source_dir")
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     matcher = PatternFilePathMatcher(included_patterns=["**/*.md"])
 
     async for file in localfs.walk_dir(SOURCE_DIR, recursive=True, path_matcher=matcher):
-        await syn.mount(
-            syn.component_subpath("file", str(file.file_path.path)),
+        await syn.spawn(
+            syn.unit_path("file", str(file.file_path.path)),
             process_file,
             file,
         )
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike) -> None:
     text = await file.read_text()
     # ... process the file content ...
@@ -173,13 +173,13 @@ async def process_file(file: FileLike) -> None:
 
 The `localfs` connector provides target state APIs for writing files. Synor tracks what files should exist and automatically handles creation, updates, and deletion.
 
-### declare_file
+### ensure_file
 
 Declare a single file target. This is the simplest way to write a file.
 
 ```python
-@syn.fn
-def declare_file(
+@syn.task
+def ensure_file(
     path: FilePath | Path | ContextKey[Path],
     content: bytes | str,
     *,
@@ -198,23 +198,23 @@ def declare_file(
 ```python
 OUTPUT_DIR = syn.ContextKey[pathlib.Path]("output_dir")
 
-@syn.fn
+@syn.task
 def app_main() -> None:
-    syn.mount(
-        localfs.declare_file,
+    syn.spawn(
+        localfs.ensure_file,
         localfs.FilePath("readme.txt", base_dir=OUTPUT_DIR),
         content="Hello, world!",
         create_parent_dirs=True,
     )
 ```
 
-### declare_dir_target
+### ensure_dir_target
 
 Declare a directory target for writing multiple files. Returns a `DirTarget` for declaring files within.
 
 ```python
-@syn.fn
-def declare_dir_target(
+@syn.task
+def ensure_dir_target(
     path: FilePath | Path | ContextKey[Path],
     *,
     create_parent_dirs: bool = True,
@@ -226,14 +226,14 @@ def declare_dir_target(
 - `path` — The filesystem path for the directory. Can be a `FilePath`, a `pathlib.Path`, or a `ContextKey[Path]`.
 - `create_parent_dirs` — If `True`, create parent directories if they don't exist. Defaults to `True`.
 
-**Returns:** A pending `DirTarget`. Use `await syn.mount_target(...)` or the convenience wrapper `await localfs.mount_dir_target(path)` to resolve.
+**Returns:** A pending `DirTarget`. Use `await syn.attach_target(...)` or the convenience wrapper `await localfs.mount_dir_target(path)` to resolve.
 
-### DirTarget.declare_file
+### DirTarget.ensure_file
 
 Declares a file to be written within the directory.
 
 ```python
-def declare_file(
+def ensure_file(
     self,
     filename: str | PurePath,
     content: bytes | str,
@@ -248,12 +248,12 @@ def declare_file(
 - `content` — The file content (bytes or str).
 - `create_parent_dirs` — If `True`, create parent directories within the target directory.
 
-### DirTarget.declare_dir_target
+### DirTarget.ensure_dir_target
 
 Declares a subdirectory target within the directory.
 
 ```python
-def declare_dir_target(
+def ensure_dir_target(
     self,
     path: str | PurePath,
     *,
@@ -279,21 +279,21 @@ from synor.resources.file import FileLike, PatternFilePathMatcher
 SOURCE_DIR = syn.ContextKey[pathlib.Path]("source_dir")
 OUTPUT_DIR = syn.ContextKey[pathlib.Path]("output_dir")
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Declare output directory target using context key
     target = await localfs.mount_dir_target(OUTPUT_DIR)
 
     # Process files and write outputs
-    await syn.mount_each(process_file, localfs.walk_dir(SOURCE_DIR, recursive=True).items(), target)
+    await syn.spawn_each(process_file, localfs.walk_dir(SOURCE_DIR, recursive=True).items(), target)
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: localfs.DirTarget) -> None:
     # Transform the file
     content = (await file.read_text()).upper()
 
     # Write to output with same relative path
-    target.declare_file(
+    target.ensure_file(
         filename=file.file_path.path,
         content=content,
         create_parent_dirs=True,

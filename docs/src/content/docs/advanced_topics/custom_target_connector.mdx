@@ -6,7 +6,7 @@ description: >
   targets, attachment providers, and idempotency best practices.
 toc_max_heading_level: 4
 ---
-A **custom target connector** is the mechanism that connects Synor's declarative target state system to external systems. When you call methods like `dir_target.declare_file()` or `table_target.declare_row()`, a target connector handles the actual synchronization — determining what changed and applying those changes to the external system.
+A **custom target connector** is the mechanism that connects Synor's declarative target state system to external systems. When you call methods like `dir_target.ensure_file()` or `table_target.ensure_row()`, a target connector handles the actual synchronization — determining what changed and applying those changes to the external system.
 
 ## When to create a custom target connector
 
@@ -33,7 +33,7 @@ class TargetHandler(Protocol[ValueT, TrackingRecordT, OptChildHandlerT]):
     def reconcile(
         self,
         key: StableKey,
-        desired_target_state: ValueT | NonExistenceType,
+        desired_target_state: ValueT | AbsentType,
         prev_possible_records: Collection[TrackingRecordT],
         prev_may_be_missing: bool,
         /,
@@ -54,7 +54,7 @@ class TargetHandler(Protocol[ValueT, TrackingRecordT, OptChildHandlerT]):
 **Parameters:**
 
 - `key`: `StableKey` — a union of `None | bool | int | str | bytes | uuid.UUID | Symbol | tuple[StableKey, ...]`
-- `desired_target_state`: What the user declared, or `NON_EXISTENCE` if no longer declared
+- `desired_target_state`: What the user declared, or `ABSENT` if no longer declared
 - `prev_possible_records`: Tracking records from previous runs (may have multiple due to interrupted updates)
 - `prev_may_be_missing`: If `True`, the target state might not exist in the external system
 
@@ -157,7 +157,7 @@ def apply_actions(
 class TargetReconcileOutput(Generic[ActionT, TrackingRecordT, OptChildHandlerT], NamedTuple):
     action: ActionT                                    # What to do
     sink: TargetActionSink[ActionT, OptChildHandlerT]  # How to execute it
-    tracking_record: TrackingRecordT | NonExistenceType  # What to remember
+    tracking_record: TrackingRecordT | AbsentType  # What to remember
     child_invalidation: Literal["destructive", "lossy"] | None = None  # For container targets
 ```
 
@@ -172,7 +172,7 @@ A `TargetStateProvider` is a factory that creates `TargetState` objects. You don
 provider = syn.register_root_target_states_provider("my.target", handler)
 
 # Or from declaring a parent target state
-child_provider = syn.declare_target_state_with_child(parent_target_state)
+child_provider = syn.ensure_target_state_with_child(parent_target_state)
 
 # Or from an attachment on a resolved child provider (see "Implementing attachment providers")
 att_provider = child_provider.attachment("vector_index")
@@ -187,7 +187,7 @@ A `TargetState` wraps a key and spec. You create these using the provider, then 
 target_state = provider.target_state(key, spec)
 
 # Declare it for reconciliation
-syn.declare_target_state(target_state)
+syn.ensure_target_state(target_state)
 ```
 
 ## Implementing root target states
@@ -200,9 +200,9 @@ Understanding what happens at runtime:
 
 1. **Registration**: You define a `TargetHandler` and call `register_root_target_states_provider()`. Synor returns a `TargetStateProvider` — a factory for creating target states associated with your handler.
 
-2. **Declaration**: During execution, user code calls `provider.target_state(key, spec)` to create `TargetState` objects, then `declare_target_state()` to declare them. Synor collects all declared target states.
+2. **Declaration**: During execution, user code calls `provider.target_state(key, spec)` to create `TargetState` objects, then `ensure_target_state()` to declare them. Synor collects all declared target states.
 
-3. **Reconciliation**: When the processing unit finishes, Synor calls your handler's `reconcile()` method for each target state. For declared target states, `desired_target_state` contains the spec; for previously declared but now missing states, `desired_target_state` is `NON_EXISTENCE` (triggering cleanup). Your `reconcile()` compares the desired state with previous records and returns `TargetReconcileOutput` if an action is needed, or `None` if no changes are required.
+3. **Reconciliation**: When the processing unit finishes, Synor calls your handler's `reconcile()` method for each target state. For declared target states, `desired_target_state` contains the spec; for previously declared but now missing states, `desired_target_state` is `ABSENT` (triggering cleanup). Your `reconcile()` compares the desired state with previous records and returns `TargetReconcileOutput` if an action is needed, or `None` if no changes are required.
 
 4. **Action Execution**: Synor batches actions by their `TargetActionSink` and executes them. The sink applies changes to the external system (database writes, file operations, API calls, etc.).
 
@@ -269,19 +269,19 @@ class _RowHandler(syn.TargetHandler[_RowSpec, _RowTrackingRecord]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_target_state: _RowSpec | syn.NonExistenceType,
+        desired_target_state: _RowSpec | syn.AbsentType,
         prev_possible_records: Collection[_RowTrackingRecord],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_RowAction, _RowTrackingRecord] | None:
         # Handle deletion
-        if syn.is_non_existence(desired_target_state):
+        if syn.is_absent(desired_target_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None  # Nothing to delete
             return syn.TargetReconcileOutput(
                 action=_RowAction(key=key, data=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         # Handle upsert
@@ -322,10 +322,10 @@ class TableTarget:
     def __init__(self, provider: syn.TargetStateProvider[_RowSpec, None]):
         self._provider = provider
 
-    def declare_row(self, *, row: dict[str, Any], key: tuple[str, ...]) -> None:
+    def ensure_row(self, *, row: dict[str, Any], key: tuple[str, ...]) -> None:
         spec = _RowSpec(data=row)
         target_state = self._provider.target_state(key, spec)
-        syn.declare_target_state(target_state)
+        syn.ensure_target_state(target_state)
 ```
 
 ## Implementing container targets
@@ -338,7 +338,7 @@ For targets **nested inside another target** (e.g., files inside a directory), t
 
 For root targets, you call `register_root_target_states_provider()` and immediately get a provider with your handler. For non-root targets, the handler comes from the **parent's sink execution**:
 
-1. **Declaration**: Call `declare_target_state_with_child(parent_ts)` — returns an **unresolved** child provider immediately
+1. **Declaration**: Call `ensure_target_state_with_child(parent_ts)` — returns an **unresolved** child provider immediately
 2. **Resolution**: When the parent reconciles and its sink executes, the sink returns `ChildTargetDef(handler=...)`. Synor resolves the child provider with this handler.
 3. **Usage**: The child provider can now create child target states, which follow the same reconciliation → execution → tracking flow as root targets.
 
@@ -419,7 +419,7 @@ def _apply_dir_actions(
 
 ### Step 3: Create user-facing API
 
-The user-facing API uses `declare_target_state_with_child()` and exposes methods for declaring children:
+The user-facing API uses `ensure_target_state_with_child()` and exposes methods for declaring children:
 
 ```python
 class DirTarget:
@@ -428,24 +428,24 @@ class DirTarget:
     def __init__(self, provider: syn.TargetStateProvider[_EntrySpec, None]):
         self._provider = provider
 
-    def declare_file(self, filename: str, content: bytes) -> None:
+    def ensure_file(self, filename: str, content: bytes) -> None:
         spec = _EntrySpec(content=content)
         target_state = cast(
             syn.TargetState[None],
             self._provider.target_state(filename, spec),
         )
-        syn.declare_target_state(target_state)
+        syn.ensure_target_state(target_state)
 
 
-@syn.fn
-def declare_dir_target(path: pathlib.Path) -> DirTarget:
+@syn.task
+def ensure_dir_target(path: pathlib.Path) -> DirTarget:
     """Declare a directory target and return an API for declaring files."""
     parent_ts = _root_provider.target_state(
         key=str(path),
         value=_DirSpec(),
     )
     # Child provider is pending until parent sink runs
-    child_provider = syn.declare_target_state_with_child(parent_ts)
+    child_provider = syn.ensure_target_state_with_child(parent_ts)
     return DirTarget(child_provider)
 ```
 
@@ -550,14 +550,14 @@ class TableTarget:
         self._provider = provider
         self._table_schema = table_schema
 
-    def declare_row(self, *, row):
+    def ensure_row(self, *, row):
         # Regular child target state
-        syn.declare_target_state(self._provider.target_state(pk_values, row_dict))
+        syn.ensure_target_state(self._provider.target_state(pk_values, row_dict))
 
     def declare_vector_index(self, *, name, column, metric="cosine", method="ivfflat"):
         spec = _VectorIndexSpec(column=column, metric=metric, method=method)
         att_provider = self._provider.attachment("vector_index")
-        syn.declare_target_state(att_provider.target_state(name, spec))
+        syn.ensure_target_state(att_provider.target_state(name, spec))
 ```
 
 :::tip[Tracking records for teardown]
@@ -710,20 +710,20 @@ class _FileHandler(syn.TargetHandler[_FileContent, _FileTrackingRecord]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_target_state: _FileContent | syn.NonExistenceType,
+        desired_target_state: _FileContent | syn.AbsentType,
         prev_possible_records: Collection[_FileTrackingRecord],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_FileAction, _FileTrackingRecord] | None:
         path = self._base_path / key
 
-        if syn.is_non_existence(desired_target_state):
+        if syn.is_absent(desired_target_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_FileAction(path=path, content=None),
                 sink=_file_sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_bytes(desired_target_state)

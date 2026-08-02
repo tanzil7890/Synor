@@ -54,6 +54,6 @@ This example demonstrates:
 | `#[synor::function(memo)]` | `extract_file_info` — LLM call cached per file fingerprint |
 | `#[synor::function(memo)]` | `aggregate_project_info` — LLM call cached until any file summary changes |
 | `#[synor::function]` | `generate_markdown` — pure transform, no caching needed |
-| `ctx.scope(...)` | Mirror Python's per-project `syn.mount(...)` component |
-| `ctx.mount_each(...)` | Process all files concurrently within each project |
+| `ctx.scope(...)` | Mirror Python's per-project `syn.spawn(...)` component |
+| `ctx.spawn_each(...)` | Process all files concurrently within each project |
 | `OnceLock<LlmClient>` | Access a process-wide shared LLM client |

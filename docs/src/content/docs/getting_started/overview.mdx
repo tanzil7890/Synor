@@ -38,17 +38,17 @@ Synor uses ordinary Python instead of a separate graph or configuration
 language:
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
     record = summarize(await file.read_text())
-    localfs.declare_file(
+    localfs.ensure_file(
         catalog_dir / f"{file.file_path.path.stem}.json",
         json.dumps(record),
         create_parent_dirs=True,
     )
 ```
 
-The function is reusable work. `declare_file` records the outcome it owns.
+The function is reusable work. `ensure_file` records the outcome it owns.
 Mounting one function per keyed input gives every work unit a durable identity.
 
 ## Where to begin

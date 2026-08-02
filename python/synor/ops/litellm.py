@@ -260,14 +260,14 @@ class LiteLLMEmbedder(_schema.VectorSchemaProvider):
             self._dim = len(embedding)
             return self._dim
 
-    @syn.fn.as_async(batching=True, max_batch_size=64)  # type: ignore[arg-type]
+    @syn.task.as_async(batching=True, max_batch_size=64)  # type: ignore[arg-type]
     async def _embed(
         self,
         texts: list[str],
         input_type: str | None = None,
     ) -> list[_NDArray[_np.float32]]:
         """Batched embedding. Concurrent single-text calls into :meth:`embed`
-        are grouped by the ``@syn.fn.as_async(batching=True)`` decorator;
+        are grouped by the ``@syn.task.as_async(batching=True)`` decorator;
         this method is the per-batch body invoked by the decorator.
 
         Args:
@@ -302,7 +302,7 @@ class LiteLLMEmbedder(_schema.VectorSchemaProvider):
             _np.array(item["embedding"], dtype=_np.float32) for item in response.data
         ]
 
-    @syn.fn(memo=True, version=1, logic_tracking="self")
+    @syn.task(cache=True, version=1, logic_tracking="self")
     async def embed(
         self,
         text: str,
@@ -324,7 +324,7 @@ class LiteLLMEmbedder(_schema.VectorSchemaProvider):
         result: _NDArray[_np.float32] = await self._embed(text, input_type)  # type: ignore[arg-type]
         return result
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     async def __synor_vector_schema__(self) -> _schema.VectorSchema:
         """Return vector schema information for this model.
 
@@ -363,7 +363,7 @@ class LiteLLMTranscriber:
         self._model = model
         self._kwargs = kwargs
 
-    @syn.fn(memo=True, version=1, logic_tracking="self")
+    @syn.task(cache=True, version=1, logic_tracking="self")
     async def transcribe(self, file: _file.FileLike[_Any], **kwargs: _Any) -> str:
         """Transcribe audio content from a ``FileLike`` object into text.
 

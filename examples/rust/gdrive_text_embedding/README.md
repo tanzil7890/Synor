@@ -34,7 +34,7 @@ Query:
 cargo run -- query "what is self-attention?"
 ```
 
-The Rust source currently uses Drive file id as the `mount_each` key to avoid
+The Rust source currently uses Drive file id as the `spawn_each` key to avoid
 duplicate-name collisions. The stored `filename` is the path relative to the
 configured Drive root folder, matching the Python example's path-oriented
 metadata.

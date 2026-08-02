@@ -11,10 +11,10 @@ The skill lives in the `skills/synor/` directory of the main repo.
 
 ## Why a skill?
 
-Synor v1 is a fundamental redesign from v0. Without context, an LLM trained on older snapshots tends to hallucinate the wrong API (the v0 flow-builder DSL, deprecated decorators, missing `@syn.fn`, unstable component paths). The skill gives the agent a single concise reference covering:
+Synor v1 is a fundamental redesign from v0. Without context, an LLM trained on older snapshots tends to hallucinate the wrong API (the v0 flow-builder DSL, deprecated decorators, missing `@syn.task`, unstable component paths). The skill gives the agent a single concise reference covering:
 
 - **Mental model** — observe change, assign stable work ownership, and reconcile declared outcomes through [processing components](../programming_guide/processing_component).
-- **Core APIs** — `@syn.fn`, `mount` / `use_mount` / `mount_each`, `ContextKey`, `@syn.lifespan`, target state declarations.
+- **Core APIs** — `@syn.task`, `mount` / `call` / `spawn_each`, `ContextKey`, `@syn.lifespan`, target state declarations.
 - **Common patterns** — file transformation, vector embedding, LLM extraction, knowledge graphs.
 - **Connectors** — PostgreSQL, SQLite, LanceDB, Qdrant, SurrealDB, Apache Doris, LocalFS, S3, Kafka, Google Drive.
 - **Best practices** — memoization, stable component paths, vector schema with `Annotated[NDArray, KEY]`.

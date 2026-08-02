@@ -23,7 +23,7 @@ Products whose *complementary* taxonomy matches another product's *is-a* taxonom
 Because taxonomy labels are shared across products, the pipeline runs in two phases — read it top-to-bottom in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)  # caches each extraction by content — re-tag only changed products
+@syn.task(cache=True)  # caches each extraction by content — re-tag only changed products
 async def extract_taxonomy(detail: str) -> ProductTaxonomyInfo:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -32,7 +32,7 @@ async def extract_taxonomy(detail: str) -> ProductTaxonomyInfo:
     )
     return ProductTaxonomyInfo.model_validate(result.model_dump())
 
-@syn.fn(memo=True)   # Phase 1 — per product: declare the node, extract, carry labels forward
+@syn.task(cache=True)   # Phase 1 — per product: declare the node, extract, carry labels forward
 async def process_file(file: FileLike, product_table: neo4j.TableTarget[Product]) -> ProductTaxonomies:
     raw = json.loads(await file.read_text())
     product_id = file.file_path.path.name.removesuffix(".json")
@@ -40,7 +40,7 @@ async def process_file(file: FileLike, product_table: neo4j.TableTarget[Product]
     info = await extract_taxonomy(PRODUCT_TEMPLATE.render(**raw))
     return ProductTaxonomies(product_id, [t.name for t in info.taxonomies], ...)
 
-@syn.fn              # Phase 2 — one pass owns the shared Taxonomy nodes + both edge types
+@syn.task              # Phase 2 — one pass owns the shared Taxonomy nodes + both edge types
 async def build_graph(products, taxonomy_table, product_taxonomy_rel, complementary_rel) -> None:
     for value in {t for p in products for t in (*p.taxonomies, *p.complementary)}:
         taxonomy_table.declare_record(row=Taxonomy(value=value))
@@ -52,7 +52,7 @@ async def build_graph(products, taxonomy_table, product_taxonomy_rel, complement
 ## Why this example is useful
 
 - **Shared nodes, done right.** Taxonomy labels are deduplicated and owned by a single graph pass, so `gel pen` is one node every product can point at — not a copy per product.
-- **Incremental by default.** `@syn.fn(memo=True)` caches each LLM extraction by content; edit one product and only that product re-extracts, then the graph diffs — adding new nodes/edges and removing ones no longer supported anywhere.
+- **Incremental by default.** `@syn.task(cache=True)` caches each LLM extraction by content; edit one product and only that product re-extracts, then the graph diffs — adding new nodes/edges and removing ones no longer supported anywhere.
 - **The graph IS the recommender.** No separate model. One Cypher query walks *complementary → is-a* edges to surface what to cross-sell.
 - **Plain Python, your stack.** Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/) — swap `LLM_MODEL` for any provider (OpenAI, Ollama, …). No DSL.
 - **Honest cache busting.** `LLM_MODEL` is declared with `detect_change=True`, so swapping the model re-extracts everything against it with no cache to clear by hand.

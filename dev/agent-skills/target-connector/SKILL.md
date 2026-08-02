@@ -31,8 +31,8 @@ Use this skill when creating a new target connector for any external system (dat
 | `TargetStateProvider` | Factory that creates `TargetState` objects from your handler |
 | `TargetState` | Wrapper that holds the key and spec |
 | `register_root_target_states_provider()` | Registers a root handler and returns a provider |
-| `declare_target_state()` | Declares a leaf target state for reconciliation |
-| `declare_target_state_with_child()` | Declares a target state and returns a child provider |
+| `ensure_target_state()` | Declares a leaf target state for reconciliation |
+| `ensure_target_state_with_child()` | Declares a target state and returns a child provider |
 
 ## Implementation Workflow
 
@@ -49,7 +49,7 @@ Use this skill when creating a new target connector for any external system (dat
 For targets nested inside another target (e.g., files inside a directory):
 
 1. Parent sink returns `ChildTargetDef(handler=...)` when executed
-2. Call `declare_target_state_with_child(parent_ts)` to get an unresolved child provider
+2. Call `ensure_target_state_with_child(parent_ts)` to get an unresolved child provider
 3. Synor resolves the child provider when parent's sink executes
 
 ### Child Invalidation
@@ -97,7 +97,7 @@ class TargetHandler(Protocol[ValueT, TrackingRecordT, OptChildHandlerT]):
     def reconcile(
         self,
         key: StableKey,
-        desired_target_state: ValueT | NonExistenceType,
+        desired_target_state: ValueT | AbsentType,
         prev_possible_records: Collection[TrackingRecordT],
         prev_may_be_missing: bool,
         /,
@@ -112,7 +112,7 @@ class TargetHandler(Protocol[ValueT, TrackingRecordT, OptChildHandlerT]):
 **Parameters:**
 
 - `key`: `StableKey` — a union of `None | bool | int | str | bytes | uuid.UUID | Symbol | tuple[StableKey, ...]`
-- `desired_target_state`: What the user declared, or `NON_EXISTENCE` if no longer declared
+- `desired_target_state`: What the user declared, or `ABSENT` if no longer declared
 - `prev_possible_records`: Tracking records from previous runs (may have multiple)
 - `prev_may_be_missing`: If `True`, the target state might not exist in the external system
 
@@ -318,15 +318,15 @@ def test_insert_and_update(connector_fixture: tuple[Connection, Path]) -> None:
     synor_env.context_provider.provide(DB_KEY, conn)
 
     async def declare_target() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            connector.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            connector.ensure_table_target,
             DB_KEY,
             "test_table",
             await connector.TableSchema.from_class(RowType, primary_key=["id"]),
         )
         for row in source_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_insert", environment=synor_env),

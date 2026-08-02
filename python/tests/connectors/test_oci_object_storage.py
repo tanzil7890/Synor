@@ -1046,7 +1046,7 @@ def _declare_oci_file(oci_file: OCIFile) -> None:
 
     Stashes object_name length into the global dict target keyed by relative path.
     """
-    syn.declare_target_state(
+    syn.ensure_target_state(
         GlobalDictTarget.target_state(
             oci_file.file_path.path.as_posix(),
             len(oci_file.file_path.object_name),
@@ -1066,7 +1066,7 @@ def test_oci_walker_scan_through_real_mount_each() -> None:
 
     async def _main() -> None:
         # walker.items() returns a plain async iterable when no live_stream is set.
-        await syn.mount_each(_declare_oci_file, walker.items())  # type: ignore[call-overload]
+        await syn.spawn_each(_declare_oci_file, walker.items())  # type: ignore[call-overload]
 
     app = syn.App(
         syn.AppConfig(name="test_oci_e2e_scan", environment=_oci_e2e_env),

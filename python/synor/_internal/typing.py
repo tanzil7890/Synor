@@ -48,24 +48,24 @@ def is_not_set(obj: Any) -> TypeIs[NotSetType]:
     return obj is NOT_SET
 
 
-class NonExistenceType:
+class AbsentType:
     __slots__ = ()
-    _instance: NonExistenceType | None = None
+    _instance: AbsentType | None = None
 
-    def __new__(cls) -> NonExistenceType:
+    def __new__(cls) -> AbsentType:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
 
     def __repr__(self) -> str:
-        return "NON_EXISTENCE"
+        return "ABSENT"
 
 
-NON_EXISTENCE = NonExistenceType()
+ABSENT = AbsentType()
 
 
-def is_non_existence(obj: Any) -> TypeIs[NonExistenceType]:
-    return obj is NON_EXISTENCE
+def is_absent(obj: Any) -> TypeIs[AbsentType]:
+    return obj is ABSENT
 
 
 class MemoStateOutcome(NamedTuple):

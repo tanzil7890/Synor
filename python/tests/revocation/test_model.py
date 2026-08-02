@@ -28,7 +28,7 @@ from synor._internal.revocation_model import (
     make_receipt_id,
     transition_case,
 )
-from synor._internal.typing import NON_EXISTENCE
+from synor._internal.typing import ABSENT
 from tests import common
 
 from ._fixtures import (
@@ -44,14 +44,14 @@ _governed_item: GovernedSourceItem[str] | None = None
 _governed_calls = 0
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def _consume_governed_item(item: GovernedSourceItem[str]) -> str:
     global _governed_calls
     _governed_calls += 1
     return item.identity.evidence_digest()
 
 
-@syn.fn
+@syn.task
 def _governed_memo_app() -> None:
     if _governed_item is None:
         raise RuntimeError("test governed item is not configured")
@@ -151,7 +151,7 @@ async def test_acl_only_change_invalidates_governed_memo_state() -> None:
         event=SourceEventKind.PRESENT,
         observation_id=observation_v1,
     )
-    first = await item_v1.__synor_memo_state__(NON_EXISTENCE)
+    first = await item_v1.__synor_memo_state__(ABSENT)
     unchanged = await item_v1.__synor_memo_state__(first.state)
     item_v2 = GovernedSourceItem(
         identity=IDENTITY,

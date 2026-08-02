@@ -17,10 +17,10 @@ Unlike a one-embedding-per-image index, an image here fans out to **many** faces
 - **Detect** every face in each image (CNN detector, downscaling large images first), and crop it.
 - **Embed** each face into a 128-d vector and store one Qdrant point per face, keyed by `(filename, bounding box)`, with the source filename and box in the payload.
 
-The dlib calls are synchronous and CPU/GPU-heavy, so each is wrapped with `@syn.fn.as_async(runner=syn.GPU)`. `process_file` detects a photo's faces, then maps each through `process_face` with `syn.map`. Read it in [`main.py`](main.py):
+The dlib calls are synchronous and CPU/GPU-heavy, so each is wrapped with `@syn.task.as_async(runner=syn.GPU)`. `process_file` detects a photo's faces, then maps each through `process_face` with `syn.map`. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def process_face(face: Face, filename: str, target: qdrant.CollectionTarget) -> None:
     embedding = await embed_face(face.image)
     target.declare_point(
@@ -32,7 +32,7 @@ async def process_face(face: Face, filename: str, target: qdrant.CollectionTarge
         )
     )
 
-@syn.fn(memo=True)   # unchanged photo is never re-detected
+@syn.task(cache=True)   # unchanged photo is never re-detected
 async def process_file(file: FileLike, target: qdrant.CollectionTarget) -> None:
     faces = await extract_faces(await file.read())
     await syn.map(process_face, faces, str(file.file_path.path), target)
@@ -45,7 +45,7 @@ The collection is sized to the 128-d face vector with **Euclidean** distance —
 - **Image → many faces.** Each photo fans out to one Qdrant point per detected face with `syn.map` — the multi-face equivalent of chunking a document.
 - **Recognition without labels.** dlib's 128-d encodings put the same person close together; a Euclidean search under ~0.6 means "same person," with no tags or training.
 - **The box travels with the match.** Each point's payload carries the bounding box, so a search hit tells you *where* in the source image the face is.
-- **Incremental & self-cleaning.** `@syn.fn(memo=True)` skips unchanged photos; each image is its own processing component, so deleting a photo removes all its faces from Qdrant automatically.
+- **Incremental & self-cleaning.** `@syn.task(cache=True)` skips unchanged photos; each image is its own processing component, so deleting a photo removes all its faces from Qdrant automatically.
 - **Heavy work off the event loop.** CNN detection and embedding run on a `syn.GPU` runner; large images are downscaled for detection, then boxes are mapped back to full size.
 
 ## Run it

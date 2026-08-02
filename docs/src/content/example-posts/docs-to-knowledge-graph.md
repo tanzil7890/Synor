@@ -137,7 +137,7 @@ class RelationshipList(pydantic.BaseModel):
 Two memoized functions call the LLM — one for the summary, one for the triples:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_relationships(content: str) -> list[Triple]:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -152,7 +152,7 @@ async def extract_relationships(content: str) -> list[Triple]:
     return [Triple(r.subject, r.predicate, r.object) for r in validated.relationships]
 ```
 
-`@syn.fn(memo=True)` is what makes iteration affordable: the result is cached keyed by the document content (and the function's own code). Unchanged docs never hit the LLM again. The prompt steers extraction toward *"concepts, not code"* — salient noun-phrase subjects and objects, short verb-phrase predicates, only relationships supported by the text.
+`@syn.task(cache=True)` is what makes iteration affordable: the result is cached keyed by the document content (and the function's own code). Unchanged docs never hit the LLM again. The prompt steers extraction toward *"concepts, not code"* — salient noun-phrase subjects and objects, short verb-phrase predicates, only relationships supported by the text.
 
 ## Phase 1: per-file extraction
 
@@ -161,7 +161,7 @@ async def extract_relationships(content: str) -> list[Triple]:
 `process_file` runs once per document: extract the summary, declare the `Document` node, extract the triples, and return them for phase 2.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: localfs.File,
     document_table: neo4j.TableTarget[Document],
@@ -184,8 +184,8 @@ Each file runs as its own processing component, mounted in `app_main` and keyed 
 file_coros = []
 async for path_key, file in files.items():
     file_coros.append(
-        syn.use_mount(
-            syn.component_subpath("file", path_key),
+        syn.call(
+            syn.unit_path("file", path_key),
             process_file,
             file,
             document_table,
@@ -194,7 +194,7 @@ async for path_key, file in files.items():
 docs: list[DocTriples] = list(await asyncio.gather(*file_coros))
 ```
 
-Why a component per file? Ownership. The component at `("file", path_key)` owns that document's `Document` node — if the file disappears, so does the component, and Synor deletes its node (and the `MENTION` edges pointing from it) automatically. `syn.use_mount` returns each file's triples, and `asyncio.gather` runs all files concurrently.
+Why a component per file? Ownership. The component at `("file", path_key)` owns that document's `Document` node — if the file disappears, so does the component, and Synor deletes its node (and the `MENTION` edges pointing from it) automatically. `syn.call` returns each file's triples, and `asyncio.gather` runs all files concurrently.
 
 ## Phase 2: build the concept graph
 
@@ -203,7 +203,7 @@ Why a component per file? Ownership. The component at `("file", path_key)` owns 
 A single component takes every file's triples and declares the cross-document parts of the graph: deduplicated `Entity` nodes and the two edge types.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def build_graph(
     docs: list[DocTriples],
     entity_table: neo4j.TableTarget[Entity],
@@ -246,7 +246,7 @@ This is plain Python doing set-dedup in memory — no framework abstractions. Th
 `app_main` mounts the targets and runs the two phases. Node tables come first, because relation targets are declared *between* two node tables — that's how the connector knows each edge's endpoint labels and keys:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     document_table = await neo4j.mount_table_target(
         KG_DB,
@@ -279,8 +279,8 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md", "**/*.mdx"]),
     )
     # ... phase 1 fan-out (above), then:
-    await syn.mount(
-        syn.component_subpath("build_graph"),
+    await syn.spawn(
+        syn.unit_path("build_graph"),
         build_graph,
         docs,
         entity_table,

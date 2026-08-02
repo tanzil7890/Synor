@@ -36,7 +36,7 @@ synor update --live my_app.py
 synor update -L my_app.py
 ```
 
-The `live` flag propagates top-down through the component tree — both `syn.mount()` and `syn.use_mount()` inherit `live` from the parent, so children are live when the app is live.
+The `live` flag propagates top-down through the component tree — both `syn.spawn()` and `syn.call()` inherit `live` from the parent, so children are live when the app is live.
 
 Without `live=True` on the app, the app runs in catch-up mode — everything completes after the initial scan, even if a source supports live watching.
 
@@ -53,7 +53,7 @@ Source connectors can provide live capabilities via two [protocols](../advanced_
 - **`LiveMapView`** — the source has scannable current state (e.g., a directory or database table). It does a full scan first, then watches for changes. Example: [`localfs.walk_dir(live=True).items()`](../connectors/localfs#live-file-watching).
 - **`LiveMapFeed`** — the source only streams changes, with no snapshot to scan (e.g., a Kafka consumer). All data arrives via the change stream. Example: [`kafka.topic_as_map()`](../connectors/kafka#as-source).
 
-When `mount_each()` receives either, it automatically creates a `LiveComponent` internally that:
+When `spawn_each()` receives either, it automatically creates a `LiveComponent` internally that:
 
 1. **Scans current state** (if available) — iterates all items and mounts a processing component for each
 2. **Signals readiness** — the initial scan is complete (or the stream has caught up), target states are synced
@@ -63,7 +63,7 @@ When `mount_each()` receives either, it automatically creates a `LiveComponent` 
 
 Synor handles change detection, memoization, and target state reconciliation the same way as in catch-up mode.
 
-Without live support on the source, `mount_each()` falls back to catch-up behavior — a one-time iteration over items and that's it.
+Without live support on the source, `spawn_each()` falls back to catch-up behavior — a one-time iteration over items and that's it.
 
 ### Periodic refresh with `syn.auto_refresh`
 
@@ -76,11 +76,11 @@ import synor as syn
 async def sync_users(db, target) -> None:
     rows = await db.fetch_all_users()
     for row in rows:
-        target.declare_row(row=UserRow(...))
+        target.ensure_row(row=UserRow(...))
 
-@syn.fn
+@syn.task
 async def app_main(db, target) -> None:
-    await syn.mount(
+    await syn.spawn(
         syn.auto_refresh(sync_users, interval=datetime.timedelta(minutes=5)),
         db, target,
     )
@@ -95,7 +95,7 @@ app.update_blocking(live=True)
 
 ### Decoupling stages with an in-memory `LiveMap`
 
-When one part of your pipeline produces keyed data and another consumes it — without going through an external system — put an in-memory [`LiveMap`](../common_resources/live_map) between them. Producers declare `(key, value)` entries; the consumer reads it as a `LiveMapView` via `mount_each`, reacting to adds, updates, and deletes just like a live source.
+When one part of your pipeline produces keyed data and another consumes it — without going through an external system — put an in-memory [`LiveMap`](../common_resources/live_map) between them. Producers declare `(key, value)` entries; the consumer reads it as a `LiveMapView` via `spawn_each`, reacting to adds, updates, and deletes just like a live source.
 
 ## Examples
 
@@ -104,14 +104,14 @@ When one part of your pipeline produces keyed data and another consumes it — w
 The [`localfs`](../connectors/localfs) connector supports live mode via `walk_dir(..., live=True)`, which watches for file system changes using `watchfiles`:
 
 ```python
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir, recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # items() returns a LiveMapView
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 
 app = syn.App(syn.AppConfig(name="FilesTransform"), app_main, sourcedir=..., outdir=...)
 app.update_blocking(live=True)
@@ -129,7 +129,7 @@ The [`kafka`](../connectors/kafka) connector treats a topic as a live keyed map 
 from confluent_kafka.aio import AIOConsumer
 from synor.connectors import kafka
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     consumer = AIOConsumer({
         "bootstrap.servers": "localhost:9092",
@@ -137,7 +137,7 @@ async def app_main() -> None:
         "enable.auto.commit": "false",
     })
     items = kafka.topic_as_map(consumer, ["my-topic"])
-    await syn.mount_each(process_message, items)
+    await syn.spawn_each(process_message, items)
 
 app = syn.App(syn.AppConfig(name="KafkaConsumer"), app_main)
 app.update_blocking(live=True)
@@ -148,8 +148,8 @@ app.update_blocking(live=True)
 The abstractions behind live mode, from most general to most specific:
 
 - **[LiveComponent](../advanced_topics/live_component)** — the underlying protocol for components that react to changes incrementally. Most flexible — full control over the lifecycle.
-- **[LiveMapFeed / LiveMapView](../advanced_topics/live_component#livemapfeed-and-livemapview)** — represents a changing collection of keyed items. `mount_each()` uses it to construct a `LiveComponent` automatically. Connector authors implement this to add live support.
+- **[LiveMapFeed / LiveMapView](../advanced_topics/live_component#livemapfeed-and-livemapview)** — represents a changing collection of keyed items. `spawn_each()` uses it to construct a `LiveComponent` automatically. Connector authors implement this to add live support.
 - **[`syn.auto_refresh`](../advanced_topics/live_component#example-periodic-refresh-with-synauto_refresh)** — wraps a regular processor function as a `LiveComponent` that re-runs on a fixed interval. Use when there's no change-event source.
-- **Source connectors** — provide `LiveMapView` (e.g., [`localfs`](../connectors/localfs)) or `LiveMapFeed` (e.g., [`kafka`](../connectors/kafka)) from their source APIs. Users just pass the result to `mount_each()`.
+- **Source connectors** — provide `LiveMapView` (e.g., [`localfs`](../connectors/localfs)) or `LiveMapFeed` (e.g., [`kafka`](../connectors/kafka)) from their source APIs. Users just pass the result to `spawn_each()`.
 
 For custom change feeds, fine-grained lifecycle control, or implementing live map protocols on your own connector, see [Live Components](../advanced_topics/live_component).

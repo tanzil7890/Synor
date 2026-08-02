@@ -30,7 +30,7 @@ _converter = DocumentConverter(
 )
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 def process_file(
     file: localfs.File,
     outdir: pathlib.Path,
@@ -41,17 +41,17 @@ def process_file(
     ).document.export_to_markdown()
     # Replace .pdf extension with .md
     outname = file.file_path.path.stem + ".md"
-    localfs.declare_file(outdir / outname, markdown, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, markdown, create_parent_dirs=True)
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir,
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 
 
 app = syn.App(

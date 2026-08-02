@@ -2,7 +2,7 @@
 title: "*Postgres* connector"
 toc_max_heading_level: 4
 description: >
-  Read Postgres tables via PgTableSource and write with declare_table_target() —
+  Read Postgres tables via PgTableSource and write with ensure_table_target() —
   automatic schema inference, pgvector index management (ivfflat / hnsw), custom
   type overrides, and SQL attachments for triggers and indexes.
 ---
@@ -127,7 +127,7 @@ class SourceProduct:
     name: str
     description: str
 
-@syn.fn
+@syn.task
 async def app_main(pool: asyncpg.Pool) -> None:
     source = postgres.PgTableSource(
         pool,
@@ -136,8 +136,8 @@ async def app_main(pool: asyncpg.Pool) -> None:
     )
 
     async for product in source.fetch_rows():
-        syn.mount(
-            syn.component_subpath("product", product.product_id),
+        syn.spawn(
+            syn.unit_path("product", product.product_id),
             process_product,
             product,
         )
@@ -175,7 +175,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 Declares a table as a target state. Returns a `TableTarget` for declaring rows.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[asyncpg.Pool],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -200,7 +200,7 @@ def declare_table_target(
 Once a `TableTarget` is resolved, declare rows to be upserted:
 
 ```python
-def TableTarget.declare_row(
+def TableTarget.ensure_row(
     self,
     *,
     row: RowT,
@@ -429,7 +429,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
         builder.provide(PG_DB, pool)
         yield
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Declare table target state
     table = await postgres.mount_table_target(
@@ -443,7 +443,7 @@ async def app_main() -> None:
 
     # Declare rows
     for product in products:
-        table.declare_row(row=product)
+        table.ensure_row(row=product)
 
     # Declare a vector index on the embedding column
     table.declare_vector_index(

@@ -14,7 +14,7 @@ CSV is the format that shows up everywhere and gets respect nowhere — BI expor
 The Kafka topic is just a target you declare on, the same way you'd declare a Postgres table. `process_csv` runs once per file: parse rows with `csv.DictReader`, then declare each row as a target state — key from the first column, value the JSON-encoded row. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_csv(file: FileLike, topic_target: kafka.KafkaTopicTarget) -> None:
     reader = csv.DictReader(io.StringIO(await file.read_text()))
     headers = reader.fieldnames
@@ -24,9 +24,9 @@ async def process_csv(file: FileLike, topic_target: kafka.KafkaTopicTarget) -> N
     for row in reader:
         key_value = row.get(first_col)
         if key_value is not None:
-            topic_target.declare_target_state(key=key_value, value=json.dumps(row))
+            topic_target.ensure_target_state(key=key_value, value=json.dumps(row))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     topic_target = await kafka.mount_kafka_topic_target(KAFKA_PRODUCER, KAFKA_TOPIC)
     files = localfs.walk_dir(
@@ -34,10 +34,10 @@ async def app_main() -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.csv"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_csv, files.items(), topic_target)
+    await syn.spawn_each(process_csv, files.items(), topic_target)
 ```
 
-The one line worth pausing on is `declare_target_state` — deliberately *not* `produce()`. You describe what the topic *should be* as a function of the source; Synor turns the state transitions into wire messages. A new or changed key produces an upsert `(k, v)`; a key that's no longer declared produces a delete `(k, None)`; a key declared with the same value sends **nothing**.
+The one line worth pausing on is `ensure_target_state` — deliberately *not* `produce()`. You describe what the topic *should be* as a function of the source; Synor turns the state transitions into wire messages. A new or changed key produces an upsert `(k, v)`; a key that's no longer declared produces a delete `(k, None)`; a key declared with the same value sends **nothing**.
 
 ## Why this example is useful
 

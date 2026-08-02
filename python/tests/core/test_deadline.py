@@ -122,12 +122,12 @@ class _RecordingTargetStore:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[tuple[syn.StableKey, Any], Any] | None:
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             return None
         if not prev_may_be_missing and desired_state in prev_possible_records:
             return None
@@ -173,13 +173,13 @@ def test_use_mount_child_processor_inherits_parent_deadline(
 ) -> None:
     seen: list[float | None] = []
 
-    @syn.fn
+    @syn.task
     async def child() -> None:
         seen.append(_deadline.remaining_seconds())
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        await syn.use_mount(syn.component_subpath("child"), child)
+        await syn.call(syn.unit_path("child"), child)
 
     app = syn.App(syn.AppConfig(name="deadline_d3", environment=_env("d3")), main)
     with syn.timeout(timedelta(seconds=10)):
@@ -191,7 +191,7 @@ def test_use_mount_child_processor_inherits_parent_deadline(
 def test_root_processor_inherits_update_deadline(fake_clock: _FakeClock) -> None:
     seen: list[float | None] = []
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         seen.append(_deadline.remaining_seconds())
 
@@ -205,9 +205,9 @@ def test_root_processor_inherits_update_deadline(fake_clock: _FakeClock) -> None
 def test_processor_return_checks_deadline_before_submit(fake_clock: _FakeClock) -> None:
     GlobalDictTarget.store.clear()
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("post_body", "v"))
+        syn.ensure_target_state(GlobalDictTarget.target_state("post_body", "v"))
         fake_clock.now = 11
 
     app = syn.App(
@@ -226,13 +226,13 @@ def test_app_drop_cleanup_ignores_expired_ambient_deadline(
 ) -> None:
     GlobalDictTarget.store.clear()
 
-    @syn.fn
+    @syn.task
     async def child() -> None:
-        syn.declare_target_state(GlobalDictTarget.target_state("cleanup", "v1"))
+        syn.ensure_target_state(GlobalDictTarget.target_state("cleanup", "v1"))
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        await syn.mount(syn.component_subpath("child"), child)
+        await syn.spawn(syn.unit_path("child"), child)
 
     app = syn.App(
         syn.AppConfig(name="deadline_drop_cleanup", environment=_env("drop_cleanup")),
@@ -257,7 +257,7 @@ async def test_lazy_update_handle_uses_captured_deadline_context(
 ) -> None:
     seen: list[tuple[str, float | None]] = []
 
-    @syn.fn
+    @syn.task
     async def main(label: str) -> None:
         seen.append((label, _deadline.remaining_seconds()))
 
@@ -311,17 +311,17 @@ def test_use_mount_checks_deadline_when_child_returns_after_deadline(
     GlobalDictTarget.store.clear()
     continued = False
 
-    @syn.fn
+    @syn.task
     async def child() -> str:
         fake_clock.now = 11
         return "done"
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         nonlocal continued
-        await syn.use_mount(syn.component_subpath("child"), child)
+        await syn.call(syn.unit_path("child"), child)
         continued = True
-        syn.declare_target_state(GlobalDictTarget.target_state("use_mount", "v"))
+        syn.ensure_target_state(GlobalDictTarget.target_state("use_mount", "v"))
 
     app = syn.App(
         syn.AppConfig(
@@ -342,15 +342,15 @@ def test_mount_and_mount_each_children_are_deadline_isolated(
 ) -> None:
     seen: dict[str, float | None] = {}
 
-    @syn.fn
+    @syn.task
     async def mounted(label: str) -> None:
         seen[label] = _deadline.remaining_seconds()
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        one = await syn.mount(syn.component_subpath("mount"), mounted, "mount")
-        many = await syn.mount_each(
-            syn.component_subpath("each"), mounted, [("item", "mount_each")]
+        one = await syn.spawn(syn.unit_path("mount"), mounted, "mount")
+        many = await syn.spawn_each(
+            syn.unit_path("each"), mounted, [("item", "mount_each")]
         )
         await one.ready()
         await many.ready()
@@ -367,20 +367,20 @@ def test_mount_ready_checks_deadline_after_isolated_child_returns(
 ) -> None:
     GlobalDictTarget.store.clear()
     continued = False
-    saved_handle: syn.ComponentMountHandle | None = None
+    saved_handle: syn.SpawnHandle | None = None
 
-    @syn.fn
+    @syn.task
     async def mounted() -> None:
         fake_clock.now = 11
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         nonlocal continued, saved_handle
-        handle = await syn.mount(syn.component_subpath("mounted"), mounted)
+        handle = await syn.spawn(syn.unit_path("mounted"), mounted)
         saved_handle = handle
         await handle.ready()
         continued = True
-        syn.declare_target_state(GlobalDictTarget.target_state("mount_ready", "v"))
+        syn.ensure_target_state(GlobalDictTarget.target_state("mount_ready", "v"))
 
     app = syn.App(
         syn.AppConfig(
@@ -415,9 +415,9 @@ def test_live_component_process_live_is_deadline_isolated(
             await operator.update_full()
             await operator.mark_ready()
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        await syn.mount(syn.component_subpath("live"), Live)
+        await syn.spawn(syn.unit_path("live"), Live)
 
     app = syn.App(
         syn.AppConfig(name="deadline_live_isolated", environment=_env("live_iso")),
@@ -436,7 +436,7 @@ def test_map_task_checks_deadline_after_return(fake_clock: _FakeClock) -> None:
         fake_clock.now = 11
         return 1
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         nonlocal continued
         await syn.map(mapped, [1])
@@ -563,12 +563,12 @@ async def test_map_can_return_exception_objects() -> None:
 def test_plain_synor_fn_checks_deadline_after_return(fake_clock: _FakeClock) -> None:
     continued = False
 
-    @syn.fn
+    @syn.task
     async def child() -> str:
         fake_clock.now = 11
         return "done"
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         nonlocal continued
         await child()
@@ -592,9 +592,9 @@ def test_sink_body_is_deadline_isolated(fake_clock: _FakeClock) -> None:
             "test_deadline/sink_isolated", store
         )
 
-        @syn.fn
+        @syn.task
         async def main() -> None:
-            syn.declare_target_state(provider.target_state("k", "v"))
+            syn.ensure_target_state(provider.target_state("k", "v"))
 
         app = syn.App(syn.AppConfig(name="deadline_d5", environment=_env("d5")), main)
         app.update_blocking()
@@ -614,9 +614,9 @@ def test_update_blocking_checks_captured_deadline_after_submit(
         "test_deadline/update_blocking_post_submit", store
     )
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("k", "v"))
+        syn.ensure_target_state(provider.target_state("k", "v"))
 
     app = syn.App(
         syn.AppConfig(
@@ -652,9 +652,9 @@ async def test_update_handle_checks_captured_deadline_after_submit(
         "test_deadline/update_handle_post_submit", store
     )
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("k", "v"))
+        syn.ensure_target_state(provider.target_state("k", "v"))
 
     app = syn.App(
         syn.AppConfig(
@@ -676,12 +676,12 @@ async def test_update_handle_checks_captured_deadline_after_submit(
 def test_batched_runner_body_is_deadline_isolated(fake_clock: _FakeClock) -> None:
     seen: list[float | None] = []
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     def batched(items: list[int]) -> list[int]:
         seen.append(_deadline.remaining_seconds())
         return items
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         assert await batched(1) == 1
 
@@ -695,12 +695,12 @@ def test_batched_runner_body_is_deadline_isolated(fake_clock: _FakeClock) -> Non
 def test_batched_runner_caller_checks_deadline_after_return(
     fake_clock: _FakeClock,
 ) -> None:
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     def batched(items: list[int]) -> list[int]:
         fake_clock.now = 11
         return items
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         await batched(1)
 
@@ -714,7 +714,7 @@ def test_batched_runner_caller_checks_deadline_after_return(
 
 
 def test_next_id_checks_deadline_before_allocating(fake_clock: _FakeClock) -> None:
-    @syn.fn
+    @syn.task
     async def main() -> None:
         fake_clock.now = 11
         await _next_id()
@@ -955,10 +955,10 @@ def test_deadline_after_declaring_target_states_applies_no_sink_actions(
     GlobalDictTarget.store.clear()
     should_timeout = True
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         nonlocal should_timeout
-        syn.declare_target_state(GlobalDictTarget.target_state("k", "v"))
+        syn.ensure_target_state(GlobalDictTarget.target_state("k", "v"))
         if should_timeout:
             fake_clock.now = 11
             syn.check_cancellation()
@@ -993,7 +993,7 @@ def test_deadline_exceptions_are_not_memoized(fake_clock: _FakeClock) -> None:
     expire_before_call = False
     memo_value_returned_to_main = False
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def memoized() -> str:
         nonlocal calls, should_timeout
         calls += 1
@@ -1002,7 +1002,7 @@ def test_deadline_exceptions_are_not_memoized(fake_clock: _FakeClock) -> None:
             syn.check_cancellation()
         return "ok"
 
-    @syn.fn
+    @syn.task
     async def main() -> str:
         nonlocal memo_value_returned_to_main
         if expire_before_call:
@@ -1041,7 +1041,7 @@ def test_deadline_exceptions_are_not_memoized(fake_clock: _FakeClock) -> None:
 def test_expired_deadline_boundary_matrix(fake_clock: _FakeClock) -> None:
     # Boundary matrix proof for an already-expired caller deadline:
     #
-    # inherited entry points:  check_cancellation, syn.fn, map, use_mount,
+    # inherited entry points:  check_cancellation, syn.task, map, use_mount,
     #                          mount entry, mount_each entry, mount_target,
     #                          next_id
     # isolated work bodies:    mounted children, mount_each children,
@@ -1067,12 +1067,12 @@ def test_expired_deadline_boundary_matrix(fake_clock: _FakeClock) -> None:
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: Any | syn.NonExistenceType,
+            desired_state: Any | syn.AbsentType,
             prev_possible_records: Collection[Any],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[tuple[syn.StableKey, Any], Any] | None:
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             return syn.TargetReconcileOutput(
                 action=(key, desired_state),
@@ -1084,7 +1084,7 @@ def test_expired_deadline_boundary_matrix(fake_clock: _FakeClock) -> None:
         "test_deadline/boundary_matrix", Store()
     )
 
-    @syn.fn
+    @syn.task
     async def plain() -> None:
         vector["plain_synor_fn_call"] = "no_raise"
 
@@ -1092,26 +1092,26 @@ def test_expired_deadline_boundary_matrix(fake_clock: _FakeClock) -> None:
         vector["map_task"] = "no_raise"
         return 1
 
-    @syn.fn
+    @syn.task
     async def mounted(label: str) -> None:
         vector[label] = (
             "raise" if _raises_deadline(syn.check_cancellation) else "no_raise"
         )
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     def batched(items: list[int]) -> list[int]:
         vector["batched_body"] = (
             "raise" if _raises_deadline(syn.check_cancellation) else "no_raise"
         )
         return items
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
-        mount_handle = await syn.mount(
-            syn.component_subpath("mount_before_expiry"), mounted, "mount_child"
+        mount_handle = await syn.spawn(
+            syn.unit_path("mount_before_expiry"), mounted, "mount_child"
         )
-        mount_each_handle = await syn.mount_each(
-            syn.component_subpath("each_before_expiry"),
+        mount_each_handle = await syn.spawn_each(
+            syn.unit_path("each_before_expiry"),
             mounted,
             [("item", "mount_each_child")],
         )
@@ -1135,22 +1135,22 @@ def test_expired_deadline_boundary_matrix(fake_clock: _FakeClock) -> None:
         vector["use_mount_entry"] = (
             "raise"
             if await _raises_deadline_async(
-                syn.use_mount, syn.component_subpath("use_after_expiry"), mounted, "x"
+                syn.call, syn.unit_path("use_after_expiry"), mounted, "x"
             )
             else "no_raise"
         )
         vector["mount_entry"] = (
             "raise"
             if await _raises_deadline_async(
-                syn.mount, syn.component_subpath("mount_after_expiry"), mounted, "x"
+                syn.spawn, syn.unit_path("mount_after_expiry"), mounted, "x"
             )
             else "no_raise"
         )
         vector["mount_each_entry"] = (
             "raise"
             if await _raises_deadline_async(
-                syn.mount_each,
-                syn.component_subpath("each_after_expiry"),
+                syn.spawn_each,
+                syn.unit_path("each_after_expiry"),
                 mounted,
                 [("item", "x")],
             )
@@ -1159,14 +1159,14 @@ def test_expired_deadline_boundary_matrix(fake_clock: _FakeClock) -> None:
         vector["mount_target_entry"] = (
             "raise"
             if await _raises_deadline_async(
-                syn.mount_target, provider.target_state("container", "v")
+                syn.attach_target, provider.target_state("container", "v")
             )
             else "no_raise"
         )
         vector["next_id"] = (
             "raise" if await _raises_deadline_async(_next_id) else "no_raise"
         )
-        syn.declare_target_state(provider.target_state("k", "v"))
+        syn.ensure_target_state(provider.target_state("k", "v"))
 
     app = syn.App(
         syn.AppConfig(name="deadline_boundary_matrix", environment=_env("matrix")),
@@ -1215,7 +1215,7 @@ def test_engine_entry_points_require_the_deadline_argument(
     # TypeError instead of a silently stale check.
     observed: list[str] = []
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         ctx = syn.get_component_context()
         try:
@@ -1240,18 +1240,18 @@ def test_directory_map_children_inherit_distinct_narrowed_deadlines(
     # would be None — one shared slot can't hold 5s and 30s at once.
     observed: dict[str, float | None] = {}
 
-    @syn.fn
+    @syn.task
     async def report(label: str) -> None:
         observed[label] = _deadline.remaining_seconds()
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         observed["parent"] = _deadline.remaining_seconds()
 
         async def run_one(spec: tuple[str, int]) -> None:
             label, secs = spec
             with syn.timeout(timedelta(seconds=secs)):
-                await syn.use_mount(syn.component_subpath(label), report, label)
+                await syn.call(syn.unit_path(label), report, label)
 
         await syn.map(run_one, [("fast", 5), ("slow", 30)])
 
@@ -1399,7 +1399,7 @@ def test_deadline_scopes_work_inside_batched_function_bodies(
     # deadlines stay isolated from the shared body.
     observed: dict[str, float | None] = {}
 
-    @syn.fn.as_async(batching=True)
+    @syn.task.as_async(batching=True)
     def batched(xs: list[int]) -> list[int]:
         observed["ambient"] = _deadline.remaining_seconds()
         with syn.timeout(timedelta(seconds=7)):
@@ -1407,7 +1407,7 @@ def test_deadline_scopes_work_inside_batched_function_bodies(
             syn.check_cancellation()  # the PUBLIC API works with no ctx around
         return xs
 
-    @syn.fn
+    @syn.task
     async def main() -> None:
         with syn.timeout(timedelta(seconds=99)):
             await batched(1)

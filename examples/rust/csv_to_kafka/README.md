@@ -12,8 +12,8 @@ matching the Python example.
 | Concern            | Python                                        | Rust (this example)                              |
 | ------------------ | --------------------------------------------- | ------------------------------------------------ |
 | Target             | `kafka.mount_kafka_topic_target(...)`         | `kafka::mount_kafka_topic_target(...)`           |
-| Per-file compute   | `@syn.fn(memo=True) process_csv`             | `#[synor::function(memo)] process_csv`       |
-| Declare a message  | `topic_target.declare_target_state(key, val)` | `target.declare_message(ctx, key, val)`          |
+| Per-file compute   | `@syn.task(cache=True) process_csv`             | `#[synor::function(memo)] process_csv`       |
+| Declare a message  | `topic_target.ensure_target_state(key, val)` | `target.declare_message(ctx, key, val)`          |
 | Kafka client       | `confluent_kafka` (librdkafka)                | [`rskafka`] (pure Rust, no C deps)               |
 
 ### Incrementality (two layers)

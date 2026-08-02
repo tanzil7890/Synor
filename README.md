@@ -57,7 +57,7 @@ Synor handles that lifecycle through three ideas:
 
 That model provides:
 
-- **Incremental execution:** `@syn.fn(memo=True)` reuses work whose inputs and
+- **Incremental execution:** `@syn.task(cache=True)` reuses work whose inputs and
   implementation have not changed.
 - **Automatic cleanup:** when an input or component disappears, the outcomes it
   owned are removed from supported targets.
@@ -133,25 +133,25 @@ from synor.connectors import localfs
 from synor.resources.file import FileLike, PatternFilePathMatcher
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def catalog_note(file: FileLike, catalog_dir: pathlib.Path) -> None:
     text = await file.read_text()
     record = {"name": file.file_path.path.name, "word_count": len(text.split())}
-    localfs.declare_file(
+    localfs.ensure_file(
         catalog_dir / f"{file.file_path.path.stem}.json",
         json.dumps(record),
         create_parent_dirs=True,
     )
 
 
-@syn.fn
+@syn.task
 async def app_main(notes_dir: pathlib.Path, catalog_dir: pathlib.Path) -> None:
     notes = localfs.walk_dir(
         notes_dir,
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(catalog_note, notes.items(), catalog_dir)
+    await syn.spawn_each(catalog_note, notes.items(), catalog_dir)
 
 
 app = syn.App(
@@ -253,7 +253,7 @@ multiple vector stores.
 ## Execution model and limits
 
 - Synor is async-first. Processing functions can be sync or async, while
-  orchestration APIs such as `mount_each` are async.
+  orchestration APIs such as `spawn_each` are async.
 - A component submits its target-state changes after processing finishes. A
   target backend applies that batch atomically when the backend supports it.
 - Writes across different target backends are not one distributed

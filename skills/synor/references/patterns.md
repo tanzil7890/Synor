@@ -28,20 +28,20 @@ from markdown_it import MarkdownIt
 
 _markdown_it = MarkdownIt("gfm-like")
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, outdir: pathlib.Path) -> None:
     html = _markdown_it.render(await file.read_text())
     outname = "__".join(file.file_path.path.parts) + ".html"
-    localfs.declare_file(outdir / outname, html, create_parent_dirs=True)
+    localfs.ensure_file(outdir / outname, html, create_parent_dirs=True)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
     files = localfs.walk_dir(
         sourcedir,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # Enable live file watching
     )
-    await syn.mount_each(process_file, files.items(), outdir)
+    await syn.spawn_each(process_file, files.items(), outdir)
 
 app = syn.App(
     syn.AppConfig(name="FilesTransform"),
@@ -52,8 +52,8 @@ app = syn.App(
 ```
 
 **Key points:**
-- `memo=True` -- Skip reprocessing unchanged files
-- `mount_each()` -- One component per file; keys from `files.items()` become component subpaths
+- `cache=True` -- Skip reprocessing unchanged files
+- `spawn_each()` -- One component per file; keys from `files.items()` become component subpaths
 - `live=True` on `walk_dir()` -- Enables file watching for live mode
 - Auto-cleanup -- Deleting source file automatically removes output file
 
@@ -101,12 +101,12 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
         builder.provide(EMBEDDER, SentenceTransformerEmbedder("all-MiniLM-L6-v2"))
         yield
 
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk, filename: pathlib.PurePath,
     id_gen: IdGenerator, table: postgres.TableTarget[DocEmbedding],
 ) -> None:
-    table.declare_row(row=DocEmbedding(
+    table.ensure_row(row=DocEmbedding(
         id=await id_gen.next_id(chunk.text),
         filename=str(filename),
         chunk_start=chunk.start.char_offset,
@@ -115,14 +115,14 @@ async def process_chunk(
         embedding=await syn.use_context(EMBEDDER).embed(chunk.text),
     ))
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[DocEmbedding]) -> None:
     text = await file.read_text()
     chunks = _splitter.split(text, chunk_size=2000, chunk_overlap=500, language="markdown")
     id_gen = IdGenerator()
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -133,7 +133,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
 
     files = localfs.walk_dir(sourcedir, recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]))
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 
 app = syn.App(syn.AppConfig(name="TextEmbedding"), app_main,
     sourcedir=pathlib.Path("./markdown_files"))
@@ -144,7 +144,7 @@ app = syn.App(syn.AppConfig(name="TextEmbedding"), app_main,
 - `Annotated[NDArray, EMBEDDER]` -- Vector annotation uses ContextKey for auto dimension inference
 - `map()` -- Concurrent execution within a component (no child components created)
 - `IdGenerator` -- Generates stable unique IDs for chunks across incremental updates
-- `memo=True` on `process_file` -- Skips unchanged files entirely
+- `cache=True` on `process_file` -- Skips unchanged files entirely
 
 ---
 
@@ -189,14 +189,14 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
         builder.provide(TARGET_DB, target_pool)
         yield
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_record(record: SourceRecord, target_table: postgres.TableTarget[TargetRecord]) -> None:
-    target_table.declare_row(row=TargetRecord(
+    target_table.ensure_row(row=TargetRecord(
         id=record.id, name=record.name.upper(),
         value=record.value * 2, processed=True,
     ))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         TARGET_DB,
@@ -209,8 +209,8 @@ async def app_main() -> None:
         table_name="source_records",
         row_type=SourceRecord,
     )
-    await syn.mount_each(
-        syn.component_subpath("record"),
+    await syn.spawn_each(
+        syn.unit_path("record"),
         process_record,
         source.fetch_rows().items(key=lambda r: r.id),
         target_table,
@@ -261,7 +261,7 @@ class Topic:
     name: str
     description: str
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_and_store(
     content: str, message_id: int,
     messages_table: postgres.TableTarget[Message],
@@ -272,13 +272,13 @@ async def extract_and_store(
         response_model=ExtractionResult,
         messages=[{"role": "user", "content": f"Extract topics:\n\n{content}"}],
     )
-    messages_table.declare_row(row=Message(id=message_id, title=result.title, content=content))
+    messages_table.ensure_row(row=Message(id=message_id, title=result.title, content=content))
     for topic in result.topics:
-        topics_table.declare_row(row=Topic(
+        topics_table.ensure_row(row=Topic(
             message_id=message_id, name=topic.name, description=topic.description,
         ))
 
-@syn.fn
+@syn.task
 async def app_main(input_texts: list[str]) -> None:
     messages_table = await postgres.mount_table_target(
         PG_DB, table_name="messages",
@@ -289,8 +289,8 @@ async def app_main(input_texts: list[str]) -> None:
         table_schema=await postgres.TableSchema.from_class(Topic, primary_key=["message_id", "name"]),
     )
     for idx, text in enumerate(input_texts):
-        await syn.mount(
-            syn.component_subpath("text", idx),
+        await syn.spawn(
+            syn.unit_path("text", idx),
             extract_and_store, text, idx, messages_table, topics_table,
         )
 
@@ -298,7 +298,7 @@ app = syn.App(syn.AppConfig(name="LLMExtraction"), app_main, input_texts=["text1
 ```
 
 **Key points:**
-- `memo=True` on extraction -- Avoids re-calling LLM for unchanged inputs
+- `cache=True` on extraction -- Avoids re-calling LLM for unchanged inputs
 - Multiple target tables -- Declare rows in multiple tables from single component
 - Pydantic models -- For structured LLM outputs
 
@@ -334,15 +334,15 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     builder.provide(LANCE_DB, conn)
     yield
 
-@syn.fn
+@syn.task
 async def process_message(msg: Message, table: lancedb.TableTarget[Product]) -> None:
     value = msg.value()
     if value is None:
         return
     row = json.loads(value.decode() if isinstance(value, bytes) else value)
-    table.declare_row(row=Product(**{**row, "price": float(row["price"])}))
+    table.ensure_row(row=Product(**{**row, "price": float(row["price"])}))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     products_table = await lancedb.mount_table_target(
         LANCE_DB, table_name="products",
@@ -356,13 +356,13 @@ async def app_main() -> None:
         "auto.offset.reset": "earliest",
     })
     items = kafka.topic_as_map(consumer, ["products-topic"])
-    await syn.mount_each(process_message, items, products_table)
+    await syn.spawn_each(process_message, items, products_table)
 
 app = syn.App(syn.AppConfig(name="KafkaToLanceDB"), app_main)
 ```
 
 **Key points:**
-- `kafka.topic_as_map()` returns a `LiveMapFeed` -- `mount_each()` auto-detects for live mode
+- `kafka.topic_as_map()` returns a `LiveMapFeed` -- `spawn_each()` auto-detects for live mode
 - Pipeline runs continuously in live mode, processing new messages as they arrive
 
 ---
@@ -384,7 +384,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     builder.provide(CONFIG, {"chunk_size": 1000, "overlap": 200})
     yield
 
-@syn.fn
+@syn.task
 async def process_item(text: str) -> None:
     embedder = syn.use_context(EMBEDDER)
     config = syn.use_context(CONFIG)
@@ -401,29 +401,29 @@ async def process_item(text: str) -> None:
 
 ## Common Anti-Patterns to Avoid
 
-### Missing `@syn.fn` Decorator
+### Missing `@syn.task` Decorator
 
 ```python
 # BAD: Missing decorator
 async def process_file(file, table):
-    table.declare_row(...)
+    table.ensure_row(...)
 
 # GOOD:
-@syn.fn
+@syn.task
 async def process_file(file, table):
-    table.declare_row(...)
+    table.ensure_row(...)
 ```
 
 ### Reprocessing Everything
 
 ```python
 # BAD: No memoization
-@syn.fn  # Missing memo=True
+@syn.task  # Missing cache=True
 async def process_file(file, table):
     embedding = await embedder.embed(await file.read_text())  # Expensive!
 
 # GOOD:
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file, table):
     ...
 ```
@@ -433,19 +433,19 @@ async def process_file(file, table):
 ```python
 # BAD: Using object references or indices
 for file in files:
-    await syn.mount(syn.component_subpath(file), ...)     # Object ref
+    await syn.spawn(syn.unit_path(file), ...)     # Object ref
 for idx, item in enumerate(items):
-    await syn.mount(syn.component_subpath(idx), ...)      # Index changes
+    await syn.spawn(syn.unit_path(idx), ...)      # Index changes
 
 # GOOD: Use stable identifiers
-await syn.mount_each(process_file, files.items(), table)   # Keys from items()
+await syn.spawn_each(process_file, files.items(), table)   # Keys from items()
 ```
 
 ### Loading Resources Per Component
 
 ```python
 # BAD: Loading model in every component
-@syn.fn
+@syn.task
 async def process(text):
     model = SentenceTransformer("model")  # Loaded repeatedly!
 
@@ -457,12 +457,12 @@ embedder = syn.use_context(EMBEDDER)
 
 ```python
 # BAD: Side effects not detected
-@syn.fn
+@syn.task
 async def process(data):
     requests.post("https://api.example.com", json=data)  # Not detected!
 
 # GOOD: Only declare target states
-table.declare_row(row=result)
+table.ensure_row(row=result)
 ```
 
 ---

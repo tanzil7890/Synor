@@ -14,12 +14,12 @@ Take a folder of PDFs and turn it into a [vector index](https://github.com/pgvec
 The one genuinely expensive step is PDF parsing, so it runs on a GPU runner and the docling converter is built once with `@functools.cache`. `process_file` converts the PDF to Markdown, splits it into overlapping chunks, and maps each chunk to `process_chunk` for embedding. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def pdf_to_markdown(content: bytes) -> str:
     source = DocumentStream(name="input.pdf", stream=io.BytesIO(content))
     return pdf_converter().convert(source).document.export_to_markdown()
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[PdfEmbedding]) -> None:
     markdown = await pdf_to_markdown(await file.read())
     chunks = _splitter.split(markdown, chunk_size=2000, chunk_overlap=500, language="markdown")
@@ -27,13 +27,13 @@ async def process_file(file: FileLike, table: postgres.TableTarget[PdfEmbedding]
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 ```
 
-`@syn.fn.as_async(runner=syn.GPU)` wraps the *synchronous*, GPU-heavy parse so it runs off the async event loop. Each chunk's row `id` is derived from its text, so a chunk that survives a re-parse keeps its row.
+`@syn.task.as_async(runner=syn.GPU)` wraps the *synchronous*, GPU-heavy parse so it runs off the async event loop. Each chunk's row `id` is derived from its text, so a chunk that survives a re-parse keeps its row.
 
 ## Why this example is useful
 
 - **Parsing where text embedding has none.** docling reads the PDF and exports Markdown that preserves headings, tables, and reading order — which is exactly what makes the downstream chunks coherent.
-- **The slow step, off the event loop.** `@syn.fn.as_async(runner=syn.GPU)` offloads PDF parsing to a dedicated GPU runner; `@functools.cache` loads the docling model once, not per file.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a PDF whose bytes and code are unchanged, so docling never re-parses a file you've already converted; `mount_table_target` upserts only changed rows and deletes rows whose source is gone.
+- **The slow step, off the event loop.** `@syn.task.as_async(runner=syn.GPU)` offloads PDF parsing to a dedicated GPU runner; `@functools.cache` loads the docling model once, not per file.
+- **Incremental by default.** `@syn.task(cache=True)` skips a PDF whose bytes and code are unchanged, so docling never re-parses a file you've already converted; `mount_table_target` upserts only changed rows and deletes rows whose source is gone.
 - **Live without re-scanning.** The filesystem source declares `live=True` — pass `-L` and added, replaced, or deleted PDFs are picked up as they change.
 - **Plain Python, your stack.** Local `all-MiniLM-L6-v2` embedder, no API key; swap `EMBED_MODEL` for any of the 12k+ sentence-transformer models on Hugging Face.
 

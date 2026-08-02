@@ -217,7 +217,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     yield
     await client.close()
 
-@syn.fn
+@syn.task
 async def process_document(
     doc_id: str,
     text: str,
@@ -232,7 +232,7 @@ async def process_document(
         payload={"text": text},
     ))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     embedder = syn.use_context(EMBEDDER)
 
@@ -245,8 +245,8 @@ async def app_main() -> None:
     )
 
     for doc_id, text in documents:
-        await syn.mount(
-            syn.component_subpath("doc", doc_id),
+        await syn.spawn(
+            syn.unit_path("doc", doc_id),
             process_document,
             doc_id,
             text,

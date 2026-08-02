@@ -39,7 +39,7 @@ class SlideNotes(dspy.Signature):
 _speaker_notes = dspy.Predict(SlideNotes)
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_speaker_notes(image: bytes) -> str:
     data_url = "data:image/png;base64," + base64.b64encode(image).decode()
     with dspy.context(lm=_get_lm(syn.use_context(LLM_MODEL))):   # e.g. gemini/gemini-3.5-flash
@@ -54,7 +54,7 @@ async def extract_speaker_notes(image: bytes) -> str:
 [Pocket TTS](https://github.com/kyutai-labs/pocket-tts) is a fast, ~100M-parameter neural TTS that runs entirely on the CPU — no API, no GPU, no per-character billing. The model and voice state load once (via `@functools.cache`) and synthesize the notes to MP3. The model isn't thread-safe, so the `syn.GPU` runner serializes each call on a worker thread — off the event loop, one at a time:
 
 ```python title="main.py"
-@syn.fn.as_async(runner=syn.GPU)                  # offloaded + serialized off the event loop
+@syn.task.as_async(runner=syn.GPU)                  # offloaded + serialized off the event loop
 def text_to_speech(text: str) -> bytes:
     model = get_tts_model()                          # cached TTSModel — loads once
     audio = model.generate_audio(get_voice_state(POCKET_TTS_VOICE), text)  # 1D float PCM
@@ -70,14 +70,14 @@ def text_to_speech(text: str) -> bytes:
 `process_file` renders the deck to slides, then maps each through `process_slide`, which runs the vision LLM, then synthesizes audio *and* embeds the notes concurrently before declaring the row:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_slide(slide, filename, table) -> None:
     notes = (await extract_speaker_notes(slide.image)).speaker_notes
     voice, embedding = await asyncio.gather(
         text_to_speech(notes),
         syn.use_context(EMBEDDER).embed(notes),
     )
-    table.declare_row(row=SlideRecord(
+    table.ensure_row(row=SlideRecord(
         id=f"{filename}#{slide.page_number}", filename=filename, page=slide.page_number,
         speaker_notes=notes, voice=voice, embedding=embedding,
     ))

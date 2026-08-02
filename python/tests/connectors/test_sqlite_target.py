@@ -144,16 +144,16 @@ _table_name: str = "test_table"
 
 async def declare_table_and_rows() -> None:
     """Declare table and rows from global source data."""
-    table = await syn.use_mount(
-        syn.component_subpath("setup", "table"),
-        sqlite.declare_table_target,
+    table = await syn.call(
+        syn.unit_path("setup", "table"),
+        sqlite.ensure_table_target,
         SQLITE_DB,
         _table_name,
         await sqlite.TableSchema.from_class(_row_type, primary_key=["id"]),
     )
 
     for row in _source_rows:
-        table.declare_row(row=row)
+        table.ensure_row(row=row)
 
 
 # =============================================================================
@@ -329,15 +329,15 @@ def test_different_schema_types(
     test_env = make_test_env(managed_conn, "test_different_schema_types")
 
     async def declare_extended_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "extended_table",
             await sqlite.TableSchema.from_class(ExtendedRow, primary_key=["id"]),
         )
         for row in extended_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_different_schema_types", environment=test_env),
@@ -374,15 +374,15 @@ def test_drop_table(sqlite_db: tuple[sqlite.ManagedConnection, Path]) -> None:
 
     async def declare_table_conditionally() -> None:
         if _source_rows:  # Only declare if there are rows
-            table = await syn.use_mount(
-                syn.component_subpath("setup", "table"),
-                sqlite.declare_table_target,
+            table = await syn.call(
+                syn.unit_path("setup", "table"),
+                sqlite.ensure_table_target,
                 SQLITE_DB,
                 _table_name,
                 await sqlite.TableSchema.from_class(_row_type, primary_key=["id"]),
             )
             for row in _source_rows:
-                table.declare_row(row=row)
+                table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_drop_table", environment=test_env),
@@ -449,27 +449,27 @@ def test_multiple_tables(sqlite_db: tuple[sqlite.ManagedConnection, Path]) -> No
     async def declare_multiple_tables() -> None:
         schema = await sqlite.TableSchema.from_class(SimpleRow, primary_key=["id"])
 
-        table1 = await syn.use_mount(
-            syn.component_subpath("setup", "table1"),
-            sqlite.declare_table_target,
+        table1 = await syn.call(
+            syn.unit_path("setup", "table1"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "users",
             schema,
         )
 
-        table2 = await syn.use_mount(
-            syn.component_subpath("setup", "table2"),
-            sqlite.declare_table_target,
+        table2 = await syn.call(
+            syn.unit_path("setup", "table2"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "products",
             schema,
         )
 
         for row in table1_rows:
-            table1.declare_row(row=row)
+            table1.ensure_row(row=row)
 
         for row in table2_rows:
-            table2.declare_row(row=row)
+            table2.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_multiple_tables", environment=test_env),
@@ -510,9 +510,9 @@ def test_dict_rows(sqlite_db: tuple[sqlite.ManagedConnection, Path]) -> None:
     test_env = make_test_env(managed_conn, "test_dict_rows")
 
     async def declare_dict_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "dict_table",
             sqlite.TableSchema(
@@ -526,7 +526,7 @@ def test_dict_rows(sqlite_db: tuple[sqlite.ManagedConnection, Path]) -> None:
         )
 
         for row in dict_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_dict_rows", environment=test_env),
@@ -557,9 +557,9 @@ def test_dict_row_missing_primary_key_raises(
     test_env = make_test_env(managed_conn, "test_dict_row_missing_primary_key_raises")
 
     async def declare_dict_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "dict_missing_pk",
             sqlite.TableSchema(
@@ -573,7 +573,7 @@ def test_dict_row_missing_primary_key_raises(
         )
 
         for row in dict_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(
@@ -600,9 +600,9 @@ def test_dict_row_null_primary_key_raises(
     test_env = make_test_env(managed_conn, "test_dict_row_null_primary_key_raises")
 
     async def declare_dict_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "dict_null_pk",
             sqlite.TableSchema(
@@ -616,7 +616,7 @@ def test_dict_row_null_primary_key_raises(
         )
 
         for row in dict_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(
@@ -645,9 +645,9 @@ def test_dict_row_missing_nullable_non_key_writes_null(
     )
 
     async def declare_dict_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "dict_missing_nullable",
             sqlite.TableSchema(
@@ -661,7 +661,7 @@ def test_dict_row_missing_nullable_non_key_writes_null(
         )
 
         for row in dict_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(
@@ -698,9 +698,9 @@ def test_user_managed_table(sqlite_db: tuple[sqlite.ManagedConnection, Path]) ->
     test_env = make_test_env(managed_conn, "test_user_managed_table")
 
     async def declare_user_managed_rows() -> None:
-        table: sqlite.TableTarget[SimpleRow] = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table: sqlite.TableTarget[SimpleRow] = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             "user_managed",
             await sqlite.TableSchema.from_class(SimpleRow, primary_key=["id"]),
@@ -708,7 +708,7 @@ def test_user_managed_table(sqlite_db: tuple[sqlite.ManagedConnection, Path]) ->
         )
 
         for row in user_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="test_user_managed", environment=test_env),
@@ -762,9 +762,9 @@ def test_vec0_virtual_table_basic(
     test_env = make_test_env(managed_conn, "test_vec0_virtual_table_basic")
 
     async def declare_vec0_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             table_name="vec0_docs",
             table_schema=await sqlite.TableSchema.from_class(
@@ -775,7 +775,7 @@ def test_vec0_virtual_table_basic(
         )
 
         for row in rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="Vec0BasicTest", environment=test_env),
@@ -865,9 +865,9 @@ def test_vec0_with_partition_keys(
     test_env = make_test_env(managed_conn, "test_vec0_with_partition_keys")
 
     async def declare_partitioned_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             table_name="vec0_partitioned",
             table_schema=await sqlite.TableSchema.from_class(
@@ -880,7 +880,7 @@ def test_vec0_with_partition_keys(
         )
 
         for row in rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="Vec0PartitionTest", environment=test_env),
@@ -936,9 +936,9 @@ def test_vec0_with_auxiliary_columns(
     test_env = make_test_env(managed_conn, "test_vec0_with_auxiliary_columns")
 
     async def declare_aux_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             table_name="vec0_with_aux",
             table_schema=await sqlite.TableSchema.from_class(
@@ -951,7 +951,7 @@ def test_vec0_with_auxiliary_columns(
         )
 
         for row in rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="Vec0AuxTest", environment=test_env),
@@ -1011,9 +1011,9 @@ def test_vec0_schema_change_forces_recreate(
     test_env = make_test_env(managed_conn, "test_vec0_schema_change_forces_recreate")
 
     async def declare_evolving_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             table_name="vec0_evolving",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1024,7 +1024,7 @@ def test_vec0_schema_change_forces_recreate(
         )
 
         for row in rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="Vec0SchemaChangeTest", environment=test_env),
@@ -1080,7 +1080,7 @@ def test_vec0_without_vector_column_raises_error(
     )
 
     async def declare_invalid_table() -> None:
-        sqlite.declare_table_target(
+        sqlite.ensure_table_target(
             SQLITE_DB,
             table_name="vec0_invalid",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1119,7 +1119,7 @@ def test_vec0_with_composite_pk_raises_error(
     test_env = make_test_env(managed_conn, "test_vec0_with_composite_pk_raises_error")
 
     async def declare_invalid_table() -> None:
-        sqlite.declare_table_target(
+        sqlite.ensure_table_target(
             SQLITE_DB,
             table_name="vec0_composite_pk",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1155,7 +1155,7 @@ def test_vec0_with_non_integer_pk_raises_error(
     test_env = make_test_env(managed_conn, "test_vec0_with_non_integer_pk_raises_error")
 
     async def declare_invalid_table() -> None:
-        sqlite.declare_table_target(
+        sqlite.ensure_table_target(
             SQLITE_DB,
             table_name="vec0_string_pk",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1195,7 +1195,7 @@ def test_vec0_without_extension_raises_error(
     )
 
     async def declare_table_without_ext() -> None:
-        sqlite.declare_table_target(
+        sqlite.ensure_table_target(
             SQLITE_DB,
             table_name="vec0_needs_ext",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1235,7 +1235,7 @@ def test_vec0_invalid_partition_key_raises_error(
     )
 
     async def declare_invalid_table() -> None:
-        sqlite.declare_table_target(
+        sqlite.ensure_table_target(
             SQLITE_DB,
             table_name="vec0_bad_partition",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1275,7 +1275,7 @@ def test_vec0_invalid_auxiliary_column_raises_error(
     )
 
     async def declare_invalid_table() -> None:
-        sqlite.declare_table_target(
+        sqlite.ensure_table_target(
             SQLITE_DB,
             table_name="vec0_bad_aux",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1316,9 +1316,9 @@ def test_vec0_with_column_overrides(
     test_env = make_test_env(managed_conn, "test_vec0_with_column_overrides")
 
     async def declare_vec0_override_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             table_name="vec0_overrides",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1330,7 +1330,7 @@ def test_vec0_with_column_overrides(
         )
 
         for row in rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="Vec0OverrideTest", environment=test_env),
@@ -1375,9 +1375,9 @@ def test_regular_table_vs_vec0_switch(
     test_env = make_test_env(managed_conn, "test_regular_table_vs_vec0_switch")
 
     async def declare_table() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            sqlite.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            sqlite.ensure_table_target,
             SQLITE_DB,
             table_name="switchable",
             table_schema=await sqlite.TableSchema.from_class(
@@ -1388,7 +1388,7 @@ def test_regular_table_vs_vec0_switch(
         )
 
         for row in rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     app = syn.App(
         syn.AppConfig(name="SwitchTest", environment=test_env),

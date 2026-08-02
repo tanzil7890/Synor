@@ -213,7 +213,7 @@ async def retry_transient(
             else:
                 # The helper is itself a checkpoint: a result completing
                 # past the deadline raises instead of returning, same as
-                # the syn.fn post-return checkpoint. Raising in `else`
+                # the syn.task post-return checkpoint. Raising in `else`
                 # keeps the checkpoint out of retry classification.
                 check_cancellation()
                 return result

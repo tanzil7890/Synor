@@ -272,7 +272,7 @@ class TestMemoization:
         import synor
 
         f1 = await azure_blob.get_blob(container_client, "file1.txt")
-        outcome1 = await f1.__synor_memo_state__(synor.NON_EXISTENCE)
+        outcome1 = await f1.__synor_memo_state__(synor.ABSENT)
 
         f2 = azure_blob.AzureBlobFile(
             container_client=container_client,
@@ -293,7 +293,7 @@ class TestMemoization:
         fp = await f.content_fingerprint()
         assert isinstance(fp, bytes)
 
-        outcome = await f.__synor_memo_state__(synor.NON_EXISTENCE)
+        outcome = await f.__synor_memo_state__(synor.ABSENT)
         hint = serde.strip_non_existence_type(
             serde.get_param_annotation(f.__synor_memo_state__, 0)
         )

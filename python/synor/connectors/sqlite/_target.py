@@ -554,20 +554,20 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _RowValue | syn.NonExistenceType,
+        desired_state: _RowValue | syn.AbsentType,
         prev_possible_records: Collection[_RowFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_RowAction, _RowFingerprint] | None:
         key = _ROW_KEY_CHECKER.check(key)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             # Delete case - only if it might exist
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_RowAction(key=key, value=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         # Upsert case
@@ -670,7 +670,7 @@ class _TableAction(NamedTuple):
     """Action to perform on a table."""
 
     key: _TableKey
-    spec: _TableSpec | syn.NonExistenceType
+    spec: _TableSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
     column_actions: dict[str, statediff.DiffAction]
 
@@ -881,7 +881,7 @@ def _apply_table_actions(
 
                 # Check if this is a virtual table (for special handling)
                 is_virtual = (
-                    not syn.is_non_existence(action.spec)
+                    not syn.is_absent(action.spec)
                     and action.spec.virtual_table_def is not None
                 )
 
@@ -898,7 +898,7 @@ def _apply_table_actions(
                 if action.main_action in ("replace", "delete"):
                     _drop_table(conn, key.table_name)
 
-                if syn.is_non_existence(action.spec):
+                if syn.is_absent(action.spec):
                     outputs[i] = None
                     continue
 
@@ -957,7 +957,7 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _TableSpec | syn.NonExistenceType,
+        desired_state: _TableSpec | syn.AbsentType,
         prev_possible_records: Collection[_TableTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -966,10 +966,10 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
         | None
     ):
         key = _TableKey(*_TABLE_KEY_CHECKER.check(key))
-        tracking_record: _TableTrackingRecord | syn.NonExistenceType
+        tracking_record: _TableTrackingRecord | syn.AbsentType
 
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_table_composite_tracking_record_from_spec(
@@ -1047,7 +1047,7 @@ class TableTarget(
         self._provider = provider
         self._table_schema = table_schema
 
-    def declare_row(self: "TableTarget[RowT]", *, row: RowT) -> None:
+    def ensure_row(self: "TableTarget[RowT]", *, row: RowT) -> None:
         """
         Declare a row to be upserted to this table.
 
@@ -1066,7 +1066,7 @@ class TableTarget(
             if pk_value is None:
                 raise ValueError(f"SQLite primary key column {pk!r} cannot be None")
             pk_values.append(pk_value)
-        syn.declare_target_state(
+        syn.ensure_target_state(
             self._provider.target_state(tuple(pk_values), row_dict)
         )
 
@@ -1141,7 +1141,7 @@ def table_target(
     """
     Create a TargetState for a SQLite table target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``declare_table_target()`` / ``mount_table_target()`` for convenience wrappers.
 
     Args:
@@ -1171,7 +1171,7 @@ def table_target(
     return _table_provider.target_state(key, spec)
 
 
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[ManagedConnection],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -1206,7 +1206,7 @@ def declare_table_target(
         Virtual tables cannot be altered with ALTER TABLE. Schema changes
         automatically trigger DROP + CREATE operations.
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         table_target(
             db,
             table_name,
@@ -1229,7 +1229,7 @@ async def mount_table_target(
     """
     Mount a table target and return a ready-to-use TableTarget.
 
-    Sugar over ``table_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``table_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         db: A ContextKey for the ManagedConnection (provided via lifespan).
@@ -1241,7 +1241,7 @@ async def mount_table_target(
     Returns:
         A TableTarget that can be used to declare rows.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         table_target(
             db,
             table_name,
@@ -1381,6 +1381,6 @@ __all__ = [
     "connect",
     "managed_connection",
     "table_target",
-    "declare_table_target",
+    "ensure_table_target",
     "mount_table_target",
 ]

@@ -74,7 +74,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 Declares a table as a target state. Returns a pending `TableTarget` for declaring rows.
 
 ```python
-def declare_table_target(
+def ensure_table_target(
     db: ContextKey[LanceAsyncConnection],
     table_name: str,
     table_schema: TableSchema[RowT],
@@ -105,7 +105,7 @@ async def mount_table_target(
 ) -> TableTarget[RowT]
 ```
 
-For lower-level composition with `syn.mount_target()`, `table_target()` returns the raw target
+For lower-level composition with `syn.attach_target()`, `table_target()` returns the raw target
 state:
 
 ```python
@@ -139,7 +139,7 @@ updating the table.
 Once a `TableTarget` is resolved, declare rows to be upserted:
 
 ```python
-def TableTarget.declare_row(
+def TableTarget.ensure_row(
     self,
     *,
     row: RowT,
@@ -365,7 +365,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
     builder.provide(LANCE_DB, conn)
     yield
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # Declare table target state
     table = await lancedb.mount_table_target(
@@ -382,5 +382,5 @@ async def app_main() -> None:
 
     # Declare rows
     for doc in documents:
-        table.declare_row(row=doc)
+        table.ensure_row(row=doc)
 ```

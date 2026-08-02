@@ -167,7 +167,7 @@ class ExtractedMeeting(pydantic.BaseModel):
 One memoized function turns a Markdown section into a typed `ExtractedMeeting`:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_meeting(section_text: str) -> ExtractedMeeting:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -181,7 +181,7 @@ async def extract_meeting(section_text: str) -> ExtractedMeeting:
     return ExtractedMeeting.model_validate(result.model_dump())
 ```
 
-`@syn.fn(memo=True)` is what makes iteration affordable: the result is cached keyed by the section text (and the function's own code). Unchanged meeting sections never hit the LLM again.
+`@syn.task(cache=True)` is what makes iteration affordable: the result is cached keyed by the section text (and the function's own code). Unchanged meeting sections never hit the LLM again.
 
 ## Phase 1: per-file extraction
 
@@ -190,7 +190,7 @@ async def extract_meeting(section_text: str) -> ExtractedMeeting:
 `process_file` runs once per note. For each meeting section it extracts the structured meeting, declares the `Meeting` node, declares a `Task` node + `DECIDED` edge per task, and returns the raw (un-resolved) person names for phase 2:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: google_drive.DriveFile,
     meeting_table: neo4j.TableTarget[Meeting],
@@ -231,8 +231,8 @@ Each note runs as its own processing component, mounted in `app_main` and keyed 
 file_coros = []
 async for path_key, file in source.items():
     file_coros.append(
-        syn.use_mount(
-            syn.component_subpath("file", path_key),
+        syn.call(
+            syn.unit_path("file", path_key),
             process_file, file, meeting_table, task_table, decided_rel,
         )
     )
@@ -240,7 +240,7 @@ per_file = list(await asyncio.gather(*file_coros))
 all_meetings = [m for ms in per_file for m in ms]
 ```
 
-Why a component per file? **Ownership.** The component at `("file", path_key)` owns that note's `Meeting` and `Task` nodes — if the file disappears, so does the component, and Synor deletes its nodes (and the `DECIDED` edges) automatically. `syn.use_mount` returns each file's extractions, and `asyncio.gather` runs all files concurrently. `Person` nodes are deliberately *not* declared here — people are shared across notes, so they wait for phases 2 and 3.
+Why a component per file? **Ownership.** The component at `("file", path_key)` owns that note's `Meeting` and `Task` nodes — if the file disappears, so does the component, and Synor deletes its nodes (and the `DECIDED` edges) automatically. `syn.call` returns each file's extractions, and `asyncio.gather` runs all files concurrently. `Person` nodes are deliberately *not* declared here — people are shared across notes, so they wait for phases 2 and 3.
 
 ## Phase 2: resolve people
 
@@ -249,7 +249,7 @@ Why a component per file? **Ownership.** The component at `("file", path_key)` o
 This is the step that separates a useful graph from a messy one. We have a pile of raw names from every note — "Alice", "Alice Chen", "alice c." — and we want one `Person` node per actual person. Synor's `entity_resolution` op embeds each name, finds near-matches by vector similarity, and asks an LLM to confirm *only* the close pairs — cheap embeddings filter the field, the expensive model runs only where it's genuinely ambiguous:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _resolve_persons(raw_persons: set[str]) -> ResolvedEntities:
     return await resolve_entities(
         entities=raw_persons,
@@ -268,8 +268,8 @@ for m in all_meetings:
     for _desc, assignees in m.task_assignees:
         raw_persons.update(assignees)
 
-persons = await syn.use_mount(
-    syn.component_subpath("resolve_persons"), _resolve_persons, raw_persons,
+persons = await syn.call(
+    syn.unit_path("resolve_persons"), _resolve_persons, raw_persons,
 )
 ```
 
@@ -282,7 +282,7 @@ Because it's a memoized component keyed by the name set, resolution only re-runs
 With the canonical mapping in hand, one component declares the `Person` nodes and the two person-touching edge types — the cross-file part of the graph that no single note could own:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def create_person_relations(
     meetings: list[MeetingExtraction],
     persons: ResolvedEntities,
@@ -318,7 +318,7 @@ Two details carry the correctness here. Resolution happens *before* aggregation,
 `app_main` mounts the targets and runs the three phases. Node tables come first, because relation targets are declared *between* two node tables — that's how the connector knows each edge's endpoint labels and keys:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     meeting_table = await neo4j.mount_table_target(
         KG_DB, "Meeting",
@@ -344,8 +344,8 @@ async def app_main() -> None:
     # Phase 1: per-file fan-out (above) → all_meetings
     # Phase 2: persons = resolve_persons(all raw names)
     # Phase 3: declare Person nodes + person edges
-    await syn.mount(
-        syn.component_subpath("person_relations"),
+    await syn.spawn(
+        syn.unit_path("person_relations"),
         create_person_relations, all_meetings, persons, person_table, attended_rel, assigned_rel,
     )
 

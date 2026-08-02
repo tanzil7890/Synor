@@ -195,7 +195,7 @@ Return only what is supported by the text. Use full names where available.
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_meeting(section_text: str) -> ExtractedMeeting:
     """Extract a structured Meeting from a Markdown section via LiteLLM + instructor."""
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
@@ -245,7 +245,7 @@ class MeetingExtraction:
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: google_drive.DriveFile,
     meeting_table: neo4j.TableTarget[Meeting],
@@ -292,7 +292,7 @@ async def process_file(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _resolve_persons(raw_persons: set[str]) -> ResolvedEntities:
     return await resolve_entities(
         entities=raw_persons,
@@ -306,7 +306,7 @@ async def _resolve_persons(raw_persons: set[str]) -> ResolvedEntities:
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def create_person_relations(
     meetings: list[MeetingExtraction],
     persons: ResolvedEntities,
@@ -350,7 +350,7 @@ async def create_person_relations(
 # ---------------------------------------------------------------------------
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     # --- Mount node tables ---
     meeting_table = await neo4j.mount_table_target(
@@ -400,8 +400,8 @@ async def app_main() -> None:
     file_coros = []
     async for path_key, file in source.items():
         file_coros.append(
-            syn.use_mount(
-                syn.component_subpath("file", path_key),
+            syn.call(
+                syn.unit_path("file", path_key),
                 process_file,
                 file,
                 meeting_table,
@@ -420,15 +420,15 @@ async def app_main() -> None:
         for _task_desc, assignees in m.task_assignees:
             raw_persons.update(assignees)
 
-    persons = await syn.use_mount(
-        syn.component_subpath("resolve_persons"),
+    persons = await syn.call(
+        syn.unit_path("resolve_persons"),
         _resolve_persons,
         raw_persons,
     )
 
     # --- Phase 3: declare Person nodes + person-touching relations ---
-    await syn.mount(
-        syn.component_subpath("person_relations"),
+    await syn.spawn(
+        syn.unit_path("person_relations"),
         create_person_relations,
         all_meetings,
         persons,

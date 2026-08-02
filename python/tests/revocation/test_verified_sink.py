@@ -138,19 +138,19 @@ def _make_verified_preview_harness(
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key, prev_possible_records, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             return syn.TargetReconcileOutput(
                 action=action,
                 sink=verified.sink,
                 tracking_record=(
-                    desired_state if persist_tracking_record else syn.NON_EXISTENCE
+                    desired_state if persist_tracking_record else syn.ABSENT
                 ),
             )
 
@@ -160,7 +160,7 @@ def _make_verified_preview_harness(
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,
@@ -437,13 +437,13 @@ async def test_strict_core_sanitizes_native_descriptor_failure_before_apply() ->
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key, prev_possible_records, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             return syn.TargetReconcileOutput(
                 action=_Action("native-descriptor-failure"),
@@ -457,7 +457,7 @@ async def test_strict_core_sanitizes_native_descriptor_failure_before_apply() ->
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,
@@ -537,13 +537,13 @@ async def test_core_sink_failure_preserves_effect_for_verified_retry() -> None:
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             previous_states.append(tuple(prev_possible_records))
             return syn.TargetReconcileOutput(
@@ -558,7 +558,7 @@ async def test_core_sink_failure_preserves_effect_for_verified_retry() -> None:
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(__file__, suffix="verified_sink_core_retry")
     app = syn.App(
@@ -666,17 +666,17 @@ async def test_strict_runtime_verified_delete_finalizes_without_dangling_owner(
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[Any, str] | None:
             del key
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return syn.TargetReconcileOutput(
                     action=_Action("strict-native-delete"),
                     sink=delete_sink.sink,
-                    tracking_record=syn.NON_EXISTENCE,
+                    tracking_record=syn.ABSENT,
                 )
             if desired_state in prev_possible_records and not prev_may_be_missing:
                 return None
@@ -691,10 +691,10 @@ async def test_strict_runtime_verified_delete_finalizes_without_dangling_owner(
         Handler(),
     )
 
-    @syn.fn
+    @syn.task
     def build() -> None:
         if should_declare:
-            syn.declare_target_state(provider.target_state("artifact", "owned"))
+            syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,
@@ -850,13 +850,13 @@ async def test_core_and_receipt_share_one_bound_descriptor_instance(
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key, prev_possible_records, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             return syn.TargetReconcileOutput(
                 action=action,
@@ -870,7 +870,7 @@ async def test_core_and_receipt_share_one_bound_descriptor_instance(
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,
@@ -953,13 +953,13 @@ async def test_verified_preview_returns_the_original_action(
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key, prev_possible_records, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             return syn.TargetReconcileOutput(
                 action=action,
@@ -973,7 +973,7 @@ async def test_verified_preview_returns_the_original_action(
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,
@@ -1247,13 +1247,13 @@ async def test_native_effect_lmdb_excludes_action_and_remote_error_payloads() ->
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key, prev_possible_records, prev_may_be_missing
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             return syn.TargetReconcileOutput(
                 action=action,
@@ -1267,7 +1267,7 @@ async def test_native_effect_lmdb_excludes_action_and_remote_error_payloads() ->
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,
@@ -1356,13 +1356,13 @@ async def test_core_retries_lost_apply_response_without_repeating_effect() -> No
         def reconcile(
             self,
             key: syn.StableKey,
-            desired_state: str | syn.NonExistenceType,
+            desired_state: str | syn.AbsentType,
             prev_possible_records: Collection[str],
             prev_may_be_missing: bool,
             /,
         ) -> syn.TargetReconcileOutput[_Action, str] | None:
             del key
-            if syn.is_non_existence(desired_state):
+            if syn.is_absent(desired_state):
                 return None
             previous = tuple(prev_possible_records)
             reconcile_history.append((previous, prev_may_be_missing))
@@ -1380,7 +1380,7 @@ async def test_core_retries_lost_apply_response_without_repeating_effect() -> No
     )
 
     async def main() -> None:
-        syn.declare_target_state(provider.target_state("artifact", "owned"))
+        syn.ensure_target_state(provider.target_state("artifact", "owned"))
 
     environment = common.create_test_env(
         __file__,

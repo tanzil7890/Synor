@@ -22,7 +22,7 @@ from typing import (
 
 from . import core
 from .component_ctx import (
-    ComponentSubpath,
+    UnitPath,
     get_context_from_ctx,
 )
 from .deadline import without_deadline as _without_deadline
@@ -32,7 +32,7 @@ from .serde import deserialize, serialize
 from .typing import StableKey
 
 if TYPE_CHECKING:
-    from .api import ComponentMountHandle
+    from .api import SpawnHandle
 
 _P = ParamSpec("_P")
 _K = TypeVar("_K")
@@ -46,20 +46,20 @@ _M_contra = TypeVar("_M_contra", contravariant=True)
 # ============================================================================
 #
 # Per the design (specs/live_component/requirement.md):
-#   "process_live() may not call syn.mount() / mount_each() / use_mount() —
+#   "process_live() may not call syn.spawn() / mount_each() / use_mount() —
 #    those create children whose parent_ctx leak from outside the controller,
 #    breaking the per-controller cancellation cascade. Use operator.update /
 #    operator.delete instead."
 #
 # Enforcement: a Python `ContextVar` set to `True` for the duration of
 # `process_live(operator)`'s asyncio Task. The three mount entry points
-# (`syn.mount`, `syn.mount_each`, `syn.use_mount`) check this var and
+# (`syn.spawn`, `syn.spawn_each`, `syn.call`) check this var and
 # raise if set.
 #
 # Symmetric reset for `process()`: `process()` is invoked from inside
 # `update_full()` which is called from `process_live` — so the asyncio
 # Task running `process()` would inherit its parent Task's `Context`
-# (where `_in_process_live = True`) and `syn.mount(...)` inside `process()`
+# (where `_in_process_live = True`) and `syn.spawn(...)` inside `process()`
 # would falsely raise. Reset is done inline at the top of
 # `LiveComponentOperator.update_full`: we save/restore `_in_process_live`
 # around the `update_full_async` call, so the new Task that Rust spawns
@@ -73,8 +73,8 @@ _M_contra = TypeVar("_M_contra", contravariant=True)
 #   is visible when the body runs). PyO3's `from_py_future` schedules
 #   onto the current event loop without forcing a fresh Context, so the
 #   inheritance chain holds. Future-proofing: integration tests verify both:
-#     (a) `syn.mount(...)` directly inside `process_live` raises
-#     (b) `syn.mount(...)` inside `process()` of a live component does NOT raise
+#     (a) `syn.spawn(...)` directly inside `process_live` raises
+#     (b) `syn.spawn(...)` inside `process()` of a live component does NOT raise
 #   If (a) silently stops raising, the wrapper isn't installed; if (b)
 #   starts raising, the symmetric reset isn't taking effect — both are
 #   load-bearing for the live-component installer machinery.
@@ -84,7 +84,7 @@ _in_process_live: ContextVar[bool] = ContextVar("_in_process_live", default=Fals
 def check_not_in_process_live(api_name: str) -> None:
     """Raise if called from inside `process_live`.
 
-    Called by `syn.mount`, `syn.mount_each`, `syn.use_mount` at entry.
+    Called by `syn.spawn`, `syn.spawn_each`, `syn.call` at entry.
     Outside of `process_live`, `_in_process_live.get()` returns the
     default `False` (e.g. inside `process()` after `update_full`'s
     inline reset, or in any non-live-component context).
@@ -281,7 +281,7 @@ class LiveComponentOperator:
         """Build a resolver for the parent's exception handler chain.
 
         Delegates to :meth:`ComponentContext.resolve_exception_handler`
-        — the same path used by ``syn.mount`` / ``syn.mount_each`` —
+        — the same path used by ``syn.spawn`` / ``syn.spawn_each`` —
         so component-failure logs go through one canonical Python
         fallback. Always non-None. Used both by :meth:`update_full`
         (passes to Rust as ``on_error``) and :meth:`report_exception`
@@ -297,7 +297,7 @@ class LiveComponentOperator:
         """Trigger a full update via instance.process(). Blocks until fully ready.
 
         Resets `_in_process_live = False` for the duration of the call so
-        `syn.mount(...)` from inside `process()` of a live component
+        `syn.spawn(...)` from inside `process()` of a live component
         does NOT raise (we're not strictly in `process_live`'s body
         anymore — `process()` is a separate concern). The new Task that
         Rust spawns to run the processor's coroutine snapshots the
@@ -305,7 +305,7 @@ class LiveComponentOperator:
 
         Exceptions raised inside `process()` (or its descendants) are
         routed via the parent's exception handler chain — same shape as
-        background `syn.mount()` failures — and do NOT propagate to the
+        background `syn.spawn()` failures — and do NOT propagate to the
         caller. This matches the framework's "background work failures
         are reported, not raised" model and lets periodic-refresh
         patterns (e.g. `syn.auto_refresh`) keep looping when a single
@@ -325,12 +325,12 @@ class LiveComponentOperator:
 
     async def update(
         self,
-        subpath: ComponentSubpath,
+        subpath: UnitPath,
         processor_fn: AnyCallable[_P, Any],
         *args: _P.args,
         **kwargs: _P.kwargs,
-    ) -> Any:  # Returns ComponentMountHandle
-        from .api import ComponentMountHandle
+    ) -> Any:  # Returns SpawnHandle
+        from .api import SpawnHandle
 
         child_path = self._path
         for part in subpath.parts:
@@ -359,7 +359,7 @@ class LiveComponentOperator:
             # to survive cancellation across Context boundaries — see
             # `_process_live_wrapper`'s docstring).
             inner_controller.start(_process_live_wrapper(instance, inner_operator))
-            return ComponentMountHandle([readiness_handle])
+            return SpawnHandle([readiness_handle])
 
         processor = create_core_component_processor(
             processor_fn, self._env, child_path, args, kwargs
@@ -372,9 +372,9 @@ class LiveComponentOperator:
             mount_kind="process_live",
         )
         core_handle = await controller.update_async(child_path, processor, on_error)
-        return ComponentMountHandle([core_handle])
+        return SpawnHandle([core_handle])
 
-    async def delete(self, subpath: ComponentSubpath) -> Any:
+    async def delete(self, subpath: UnitPath) -> Any:
         """Delete a child component.
 
         Symmetric with :meth:`update`: failures route through the
@@ -388,7 +388,7 @@ class LiveComponentOperator:
         synchronously by the framework — the next reconcile's GC sweep
         retries the underlying target-state cleanup.
         """
-        from .api import ComponentMountHandle
+        from .api import SpawnHandle
 
         controller = self._require_controller()
         child_path = self._path
@@ -400,7 +400,7 @@ class LiveComponentOperator:
             mount_kind="process_live",
         )
         core_handle = await controller.delete_async(child_path, on_error)
-        return ComponentMountHandle([core_handle])
+        return SpawnHandle([core_handle])
 
     async def mark_ready(self) -> None:
         """Signal readiness. In catch-up mode, this never returns (terminates process_live)."""
@@ -529,19 +529,19 @@ class LiveMapSubscriber(Generic[_K, _V]):
         """Signal readiness. In catch-up mode, this terminates ``watch()``."""
         await self._operator.mark_ready()
 
-    async def update(self, key: _K, value: _V) -> ComponentMountHandle:
+    async def update(self, key: _K, value: _V) -> SpawnHandle:
         """Incrementally update a single entry."""
         return await self._operator.update(  # type: ignore[no-any-return]
-            ComponentSubpath(key),  # type: ignore[arg-type]
+            UnitPath(key),  # type: ignore[arg-type]
             self._fn,
             value,
             *self._args,
             **self._kwargs,
         )
 
-    async def delete(self, key: _K) -> ComponentMountHandle:
+    async def delete(self, key: _K) -> SpawnHandle:
         """Incrementally delete a single entry."""
-        return await self._operator.delete(ComponentSubpath(key))  # type: ignore[no-any-return,arg-type]
+        return await self._operator.delete(UnitPath(key))  # type: ignore[no-any-return,arg-type]
 
     async def read_committed_state(self, key: StableKey) -> Any | None:
         """Read prior-run committed state for ``key``.
@@ -586,11 +586,11 @@ class _MountEachLiveComponent:
                 "Pass live=True to app.update() or use a LiveMapView source that "
                 "supports full scans."
             )
-        from .api import mount
+        from .api import spawn
 
         async for key, value in self._items:
-            await mount(
-                ComponentSubpath(key), self._fn, value, *self._args, **self._kwargs
+            await spawn(
+                UnitPath(key), self._fn, value, *self._args, **self._kwargs
             )  # type: ignore[arg-type]
 
     async def process_live(self, operator: LiveComponentOperator) -> None:
@@ -607,7 +607,7 @@ def auto_refresh(
 ) -> type[LiveComponent]:
     """Wrap a process function as a LiveComponent that re-runs every ``interval``.
 
-    The returned class can be passed to :func:`syn.mount` (and
+    The returned class can be passed to :func:`syn.spawn` (and
     :meth:`LiveComponentOperator.update`) wherever a LiveComponent class is
     accepted. Its ``__init__`` accepts the same positional and keyword
     arguments as ``process_fn`` and forwards them to ``process_fn`` on each
@@ -624,19 +624,19 @@ def auto_refresh(
       mounting ``process_fn`` directly; the interval is ignored.
     - Cycle exceptions raised inside ``process_fn`` are routed via the
       parent's exception handler chain (same shape as background
-      ``syn.mount`` failures — see ``advanced_topics/exception_handlers``).
+      ``syn.spawn`` failures — see ``advanced_topics/exception_handlers``).
       ``update_full`` does NOT propagate them to the loop, so the next
       cycle still runs.
 
     Args:
         process_fn: Async process function — same shape as a function passed
-            directly to ``syn.mount``.
+            directly to ``syn.spawn``.
         interval: Delay between cycles. Applied between the end of one cycle
             and the start of the next (fixed delay, not fixed rate).
 
     Example::
 
-        await syn.mount(
+        await syn.spawn(
             syn.auto_refresh(sync_users, interval=datetime.timedelta(minutes=5)),
             db, target,
         )

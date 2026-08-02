@@ -14,14 +14,14 @@ Most data already lives in a database. This example takes an existing Postgres t
 `app_main` wires the source to the target: it mounts the Postgres target table, opens the source table with `PgTableSource`, and mounts one processing component per source row. Passing `row_type=SourceProduct` maps each row straight into the dataclass; `items(...)` tags each one with its `(product_category, product_name)` composite key. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_product(product: SourceProduct, table: postgres.TableTarget[OutputProduct]) -> None:
     full_description = f"Category: {product.product_category}\nName: {product.product_name}\n\n{product.description}"
     total_value = product.price * product.amount
     embedding = await syn.use_context(EMBEDDER).embed(full_description)
-    table.declare_row(row=OutputProduct(..., total_value=total_value, embedding=embedding))
+    table.ensure_row(row=OutputProduct(..., total_value=total_value, embedding=embedding))
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB, table_name=TABLE_NAME,
@@ -31,7 +31,7 @@ async def app_main() -> None:
     )
     source = postgres.PgTableSource(
         syn.use_context(SOURCE_POOL), table_name="source_products", row_type=SourceProduct)
-    await syn.mount_each(
+    await syn.spawn_each(
         process_product,
         source.fetch_rows().items(lambda p: (p.product_category, p.product_name)),
         target_table,
@@ -45,7 +45,7 @@ We embed the *composed* description — category and name included — so a sear
 - **Your database is the source.** `PgTableSource` reads an existing table directly — point it at any table and you have a semantic index over your structured data, no export step.
 - **Source and target, same engine.** The same Postgres instance can hold both, or set `SOURCE_DATABASE_URL` to read from a separate database. `mount_table_target` creates and manages the target table — schema, idempotent upserts, orphan cleanup.
 - **Embed what matters.** The composed `full_description` carries the category and name into the vector, so meaning-based search works even when the query words never appear in the body.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a row whose content and code are unchanged; the output's primary key is derived from the source row, so only changed rows are re-embedded and upserted and vanished rows are deleted.
+- **Incremental by default.** `@syn.task(cache=True)` skips a row whose content and code are unchanged; the output's primary key is derived from the source row, so only changed rows are re-embedded and upserted and vanished rows are deleted.
 - **Plain Python, your stack.** Local `all-MiniLM-L6-v2` embedder, no API key; swap `EMBED_MODEL` for any of the 12k+ sentence-transformer models on Hugging Face.
 
 ## Run it

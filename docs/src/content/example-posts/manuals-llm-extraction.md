@@ -47,18 +47,18 @@ class ModuleInfo(pydantic.BaseModel):
     methods: list[MethodInfo] = pydantic.Field(default_factory=list)
 ```
 
-Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/), so `LLM_MODEL` swaps any provider (OpenAI, Gemini, a local Ollama model). `@syn.fn(memo=True)` caches both the PDF parse and the extraction by content.
+Extraction is [instructor](https://github.com/instructor-ai/instructor) over [LiteLLM](https://docs.litellm.ai/), so `LLM_MODEL` swaps any provider (OpenAI, Gemini, a local Ollama model). `@syn.task(cache=True)` caches both the PDF parse and the extraction by content.
 
 ## Convert, extract, and store
 
 `process_file` runs once per manual — docling to Markdown, LLM to `ModuleInfo`, then declare one Postgres row with the summary counts plus the full structure as JSON:
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[ModuleRecord]) -> None:
     markdown = await pdf_to_markdown(await file.read())
     info = await extract_module(markdown)
-    table.declare_row(
+    table.ensure_row(
         row=ModuleRecord(
             filename=file.file_path.path.name,
             title=info.title,

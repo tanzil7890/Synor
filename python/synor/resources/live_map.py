@@ -3,7 +3,7 @@
 ``LiveMap[K, V]`` bridges live data-*producing* logic and live data-*consuming* logic within a
 single Synor session. The producing side declares ``(key, value)`` entries as **target
 states** via :meth:`LiveMap.declare_entry`; the consuming side reads it as a
-``syn.LiveMapView`` via ``syn.mount_each``. All data is held in an in-process ``dict`` that
+``syn.LiveMapView`` via ``syn.spawn_each``. All data is held in an in-process ``dict`` that
 the engine keeps in sync through normal target-state ownership, and that same ``dict`` is
 exposed as a live source for downstream components.
 
@@ -13,7 +13,7 @@ Example::
 
     lm: LiveMap[str, str] = await LiveMap.create()   # inside the app's component tree
     lm.declare_entry(key, value)                      # producer: inside any component
-    await syn.mount_each(process_entry, lm)          # consumer: one component per entry
+    await syn.spawn_each(process_entry, lm)          # consumer: one component per entry
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ class _ContainerRecord(_msgspec.Struct, frozen=True):
 class _EntryRecord(_msgspec.Struct, frozen=True):
     """Minimal existence marker persisted for an entry target state.
 
-    Never read — its only job is to be a non-``NON_EXISTENCE`` value so the engine records
+    Never read — its only job is to be a non-``ABSENT`` value so the engine records
     "this key exists", which lets a later run drive a delete when the producer stops declaring
     it. Change detection for the consumer is done by ``==`` in the sink, not from this record.
     """
@@ -117,7 +117,7 @@ class _EntryHandler:
     def reconcile(
         self,
         key: _syn.StableKey,
-        desired_state: _Any | _syn.NonExistenceType,
+        desired_state: _Any | _syn.AbsentType,
         prev_possible_records: _Collection[_EntryRecord],
         prev_may_be_missing: bool,
         /,
@@ -125,11 +125,11 @@ class _EntryHandler:
         # Never skip: applying to an in-memory dict is cheap, and the `==` gate in the sink
         # decides whether to notify the consumer. `prev_possible_records` is intentionally
         # unused (no fingerprint compare).
-        if _syn.is_non_existence(desired_state):
+        if _syn.is_absent(desired_state):
             return _syn.TargetReconcileOutput(
                 action=_EntryAction(self._live_map, key, None, True),
                 sink=_ENTRY_SINK,
-                tracking_record=_syn.NON_EXISTENCE,
+                tracking_record=_syn.ABSENT,
             )
         return _syn.TargetReconcileOutput(
             action=_EntryAction(self._live_map, key, desired_state, False),
@@ -144,16 +144,16 @@ class _ContainerHandler:
     def reconcile(
         self,
         key: _syn.StableKey,
-        desired_state: "_ContainerSpec | _syn.NonExistenceType",
+        desired_state: "_ContainerSpec | _syn.AbsentType",
         prev_possible_records: _Collection[_ContainerRecord],
         prev_may_be_missing: bool,
         /,
     ) -> "_syn.TargetReconcileOutput[_ContainerAction, _ContainerRecord, _EntryHandler] | None":
-        if _syn.is_non_existence(desired_state):
+        if _syn.is_absent(desired_state):
             return _syn.TargetReconcileOutput(
                 action=_ContainerAction(None, True),
                 sink=_CONTAINER_SINK,
-                tracking_record=_syn.NON_EXISTENCE,
+                tracking_record=_syn.ABSENT,
             )
         assert isinstance(key, _uuid.UUID)
         return _syn.TargetReconcileOutput(
@@ -220,7 +220,7 @@ class LiveMap(_Generic[_K, _V]):
 
     Create with ``await LiveMap.create()`` from inside the app's component tree. Producers add
     entries with :meth:`declare_entry` from inside any component; consumers pass the map to
-    ``syn.mount_each`` to process one component per entry, kept in sync as entries appear,
+    ``syn.spawn_each`` to process one component per entry, kept in sync as entries appear,
     change, and disappear. An entry exists as long as some live component declares it; when its
     declaring component stops declaring it (or disappears), the entry is removed.
 
@@ -261,12 +261,12 @@ class LiveMap(_Generic[_K, _V]):
         self = cls()
         _REGISTRY[self._uuid] = self
         container = _CONTAINER_PROVIDER.target_state(self._uuid, _ContainerSpec())
-        self._entry_provider = await _syn.mount_target(container)
+        self._entry_provider = await _syn.attach_target(container)
         return self
 
     def declare_entry(self, key: _K, value: _V) -> None:
         """Declare an entry, owned by the calling component. Call inside a component context."""
-        _syn.declare_target_state(self._entry_provider.target_state(key, value))
+        _syn.ensure_target_state(self._entry_provider.target_state(key, value))
 
     def __aiter__(self) -> _AsyncIterator[tuple[_K, _V]]:
         return self._scan()

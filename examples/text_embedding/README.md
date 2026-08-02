@@ -18,7 +18,7 @@ The whole pipeline is ordinary `async` Python and the row type is your own datac
 3. **Embed** every chunk with `all-MiniLM-L6-v2`, a small, fast model that runs locally with no API key.
 4. **Store** one row per chunk in Postgres, with a pgvector index over the embedding.
 
-`process_file` runs once per file; `memo=True` makes it incremental — if a file's content and the function's code are unchanged, the whole file is skipped on the next run. Read it top-to-bottom in [`main.py`](main.py):
+`process_file` runs once per file; `cache=True` makes it incremental — if a file's content and the function's code are unchanged, the whole file is skipped on the next run. Read it top-to-bottom in [`main.py`](main.py):
 
 ```python
 @dataclass
@@ -30,14 +30,14 @@ class DocEmbedding:
     text: str
     embedding: Annotated[NDArray, EMBEDDER]   # dimension inferred from the embedder
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[DocEmbedding]) -> None:
     text = await file.read_text()
     chunks = _splitter.split(text, chunk_size=2000, chunk_overlap=500, language="markdown")
     id_gen = IdGenerator()
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB, table_name=TABLE_NAME,
@@ -47,7 +47,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
     target_table.declare_vector_index(column="embedding")
     files = localfs.walk_dir(sourcedir, recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]), live=True)
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
 Each row's `id` is derived from its chunk text, so re-running upserts only the rows that actually changed and deletes the ones whose source is gone — you never write update logic.
@@ -55,7 +55,7 @@ Each row's `id` is derived from its chunk text, so re-running upserts only the r
 ## Why this example is useful
 
 - **The simplest end-to-end vector index.** Walk → chunk → embed → store, in one short `main.py` — the canonical foundation under RAG and semantic search.
-- **Incremental by default.** `@syn.fn(memo=True)` caches per file; edit one file and only its changed chunks re-embed, then `mount_table_target` upserts the diff and cleans up orphans — no diff logic to write.
+- **Incremental by default.** `@syn.task(cache=True)` caches per file; edit one file and only its changed chunks re-embed, then `mount_table_target` upserts the diff and cleans up orphans — no diff logic to write.
 - **Managed Postgres target.** A single `mount_table_target` owns the table schema, the pgvector index, idempotent upserts, and deletion when a file disappears.
 - **Local, no API key.** Embeddings come from `all-MiniLM-L6-v2` via [sentence-transformers](https://huggingface.co/models?other=sentence-transformers) — swap in any of 12k+ models. The same embedder is reused at query time so indexing and search stay consistent.
 - **Honest cache busting.** `EMBEDDER` is declared with `detect_change=True`, so swapping the model re-embeds everything against it with no cache to clear by hand.

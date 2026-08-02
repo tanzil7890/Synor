@@ -27,8 +27,8 @@ from synor._internal import core as _core
 from synor._internal.context_keys import ContextKey as _ContextKey
 from synor._internal.typing import (
     MemoStateOutcome as _MemoStateOutcome,
-    NonExistenceType as _NonExistenceType,
-    is_non_existence as _is_non_existence,
+    AbsentType as _NonExistenceType,
+    is_absent as _is_non_existence,
 )
 from synor import StableKey as _StableKey
 from synor.connectorkits.fingerprint import fingerprint_bytes as _fingerprint_bytes

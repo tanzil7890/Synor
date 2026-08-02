@@ -97,7 +97,7 @@ class HnTopic:
 # ============================================================================
 
 
-@syn.fn
+@syn.task
 async def extract_topics(text: str | None) -> list[str]:
     """Extract topics from text using LLM."""
     if not text or not text.strip():
@@ -202,7 +202,7 @@ class TableTargets:
     topics: postgres.TableTarget[HnTopic]
 
 
-@syn.fn
+@syn.task
 async def process_thread(
     thread_id: str,
     targets: TableTargets,
@@ -213,7 +213,7 @@ async def process_thread(
     thread_topics = await extract_topics(thread.text)
 
     # Declare thread message row
-    targets.messages.declare_row(
+    targets.messages.ensure_row(
         row=HnMessage(
             id=thread.id,
             thread_id=thread.id,
@@ -226,7 +226,7 @@ async def process_thread(
     )
     # Declare thread topic rows
     for topic in thread_topics:
-        targets.topics.declare_row(
+        targets.topics.ensure_row(
             row=HnTopic(
                 topic=topic,
                 message_id=thread.id,
@@ -240,7 +240,7 @@ async def process_thread(
         comment_topics = await extract_topics(comment.text)
 
         # Declare comment message row
-        targets.messages.declare_row(
+        targets.messages.ensure_row(
             row=HnMessage(
                 id=comment.id,
                 thread_id=thread.id,
@@ -253,7 +253,7 @@ async def process_thread(
         )
         # Declare comment topic rows
         for topic in comment_topics:
-            targets.topics.declare_row(
+            targets.topics.ensure_row(
                 row=HnTopic(
                     topic=topic,
                     message_id=comment.id,
@@ -264,7 +264,7 @@ async def process_thread(
             )
 
 
-@syn.fn
+@syn.task
 async def app_main() -> None:
     """Main pipeline function."""
     print("Starting HackerNews Trending Topics Pipeline")
@@ -296,7 +296,7 @@ async def app_main() -> None:
         thread_ids = await fetch_thread_list(session)
 
     # Process threads (each component fetches its own thread data)
-    await syn.mount_each(process_thread, ((tid, tid) for tid in thread_ids), targets)
+    await syn.spawn_each(process_thread, ((tid, tid) for tid in thread_ids), targets)
 
 
 # ============================================================================

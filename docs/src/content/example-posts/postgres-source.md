@@ -105,7 +105,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 `process_product` runs once per source row. It builds a `full_description` from the category, name, and body, computes `total_value`, embeds the description, and declares the target row.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_product(
     product: SourceProduct,
     table: postgres.TableTarget[OutputProduct],
@@ -113,7 +113,7 @@ async def process_product(
     full_description = f"Category: {product.product_category}\nName: {product.product_name}\n\n{product.description}"
     total_value = product.price * product.amount
     embedding = await syn.use_context(EMBEDDER).embed(full_description)
-    table.declare_row(
+    table.ensure_row(
         row=OutputProduct(
             product_category=product.product_category,
             product_name=product.product_name,
@@ -128,14 +128,14 @@ async def process_product(
 
 We embed the composed description rather than the raw body, so the category and name carry weight in the vector — a search for "wireless audio" matches even when the body never says it. We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2`, a small, fast model that runs locally with no API key; there are 12k+ sentence-transformer models on [Hugging Face](https://huggingface.co/models?other=sentence-transformers), so swap in whichever you prefer.
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a row's content and this function's code are both unchanged, the row is skipped on the next run. `table.declare_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match.
+`@syn.task` with `cache=True` is what makes this incremental: if a row's content and this function's code are both unchanged, the row is skipped on the next run. `table.ensure_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match.
 
 ## Define the main function
 
 `app_main` wires the source to the target. It mounts the Postgres target table, opens the source table, and mounts one processing component per source row.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -153,7 +153,7 @@ async def app_main() -> None:
         row_type=SourceProduct,
     )
 
-    await syn.mount_each(
+    await syn.spawn_each(
         process_product,
         source.fetch_rows().items(lambda p: (p.product_category, p.product_name)),
         target_table,
@@ -166,7 +166,7 @@ app = syn.App(
 )
 ```
 
-`PgTableSource` reads the table — passing `row_type=SourceProduct` maps each row straight into the dataclass and selects exactly its fields. `fetch_rows().items(...)` streams rows over a cursor and tags each one with a stable key, here the `(product_category, product_name)` composite primary key. `mount_table_target` creates and manages the Postgres target table for you: schema, idempotent upserts, and orphan cleanup when a source row disappears. `mount_each` runs one component per row so the engine can track and update them independently.
+`PgTableSource` reads the table — passing `row_type=SourceProduct` maps each row straight into the dataclass and selects exactly its fields. `fetch_rows().items(...)` streams rows over a cursor and tags each one with a stable key, here the `(product_category, product_name)` composite primary key. `mount_table_target` creates and manages the Postgres target table for you: schema, idempotent upserts, and orphan cleanup when a source row disappears. `spawn_each` runs one component per row so the engine can track and update them independently.
 
 ## Setup and run
 
@@ -213,7 +213,7 @@ The most semantically similar products come back ranked — even when they share
 
 ## Incremental updates
 
-Synor keeps the target in sync with the source table and does the **minimum work** to get there. You never compute a diff or write update logic: the source row changes, and Synor works out exactly what to re-embed, upsert, and delete. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a row is skipped when its content and the function's code are both unchanged. `mount_table_target` decides what to *write* — each output row's primary key is derived from the source row's `(product_category, product_name)`, so it upserts only the rows that actually changed and deletes rows whose source is gone.
+Synor keeps the target in sync with the source table and does the **minimum work** to get there. You never compute a diff or write update logic: the source row changes, and Synor works out exactly what to re-embed, upsert, and delete. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a row is skipped when its content and the function's code are both unchanged. `mount_table_target` decides what to *write* — each output row's primary key is derived from the source row's `(product_category, product_name)`, so it upserts only the rows that actually changed and deletes rows whose source is gone.
 
 - **A row is added** — only that row is derived and embedded, and it is inserted. The rest is untouched.
 - **A row is edited** — it is re-derived; if the embedded description changed it is re-embedded, and the target row is updated in place.

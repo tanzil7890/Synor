@@ -18,12 +18,12 @@ from tests.common.target_states import GlobalDictTarget
 synor_env = common.create_test_env(__file__)
 
 
-@syn.fn
+@syn.task
 async def process_file(file: localfs.File) -> None:
     content = await file.read_text()
     # Use the filename as the target state key
     key = file.file_path.path.name
-    syn.declare_target_state(GlobalDictTarget.target_state(key, content))
+    syn.ensure_target_state(GlobalDictTarget.target_state(key, content))
 
 
 async def _wait_for_target_keys(
@@ -76,10 +76,10 @@ async def test_localfs_live_add_edit_delete(tmp_path: Path) -> None:
     (tmp_path / "file1.txt").write_text("content1")
     (tmp_path / "file2.txt").write_text("content2")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         files = localfs.walk_dir(tmp_path, live=True)
-        await syn.mount_each(process_file, files.items())
+        await syn.spawn_each(process_file, files.items())
 
     app = syn.App(
         syn.AppConfig(name="test_localfs_live", environment=synor_env),
@@ -136,12 +136,12 @@ async def test_localfs_live_rescan_interval(tmp_path: Path) -> None:
 
     (tmp_path / "file1.txt").write_text("content1")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         files = localfs.walk_dir(
             tmp_path, live=True, rescan_interval=datetime.timedelta(seconds=2)
         )
-        await syn.mount_each(process_file, files.items())
+        await syn.spawn_each(process_file, files.items())
 
     app = syn.App(
         syn.AppConfig(name="test_localfs_live_rescan", environment=synor_env),
@@ -182,10 +182,10 @@ async def test_localfs_live_rescan_none_disables(tmp_path: Path) -> None:
 
     (tmp_path / "a.txt").write_text("aaa")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         files = localfs.walk_dir(tmp_path, live=True, rescan_interval=None)
-        await syn.mount_each(process_file, files.items())
+        await syn.spawn_each(process_file, files.items())
 
     app = syn.App(
         syn.AppConfig(name="test_localfs_live_rescan_none", environment=synor_env),

@@ -49,7 +49,7 @@ class _TopicSpec:
 
 class _TopicAction(NamedTuple):
     key: _TopicKey
-    spec: _TopicSpec | syn.NonExistenceType
+    spec: _TopicSpec | syn.AbsentType
 
 
 class _MessageAction(NamedTuple):
@@ -113,14 +113,14 @@ class _MessageHandler(syn.TargetHandler[bytes | str, _MessageFingerprint, None])
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_target_state: bytes | str | syn.NonExistenceType,
+        desired_target_state: bytes | str | syn.AbsentType,
         prev_possible_records: Collection[_MessageFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_MessageAction, _MessageFingerprint] | None:
         assert isinstance(key, (bytes, str))
 
-        if syn.is_non_existence(desired_target_state):
+        if syn.is_absent(desired_target_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             if self._deletion_value_fn is None:
@@ -132,7 +132,7 @@ class _MessageHandler(syn.TargetHandler[bytes | str, _MessageFingerprint, None])
             return syn.TargetReconcileOutput(
                 action=_MessageAction(key=key, value=deletion_value),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         # Upsert case
@@ -177,7 +177,7 @@ class _TopicHandler(syn.TargetHandler[_TopicSpec, None, _MessageHandler]):
     ) -> list[syn.ChildTargetDef[_MessageHandler] | None]:
         outputs: list[syn.ChildTargetDef[_MessageHandler] | None] = []
         for action in actions:
-            if syn.is_non_existence(action.spec):
+            if syn.is_absent(action.spec):
                 outputs.append(None)
             else:
                 client = context_provider.get(action.key.client_key, IggyClient)
@@ -194,16 +194,16 @@ class _TopicHandler(syn.TargetHandler[_TopicSpec, None, _MessageHandler]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_target_state: _TopicSpec | syn.NonExistenceType,
+        desired_target_state: _TopicSpec | syn.AbsentType,
         prev_possible_records: Collection[None],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_TopicAction, None, _MessageHandler]:
         topic_key = _TopicKey(*_TOPIC_KEY_CHECKER.check(key))
 
-        tracking_record: None | syn.NonExistenceType
-        if syn.is_non_existence(desired_target_state):
-            tracking_record = syn.NON_EXISTENCE
+        tracking_record: None | syn.AbsentType
+        if syn.is_absent(desired_target_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = None
 
@@ -241,7 +241,7 @@ class IggyTopicTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["IggyTopicTarge
     ) -> None:
         self._provider = provider
 
-    def declare_target_state(
+    def ensure_target_state(
         self: "IggyTopicTarget", *, key: bytes | str, value: bytes | str
     ) -> None:
         """
@@ -254,7 +254,7 @@ class IggyTopicTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["IggyTopicTarge
             key: The stable identity used by Synor.
             value: The message payload.
         """
-        syn.declare_target_state(self._provider.target_state(key, value))
+        syn.ensure_target_state(self._provider.target_state(key, value))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -271,7 +271,7 @@ def iggy_topic_target(
     """
     Create a TargetState for an Iggy stream/topic target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``mount_iggy_topic_target()`` for a convenience wrapper.
 
     Args:
@@ -292,7 +292,7 @@ def iggy_topic_target(
     return _topic_provider.target_state(key, spec)
 
 
-@syn.fn
+@syn.task
 def declare_iggy_topic_target(
     client: ContextKey[IggyClient],
     stream: str,
@@ -315,7 +315,7 @@ def declare_iggy_topic_target(
     Returns:
         An IggyTopicTarget that can be used to declare target states.
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         iggy_topic_target(
             client,
             stream,
@@ -338,7 +338,7 @@ async def mount_iggy_topic_target(
     """
     Mount an Iggy topic target and return a ready-to-use IggyTopicTarget.
 
-    Sugar over ``iggy_topic_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``iggy_topic_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         client: ContextKey for the IggyClient connection.
@@ -351,7 +351,7 @@ async def mount_iggy_topic_target(
     Returns:
         An IggyTopicTarget that can be used to declare target states.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         iggy_topic_target(
             client=client,
             stream=stream,

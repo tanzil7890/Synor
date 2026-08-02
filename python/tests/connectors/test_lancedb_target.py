@@ -217,15 +217,15 @@ async def test_add_column_preserves_existing_rows(lancedb_dir: Path) -> None:
     row_type: type[Any] = SimpleRow
 
     async def declare_table_and_rows() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            lancedb.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            lancedb.ensure_table_target,
             LANCEDB_DB,
             table_name,
             await lancedb.TableSchema.from_class(row_type, primary_key=["id"]),
         )
         for row in source_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     env = _make_env(conn, "test_add_column_preserves_existing_rows")
     app = syn.App(
@@ -274,15 +274,15 @@ async def test_nullable_schema_only_add_does_not_upsert_rows(
     row_type: type[Any] = SimpleRow
 
     async def declare_table_and_rows() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            lancedb.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            lancedb.ensure_table_target,
             LANCEDB_DB,
             table_name,
             await lancedb.TableSchema.from_class(row_type, primary_key=["id"]),
         )
         for row in source_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     env = _make_env(conn, "test_nullable_schema_only_add_does_not_upsert_rows")
     app = syn.App(
@@ -327,15 +327,15 @@ async def test_add_column_keeps_old_rows_before_backfill(lancedb_dir: Path) -> N
     row_type: type[Any] = SimpleRow
 
     async def declare_table_and_rows() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            lancedb.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            lancedb.ensure_table_target,
             LANCEDB_DB,
             table_name,
             await lancedb.TableSchema.from_class(row_type, primary_key=["id"]),
         )
         for row in source_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     env = _make_env(conn, "test_add_column_keeps_old_rows_before_backfill")
     app = syn.App(
@@ -556,15 +556,15 @@ async def test_add_non_nullable_column_is_materialized_as_nullable(
     row_type: type[Any] = SimpleRow
 
     async def declare_table_and_rows() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            lancedb.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            lancedb.ensure_table_target,
             LANCEDB_DB,
             table_name,
             await lancedb.TableSchema.from_class(row_type, primary_key=["id"]),
         )
         for row in source_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     env = _make_env(conn, "test_add_non_nullable_column_is_materialized_as_nullable")
     app = syn.App(
@@ -603,15 +603,15 @@ async def test_add_multiple_columns_in_place(lancedb_dir: Path) -> None:
     row_type: type[Any] = SimpleRow
 
     async def declare_table_and_rows() -> None:
-        table = await syn.use_mount(
-            syn.component_subpath("setup", "table"),
-            lancedb.declare_table_target,
+        table = await syn.call(
+            syn.unit_path("setup", "table"),
+            lancedb.ensure_table_target,
             LANCEDB_DB,
             table_name,
             await lancedb.TableSchema.from_class(row_type, primary_key=["id"]),
         )
         for row in source_rows:
-            table.declare_row(row=row)
+            table.ensure_row(row=row)
 
     env = _make_env(conn, "test_add_multiple_columns_in_place")
     app = syn.App(

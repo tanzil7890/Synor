@@ -17,6 +17,15 @@ __pycache__/
 
 # C extensions
 *.so
+# Windows: maturin emits debug symbols next to the extension module. The
+# extension itself (core.pyd) is already covered by *.py[cod] above, but the
+# .pdb is not -- it is tens of MB and must not be committed.
+*.pdb
+
+# Test residue from the CLI suite (generated apps, LMDB lock dirs, outputs)
+python/tests/cli/synor.db/
+python/tests/cli/out_*/
+python/tests/cli/cli_init_project/
 
 # Distribution / packaging
 .venv*/

@@ -10,7 +10,7 @@ class FunctionInfo(BaseModel):
     signature: str = Field(
         description="Function signature, e.g. 'async def foo(x: int) -> str'"
     )
-    is_synor_function: bool = Field(description="Whether decorated with @syn.fn")
+    is_synor_function: bool = Field(description="Whether decorated with @syn.task")
     summary: str = Field(description="Brief summary of what the function does")
 
 
@@ -25,8 +25,8 @@ MERMAID_GRAPH_DESCRIPTION = """
 Mermaid graph showing Synor function call relationships. Requirements:
 - Use 'graph TD' (top-down) layout
 - Include ONLY functions defined in this codebase (not external libraries)
-- Use **bold** text for @syn.fn decorated functions
-- Use thick arrows (==>) for syn.mount/syn.use_mount calls
+- Use **bold** text for @syn.task decorated functions
+- Use thick arrows (==>) for syn.spawn/syn.call calls
 - Use normal arrows (-->) for regular function calls
 - Include a comment with the app name if this is for a syn.App
 

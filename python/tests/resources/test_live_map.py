@@ -28,18 +28,18 @@ class Val:
 _call_counts: dict[str, int] = {}
 
 
-@syn.fn
+@syn.task
 async def process_entry(v: Val) -> None:
     _call_counts[v.key] = _call_counts.get(v.key, 0) + 1
-    syn.declare_target_state(GlobalDictTarget.target_state(v.key, v.payload))
+    syn.ensure_target_state(GlobalDictTarget.target_state(v.key, v.payload))
 
 
-@syn.fn
+@syn.task
 async def process_entry_b(v: Val) -> None:
-    syn.declare_target_state(AsyncGlobalDictTarget.target_state(v.key, v.payload))
+    syn.ensure_target_state(AsyncGlobalDictTarget.target_state(v.key, v.payload))
 
 
-@syn.fn
+@syn.task
 async def produce(lm: LiveMap[str, Val], desired: dict[str, Any]) -> None:
     """One-shot producer: declare the given entries (owned by this component)."""
     for k, payload in desired.items():
@@ -123,12 +123,12 @@ def test_basic_produce_consume() -> None:
     GlobalDictTarget.store.clear()
     _call_counts.clear()
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        handle = await syn.mount(produce, lm, {"a": "1", "b": "2", "c": "3"})
+        handle = await syn.spawn(produce, lm, {"a": "1", "b": "2", "c": "3"})
         await handle.ready()
-        await syn.mount_each(process_entry, lm)
+        await syn.spawn_each(process_entry, lm)
 
     _run_oneshot("basic", app_main)
     assert _data() == {"a": "1", "b": "2", "c": "3"}
@@ -139,18 +139,18 @@ def test_multiple_producers_one_map() -> None:
     GlobalDictTarget.store.clear()
     _call_counts.clear()
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        h1 = await syn.mount(
-            syn.component_subpath("p1"), produce, lm, {"a": "1", "b": "2"}
+        h1 = await syn.spawn(
+            syn.unit_path("p1"), produce, lm, {"a": "1", "b": "2"}
         )
-        h2 = await syn.mount(
-            syn.component_subpath("p2"), produce, lm, {"c": "3", "d": "4"}
+        h2 = await syn.spawn(
+            syn.unit_path("p2"), produce, lm, {"c": "3", "d": "4"}
         )
         await h1.ready()
         await h2.ready()
-        await syn.mount_each(process_entry, lm)
+        await syn.spawn_each(process_entry, lm)
 
     _run_oneshot("multi_producer", app_main)
     assert _data() == {"a": "1", "b": "2", "c": "3", "d": "4"}
@@ -160,20 +160,20 @@ def test_multiple_livemaps_isolated() -> None:
     GlobalDictTarget.store.clear()
     AsyncGlobalDictTarget.store.clear()
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm1: LiveMap[str, Val] = await LiveMap.create()
         lm2: LiveMap[str, Val] = await LiveMap.create()
-        h1 = await syn.mount(
-            syn.component_subpath("p1"), produce, lm1, {"a": "1", "b": "2"}
+        h1 = await syn.spawn(
+            syn.unit_path("p1"), produce, lm1, {"a": "1", "b": "2"}
         )
-        h2 = await syn.mount(
-            syn.component_subpath("p2"), produce, lm2, {"c": "3", "d": "4"}
+        h2 = await syn.spawn(
+            syn.unit_path("p2"), produce, lm2, {"c": "3", "d": "4"}
         )
         await h1.ready()
         await h2.ready()
-        await syn.mount_each(syn.component_subpath("c1"), process_entry, lm1)
-        await syn.mount_each(syn.component_subpath("c2"), process_entry_b, lm2)
+        await syn.spawn_each(syn.unit_path("c1"), process_entry, lm1)
+        await syn.spawn_each(syn.unit_path("c2"), process_entry_b, lm2)
 
     _run_oneshot("isolation", app_main)
     assert {k: v.data for k, v in GlobalDictTarget.store.data.items()} == {
@@ -189,13 +189,13 @@ def test_multiple_livemaps_isolated() -> None:
 def test_unhashable_value() -> None:
     GlobalDictTarget.store.clear()
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
         # payloads are unhashable lists — proves no hashability/fingerprintability needed.
-        handle = await syn.mount(produce, lm, {"a": [1, 2], "b": [3]})
+        handle = await syn.spawn(produce, lm, {"a": [1, 2], "b": [3]})
         await handle.ready()
-        await syn.mount_each(process_entry, lm)
+        await syn.spawn_each(process_entry, lm)
 
     _run_oneshot("unhashable", app_main)
     assert _data() == {"a": [1, 2], "b": [3]}
@@ -205,10 +205,10 @@ def test_aiter_snapshot() -> None:
     GlobalDictTarget.store.clear()
     collected: dict[str, Any] = {}
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        handle = await syn.mount(produce, lm, {"a": "1", "b": "2"})
+        handle = await syn.spawn(produce, lm, {"a": "1", "b": "2"})
         await handle.ready()
         async for key, value in lm:
             collected[key] = value.payload
@@ -226,12 +226,12 @@ def test_restart_refill_and_cross_run_delete() -> None:
     _call_counts.clear()
     env = common.create_test_env(__file__, suffix="restart")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        handle = await syn.mount(produce, lm, dict(_restart_desired))
+        handle = await syn.spawn(produce, lm, dict(_restart_desired))
         await handle.ready()
-        await syn.mount_each(process_entry, lm)
+        await syn.spawn_each(process_entry, lm)
 
     # One app, re-run via repeated update_blocking() — the supported multi-run pattern. (A
     # fresh Environment/App per run at the same db_path is not supported by LMDB; see
@@ -263,12 +263,12 @@ def test_restart_same_inputs_refill() -> None:
     GlobalDictTarget.store.clear()
     env = common.create_test_env(__file__, suffix="restart_same")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        handle = await syn.mount(produce, lm, {"a": "1", "b": "2"})
+        handle = await syn.spawn(produce, lm, {"a": "1", "b": "2"})
         await handle.ready()
-        await syn.mount_each(process_entry, lm)
+        await syn.spawn_each(process_entry, lm)
 
     # One app, re-run via repeated update_blocking() (the supported multi-run pattern).
     app = syn.App(
@@ -293,7 +293,7 @@ def test_single_watcher_raises() -> None:
         async def delete(self, key: Any) -> Any:
             raise AssertionError("unreached")
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
         task = asyncio.create_task(lm.watch(_FakeSub()))  # type: ignore[arg-type]
@@ -325,11 +325,11 @@ def test_single_watcher_raises() -> None:
 def _make_live_app(name: str) -> syn.App[[], None]:
     env = common.create_test_env(__file__, suffix=name)
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        await syn.mount_each(process_entry, lm)
-        await syn.mount(syn.component_subpath("producer"), MapProducer, lm, name)
+        await syn.spawn_each(process_entry, lm)
+        await syn.spawn(syn.unit_path("producer"), MapProducer, lm, name)
 
     return syn.App(
         syn.AppConfig(name=f"test_live_map_{name}", environment=env), app_main

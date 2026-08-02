@@ -214,7 +214,7 @@ _DocumentFingerprint = bytes
 
 class _IndexAction(NamedTuple):
     key: _IndexKey
-    spec: _IndexSpec | syn.NonExistenceType
+    spec: _IndexSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
 
 
@@ -323,7 +323,7 @@ class _DocumentHandler(syn.TargetHandler[Document, _DocumentFingerprint]):
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Document | syn.NonExistenceType,
+        desired_state: Document | syn.AbsentType,
         prev_possible_records: Collection[_DocumentFingerprint],
         prev_may_be_missing: bool,
         /,
@@ -334,13 +334,13 @@ class _DocumentHandler(syn.TargetHandler[Document, _DocumentFingerprint]):
         _validate_name(key, "doc_id")
         hash_key = _make_hash_key(self._index_name, key)
 
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_DocumentAction(hash_key=hash_key, fields=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         # Build fingerprint from vector + payload
@@ -416,7 +416,7 @@ class _IndexHandler(
                     if action.main_action == "replace":
                         await self._delete_prefix_keys(client, key.index_name)
 
-                if syn.is_non_existence(action.spec):
+                if syn.is_absent(action.spec):
                     outputs[i] = None
                     continue
 
@@ -541,7 +541,7 @@ class _IndexHandler(
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _IndexSpec | syn.NonExistenceType,
+        desired_state: _IndexSpec | syn.AbsentType,
         prev_possible_records: Collection[_IndexTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -554,10 +554,10 @@ class _IndexHandler(
                 f"Index key must be a (db_key, index_name) tuple, got {key!r}"
             )
         key = _IndexKey(*_INDEX_KEY_CHECKER.check(key))
-        tracking_record: _IndexTrackingRecord | syn.NonExistenceType
+        tracking_record: _IndexTrackingRecord | syn.AbsentType
 
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_IndexTrackingRecordCore(
@@ -639,7 +639,7 @@ class IndexTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["IndexTarget"]):
         Args:
             document: Document with id, vector, and optional payload.
         """
-        syn.declare_target_state(self._provider.target_state(document.id, document))
+        syn.ensure_target_state(self._provider.target_state(document.id, document))
 
     def __synor_memo_key__(self) -> str:
         return self._provider.memo_key
@@ -654,7 +654,7 @@ def index_target(
 ) -> "syn.TargetState[_DocumentHandler]":
     """Create a TargetState for a Valkey index target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``mount_index_target()`` for a convenience wrapper.
 
     Args:
@@ -690,7 +690,7 @@ def declare_index_target(
     Returns:
         IndexTarget for declaring documents.
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         index_target(db, index_name, schema, managed_by=managed_by)
     )
     return IndexTarget(provider)
@@ -705,7 +705,7 @@ async def mount_index_target(
 ) -> "IndexTarget[syn.ResolvedS]":
     """Mount an index target and return a ready-to-use IndexTarget.
 
-    Sugar over ``index_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``index_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         db: ContextKey for the GlideClient connection.
@@ -716,7 +716,7 @@ async def mount_index_target(
     Returns:
         An IndexTarget for declaring documents.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         index_target(db, index_name, schema, managed_by=managed_by)
     )
     return IndexTarget(provider)

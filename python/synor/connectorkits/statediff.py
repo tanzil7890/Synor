@@ -76,8 +76,8 @@ class CompositeTrackingRecord(
 class _GroupedStates(_Generic[_SubKeyT, _SubTrackingRecordT]):
     """Internal mutable accumulator used by `diff_composite()`."""
 
-    desired: _SubTrackingRecordT | _syn.NonExistenceType = _dataclasses.field(
-        default=_syn.NON_EXISTENCE
+    desired: _SubTrackingRecordT | _syn.AbsentType = _dataclasses.field(
+        default=_syn.ABSENT
     )
     prev: list[_SubTrackingRecordT] = _dataclasses.field(default_factory=list)
 
@@ -90,7 +90,7 @@ class TrackingRecordTransition(_Generic[_TrackingRecordT], _NamedTuple):
     be incomplete).
     """
 
-    desired: _TrackingRecordT | _syn.NonExistenceType
+    desired: _TrackingRecordT | _syn.AbsentType
     prev: _Collection[_TrackingRecordT]
     prev_may_be_missing: bool
 
@@ -118,23 +118,23 @@ def resolve_system_transition(
 
     Rules:
         - If desired is user-managed: return None.
-        - If desired is NON_EXISTENCE and (no prev, or any prev is user-managed): return None.
+        - If desired is ABSENT and (no prev, or any prev is user-managed): return None.
         - Otherwise: return a `StateTransition[TrackingRecordT]` where:
-          - desired is `desired.state` (or NON_EXISTENCE)
+          - desired is `desired.state` (or ABSENT)
           - prev keeps only system-managed states
           - prev_may_be_missing is preserved from input
     """
 
-    if not _syn.is_non_existence(t.desired) and t.desired.managed_by == "user":
+    if not _syn.is_absent(t.desired) and t.desired.managed_by == "user":
         return None
 
-    if _syn.is_non_existence(t.desired):
+    if _syn.is_absent(t.desired):
         if len(t.prev) == 0:
             return None
         if any(p.managed_by == "user" for p in t.prev):
             return None
         return TrackingRecordTransition(
-            desired=_syn.NON_EXISTENCE,
+            desired=_syn.ABSENT,
             prev=[p.tracking_record for p in t.prev if p.managed_by == "system"],
             prev_may_be_missing=t.prev_may_be_missing,
         )
@@ -150,7 +150,7 @@ def diff(t: TrackingRecordTransition[_TrackingRecordT] | None, /) -> DiffAction 
     """Determine the write action needed to make state converge.
 
     Args:
-        t: The desired/previous state bundle. Use `syn.NON_EXISTENCE` for
+        t: The desired/previous state bundle. Use `syn.ABSENT` for
             `t.desired` to indicate the state should not exist.
 
             If `t.prev_may_be_missing` is true, `t.prev` may be incomplete; in
@@ -159,7 +159,7 @@ def diff(t: TrackingRecordTransition[_TrackingRecordT] | None, /) -> DiffAction 
 
     Returns:
         One of:
-        - "delete": `t.desired` is NON_EXISTENCE and we observed any previous state
+        - "delete": `t.desired` is ABSENT and we observed any previous state
         - "replace": at least one observed previous state differs from `t.desired`
         - "insert": no prev observed, prev may be missing, and `t.desired` exists
         - "upsert": `t.desired` matches observed prev, but prev may be missing
@@ -169,7 +169,7 @@ def diff(t: TrackingRecordTransition[_TrackingRecordT] | None, /) -> DiffAction 
     if t is None:
         return None
 
-    if _syn.is_non_existence(t.desired):
+    if _syn.is_absent(t.desired):
         if len(t.prev) == 0:
             return None
         return "delete"
@@ -216,7 +216,7 @@ def diff_composite(
     if t is None:
         return (None, {})
 
-    if _syn.is_non_existence(t.desired):
+    if _syn.is_absent(t.desired):
         if len(t.prev) == 0:
             return (None, {})
         return ("delete", {})

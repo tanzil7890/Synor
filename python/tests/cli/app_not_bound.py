@@ -9,7 +9,7 @@ from __future__ import annotations
 import pathlib
 
 import synor as syn
-from synor.connectors.localfs import declare_dir_target
+from synor.connectors.localfs import ensure_dir_target
 
 _HERE = pathlib.Path(__file__).resolve().parent
 DB_PATH = _HERE / "synor_unbound.db"
@@ -18,14 +18,14 @@ OUT_DIR = _HERE / "out_unbound"
 env = syn.Environment(syn.Settings.from_env(db_path=DB_PATH))
 
 
-@syn.fn
+@syn.task
 async def build() -> None:
-    dir_target = await syn.use_mount(
-        syn.component_subpath("out"),
-        declare_dir_target,
+    dir_target = await syn.call(
+        syn.unit_path("out"),
+        ensure_dir_target,
         OUT_DIR,
     )
-    dir_target.declare_file("unbound.txt", "Hello from UnboundApp\n")
+    dir_target.ensure_file("unbound.txt", "Hello from UnboundApp\n")
 
 
 def create_app() -> syn.App[[], None]:

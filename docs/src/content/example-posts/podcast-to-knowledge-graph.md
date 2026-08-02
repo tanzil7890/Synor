@@ -52,7 +52,7 @@ Each session goes through a multi-step pipeline, starting from a YouTube URL.
 We download the audio with `yt-dlp` and transcribe it with AssemblyAI, which returns speaker-diarized utterances ("Speaker A", "Speaker B", …) plus YouTube metadata.
 
 ```python title="conv_knowledge/fetch.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def fetch_transcript(youtube_id: str) -> SessionTranscript:
     url = f"https://www.youtube.com/watch?v={youtube_id}"
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -68,7 +68,7 @@ async def fetch_transcript(youtube_id: str) -> SessionTranscript:
     return SessionTranscript(utterances=utterances, yt_title=info["title"], ...)
 ```
 
-`@syn.fn(memo=True)` **memoizes** the function: if you've already fetched and transcribed a video, re-running skips it entirely — essential when you're iterating on downstream extraction and don't want to re-download hours of audio every time.
+`@syn.task(cache=True)` **memoizes** the function: if you've already fetched and transcribed a video, re-running skips it entirely — essential when you're iterating on downstream extraction and don't want to re-download hours of audio every time.
 
 ### Two-step LLM extraction
 
@@ -79,7 +79,7 @@ There's a bootstrapping problem: to attribute statements correctly, the LLM need
 **Step 1 — identify speakers and extract metadata.** Format the transcript with generic labels, give the LLM the YouTube metadata as context, and get back typed speaker identifications. The output is a Pydantic model, enforced by [instructor](https://github.com/instructor-ai/instructor) over LiteLLM:
 
 ```python title="conv_knowledge/extract.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_metadata(reformatted_transcript: str, transcript: SessionTranscript) -> SessionMetadata:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     return await client.chat.completions.create(
@@ -129,11 +129,11 @@ for stmt in stmt_extraction.statements:
     session_statement_rel.declare_relation(from_id=session_id, to_id=stmt_id)
 ```
 
-Each session runs as an independent processing component via `syn.use_mount`, keyed by the YouTube ID — so adding an episode only processes that episode:
+Each session runs as an independent processing component via `syn.call`, keyed by the YouTube ID — so adding an episode only processes that episode:
 
 ```python title="conv_knowledge/app.py"
-raw = await syn.use_mount(
-    syn.component_subpath("session", youtube_id),
+raw = await syn.call(
+    syn.unit_path("session", youtube_id),
     process_session, youtube_id,
     session_table, statement_table, session_statement_rel,
 )
@@ -148,7 +148,7 @@ raw = await syn.use_mount(
 Now we have a pile of raw names from every episode, with the same entity under many spellings ("GPT-4" vs "GPT4", "Sam Altman" vs "Samuel Altman"). Synor ships an `entity_resolution` utility that collapses them: it embeds each name, finds near-matches by vector similarity, and asks an LLM to confirm only the close pairs — cheap embeddings filter the field, expensive LLM calls happen only where it's ambiguous.
 
 ```python title="conv_knowledge/app.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def _resolve_entities(all_raw_entities: set[str]) -> dict[str, str | None]:
     result = await resolve_entities(
         entities=all_raw_entities,
@@ -164,7 +164,7 @@ Resolution runs independently per entity type, so Synor processes person, tech, 
 entity_dedup = dict(zip(
     [cfg.name for cfg in ENTITY_TYPES],
     await asyncio.gather(*(
-        syn.use_mount(syn.component_subpath("resolve", cfg.name),
+        syn.call(syn.unit_path("resolve", cfg.name),
                        _resolve_entities, _collect_all_raw(all_session_raw, cfg.name))
         for cfg in ENTITY_TYPES
     )),
@@ -178,7 +178,7 @@ A small, cheaper model handles these confirmations (configurable via `RESOLUTION
 With the dedup maps ready, we write the final graph. Canonical entities become nodes; every relationship uses resolved names. `resolve_canonical(name, dedup)` chases the dedup chain to the root — `resolve_canonical("AAPL", dedup)` → `"Apple Inc."`.
 
 ```python title="conv_knowledge/app.py"
-@syn.fn
+@syn.task
 async def create_knowledge_base(all_session_raw, entity_dedup, entity_tables, ...):
     # Canonical entity nodes (name is the id)
     for cfg in ENTITY_TYPES:

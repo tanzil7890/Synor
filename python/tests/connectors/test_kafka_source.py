@@ -65,7 +65,7 @@ class MockMessage:
 
 
 class MockComponentMountHandle:
-    """Mock ComponentMountHandle with controllable readiness."""
+    """Mock SpawnHandle with controllable readiness."""
 
     def __init__(self) -> None:
         self._ready_event = asyncio.Event()

@@ -14,7 +14,7 @@ Most documents already live in object storage, not on your laptop. This pipeline
 The chunk → embed → store half is identical to Semantic Search 101; the part that differs is the source. The OCI SDK is synchronous and you create the client yourself, so the example builds one from a config-file profile, hands it to the context, and lists objects with `oci_object_storage.list_objects` — the OCI analogue of `localfs.walk_dir`. Live mode is opt-in: when the four `OCI_STREAMING_*` env vars are set, it builds a Kafka-protocol `AIOConsumer` against OCI Streaming and passes it through as a `LiveStream[bytes]`. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn
+@syn.task
 async def app_main() -> None:
     target_table = await postgres.mount_table_target(
         PG_DB, table_name=TABLE_NAME,
@@ -34,17 +34,17 @@ async def app_main() -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live_stream=live_stream,
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 ```
 
-With `live_stream=None` (the default), `list_objects` does a one-shot catch-up scan. Pass a stream and the connector keeps watching, re-reading each post-cutoff object to apply an authoritative update or delete. `mount_each` runs one processing component per object so the engine tracks each independently.
+With `live_stream=None` (the default), `list_objects` does a one-shot catch-up scan. Pass a stream and the connector keeps watching, re-reading each post-cutoff object to apply an authoritative update or delete. `spawn_each` runs one processing component per object so the engine tracks each independently.
 
 ## Why this example is useful
 
 - **Swap the source, keep the flow.** Only the source line changes from the local-folder example — `process_file` takes an `oci_object_storage.OCIFile` and reads it with `await file.read_text()`, just like a local `FileLike`.
 - **Live without re-scanning.** OCI Streaming is Kafka-compatible, so object create/update/delete events ride the Kafka connector and drive incremental updates with no full bucket re-scan.
 - **Authoritative, not event-trusting.** For each accepted event the connector re-reads the object (`head_object`) to determine current state, then issues an update (present) or delete (404) — the event type is never trusted as the dispatch signal.
-- **Incremental by default.** `@syn.fn(memo=True)` skips an object whose content and code are unchanged; `mount_table_target` upserts only changed rows and deletes rows whose source is gone.
+- **Incremental by default.** `@syn.task(cache=True)` skips an object whose content and code are unchanged; `mount_table_target` upserts only changed rows and deletes rows whose source is gone.
 - **Plain Python, your stack.** Local sentence-transformer embedder, no API key; swap `EMBED_MODEL` for any of the 12k+ models on Hugging Face.
 
 ## Run it

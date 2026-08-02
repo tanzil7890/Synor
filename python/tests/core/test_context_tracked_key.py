@@ -59,17 +59,17 @@ def test_detect_change_key_invalidates_memo() -> None:
 
     db_name = "test_ctx_cd_inv"
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def process(name: str, content: str) -> None:
         val = syn.use_context(_CHANGE_DETECTED_KEY)
         metrics.increment("calls")
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(name, f"{val}:{content}")
         )
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
-        await syn.mount(syn.component_subpath("A"), process, "A", "data")
+        await syn.spawn(syn.unit_path("A"), process, "A", "data")
 
     # Phase 1: value="v1" — executes then memo hit
     m = _run_app(db_name, _CHANGE_DETECTED_KEY, "v1", app_main, metrics)
@@ -97,17 +97,17 @@ def test_no_detect_change_key_no_invalidation() -> None:
 
     db_name = "test_ctx_no_cd_no_inv"
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def process(name: str, content: str) -> None:
         val = syn.use_context(_NO_CHANGE_DETECT_KEY)
         metrics.increment("calls")
-        syn.declare_target_state(
+        syn.ensure_target_state(
             GlobalDictTarget.target_state(name, f"{val}:{content}")
         )
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
-        await syn.mount(syn.component_subpath("A"), process, "A", "data")
+        await syn.spawn(syn.unit_path("A"), process, "A", "data")
 
     # Phase 1: value="v1" — executes then memo hit
     m = _run_app(db_name, _NO_CHANGE_DETECT_KEY, "v1", app_main, metrics)
@@ -140,21 +140,21 @@ def test_detect_change_key_transitive_invalidation() -> None:
 
     db_name = "test_ctx_cd_transitive"
 
-    @syn.fn
+    @syn.task
     def bar(name: str) -> str:
         val = syn.use_context(_CHANGE_DETECTED_TRANSITIVE_KEY)
         metrics.increment("bar")
         return f"{val}:{name}"
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def foo(name: str) -> None:
         result = bar(name)
         metrics.increment("foo")
-        syn.declare_target_state(GlobalDictTarget.target_state(name, result))
+        syn.ensure_target_state(GlobalDictTarget.target_state(name, result))
 
-    @syn.fn
+    @syn.task
     async def app_main() -> None:
-        await syn.mount(syn.component_subpath("A"), foo, "A")
+        await syn.spawn(syn.unit_path("A"), foo, "A")
 
     # Phase 1: value="v1" — both execute, then memo hit
     m = _run_app(db_name, _CHANGE_DETECTED_TRANSITIVE_KEY, "v1", app_main, metrics)

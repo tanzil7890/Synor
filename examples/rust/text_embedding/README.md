@@ -10,7 +10,7 @@ and stores them in Postgres/pgvector — then serves similarity search.
 | Concern          | Python                                   | Rust (this example)                                |
 | ---------------- | ---------------------------------------- | -------------------------------------------------- |
 | Source           | `localfs.walk_dir`                       | `synor::fs::walk`                              |
-| Per-file compute | `@syn.fn(memo=True) process_file`       | `#[synor::function(memo)] process_file`         |
+| Per-file compute | `@syn.task(cache=True) process_file`       | `#[synor::function(memo)] process_file`         |
 | Chunking         | `RecursiveSplitter` (markdown)           | `synor_ops_text` `RecursiveChunker` (markdown)  |
 | Embeddings       | `sentence-transformers/all-MiniLM-L6-v2` | `fastembed` `AllMiniLML6V2` (same model, 384-dim)   |
 | Target           | `postgres.TableTarget` + pgvector index  | `postgres::TableTarget` + `declare_vector_index`    |

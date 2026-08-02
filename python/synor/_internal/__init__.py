@@ -22,7 +22,7 @@ _core.init_runtime(
     lang=_lang,
     serialize_fn=_serde.serialize,
     handler_wrapper_fn=_TypedTargetHandlerWrapper,
-    non_existence=_typing.NON_EXISTENCE,
+    non_existence=_typing.ABSENT,
     not_set=_typing.NOT_SET,
     verified_sink_type=_VerifiedTargetActionSink,
 )

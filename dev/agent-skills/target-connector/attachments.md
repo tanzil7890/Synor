@@ -67,7 +67,7 @@ class _VectorIndexHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _VectorIndexSpec | syn.NonExistenceType,
+        desired_state: _VectorIndexSpec | syn.AbsentType,
         prev_possible_records: Collection[_VectorIndexFingerprint],
         prev_may_be_missing: bool,
         /,
@@ -99,12 +99,12 @@ class TableTarget:
     def declare_vector_index(self, *, name, column, metric="cosine", method="ivfflat", ...):
         spec = _VectorIndexSpec(column=column, metric=metric, method=method, ...)
         att_provider = self._provider.attachment("vector_index")
-        syn.declare_target_state(att_provider.target_state(name, spec))
+        syn.ensure_target_state(att_provider.target_state(name, spec))
 
     def declare_sql_command_attachment(self, *, name, setup_sql, teardown_sql=None):
         spec = _SqlCommandSpec(setup_sql=setup_sql, teardown_sql=teardown_sql)
         att_provider = self._provider.attachment("sql_command_attachment")
-        syn.declare_target_state(att_provider.target_state(name, spec))
+        syn.ensure_target_state(att_provider.target_state(name, spec))
 ```
 
 ## Tracking Record Design

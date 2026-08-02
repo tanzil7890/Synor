@@ -106,7 +106,7 @@ class MetadataEmbeddingRow:
 # =========================================================================
 
 
-@syn.fn
+@syn.task
 def extract_basic_info(content: bytes) -> PaperBasicInfo:
     """Extract first page bytes and page count from a PDF."""
     reader = PdfReader(io.BytesIO(content))
@@ -119,7 +119,7 @@ def extract_basic_info(content: bytes) -> PaperBasicInfo:
     return PaperBasicInfo(num_pages=len(reader.pages), first_page=output.getvalue())
 
 
-@syn.fn
+@syn.task
 def pdf_to_markdown(content: bytes) -> str:
     """Convert PDF bytes to text using pypdf."""
     reader = PdfReader(io.BytesIO(content))
@@ -127,7 +127,7 @@ def pdf_to_markdown(content: bytes) -> str:
     return page_text or ""
 
 
-@syn.fn
+@syn.task
 def extract_metadata(markdown: str) -> PaperMetadataModel:
     """Extract paper metadata from first-page text using an LLM."""
     client = openai_client()
@@ -172,7 +172,7 @@ async def synor_lifespan(
         yield
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     metadata_table: postgres.TableTarget[PaperMetadataRow],
@@ -187,7 +187,7 @@ async def process_file(
 
     authors_payload = [a.model_dump() for a in metadata.authors]
 
-    metadata_table.declare_row(
+    metadata_table.ensure_row(
         row=PaperMetadataRow(
             filename=str(file.file_path.path),
             title=metadata.title,
@@ -199,7 +199,7 @@ async def process_file(
 
     for author in metadata.authors:
         if author.name:
-            author_table.declare_row(
+            author_table.ensure_row(
                 row=AuthorPaperRow(
                     author_name=author.name,
                     filename=str(file.file_path.path),
@@ -207,7 +207,7 @@ async def process_file(
             )
 
     title_embedding = await syn.use_context(EMBEDDER).embed(metadata.title)
-    embedding_table.declare_row(
+    embedding_table.ensure_row(
         row=MetadataEmbeddingRow(
             id=uuid.uuid4(),
             filename=str(file.file_path.path),
@@ -225,7 +225,7 @@ async def process_file(
         language="abstract",
     )
     for chunk in abstract_chunks:
-        embedding_table.declare_row(
+        embedding_table.ensure_row(
             row=MetadataEmbeddingRow(
                 id=uuid.uuid4(),
                 filename=str(file.file_path.path),
@@ -236,7 +236,7 @@ async def process_file(
         )
 
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     metadata_table = await postgres.mount_table_target(
         PG_DB,
@@ -272,7 +272,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
         live=True,  # source supports live watch; pass -L to `synor update` to actually run live
     )
-    await syn.mount_each(
+    await syn.spawn_each(
         process_file, files.items(), metadata_table, author_table, embedding_table
     )
 

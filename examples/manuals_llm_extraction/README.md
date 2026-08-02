@@ -14,13 +14,13 @@ Manuals, datasheets, and reference docs are full of structure — classes, funct
 The output type is nested Pydantic, and the structure itself tells the model what to pull out — a `ModuleInfo` has `classes` (each with `methods`) and module-level `methods` (each with `args`). Per manual, two transforms and a row: `pdf_to_markdown` runs docling on a GPU runner, `extract_module` does the [instructor](https://github.com/instructor-ai/instructor)-over-[LiteLLM](https://docs.litellm.ai/) extraction, and `process_file` declares one Postgres row with the summary counts plus the full structure as JSON. Read it in [`main.py`](main.py):
 
 ```python
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def pdf_to_markdown(content: bytes) -> str:
     source = DocumentStream(name="manual.pdf", stream=io.BytesIO(content))
     return pdf_converter().convert(source).document.export_to_markdown()
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def extract_module(markdown: str) -> ModuleInfo:
     client = instructor.from_litellm(litellm.acompletion, mode=instructor.Mode.JSON)
     result = await client.chat.completions.create(
@@ -31,24 +31,24 @@ async def extract_module(markdown: str) -> ModuleInfo:
     return ModuleInfo.model_validate(result.model_dump())
 
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, table: postgres.TableTarget[ModuleRecord]) -> None:
     markdown = await pdf_to_markdown(await file.read())
     info = await extract_module(markdown)
-    table.declare_row(row=ModuleRecord(
+    table.ensure_row(row=ModuleRecord(
         filename=file.file_path.path.name, title=info.title, description=info.description,
         num_classes=len(info.classes), num_methods=len(info.methods),
         module_info=json.dumps(info.model_dump()),
     ))
 ```
 
-You *declare* the row; Synor inserts, updates, or deletes it to match. `app_main` mounts the Postgres table, walks the source for `*.pdf`, and runs one `process_file` component per manual with `mount_each`.
+You *declare* the row; Synor inserts, updates, or deletes it to match. `app_main` mounts the Postgres table, walks the source for `*.pdf`, and runs one `process_file` component per manual with `spawn_each`.
 
 ## Why this example is useful
 
 - **The schema is the prompt.** A nested `ModuleInfo` — module → classes → methods → args — tells the model exactly what to pull out, no hand-tuned prompt for each level.
-- **Heavy parse on a GPU runner.** `pdf_to_markdown` is decorated `@syn.fn.as_async(runner=syn.GPU)`, so the docling parse runs where the hardware is while the rest stays async.
-- **Incremental by default.** `@syn.fn(memo=True)` caches both the PDF parse and the extraction by content, so editing one manual re-parses and re-extracts only that one — the row is updated in place.
+- **Heavy parse on a GPU runner.** `pdf_to_markdown` is decorated `@syn.task.as_async(runner=syn.GPU)`, so the docling parse runs where the hardware is while the rest stays async.
+- **Incremental by default.** `@syn.task(cache=True)` caches both the PDF parse and the extraction by content, so editing one manual re-parses and re-extracts only that one — the row is updated in place.
 - **Plain Python, your stack.** Extraction is instructor over LiteLLM, so swapping `LLM_MODEL` switches providers (OpenAI, Gemini, a local Ollama model). No DSL.
 - **Honest cache busting.** `LLM_MODEL` is declared with `detect_change=True`, so swapping the model re-extracts everything against it with no cache to clear by hand.
 

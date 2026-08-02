@@ -292,19 +292,19 @@ class _PointHandler(syn.TargetHandler[qdrant_models.PointStruct, _PointFingerpri
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: qdrant_models.PointStruct | syn.NonExistenceType,
+        desired_state: qdrant_models.PointStruct | syn.AbsentType,
         prev_possible_records: Collection[_PointFingerprint],
         prev_may_be_missing: bool,
         /,
     ) -> syn.TargetReconcileOutput[_PointAction, _PointFingerprint] | None:
         key = _POINT_ID_CHECKER.check(key)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if not prev_possible_records and not prev_may_be_missing:
                 return None
             return syn.TargetReconcileOutput(
                 action=_PointAction(point_id=key, point=None),
                 sink=self._sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
             )
 
         target_fp = fingerprint_object((desired_state.vector, desired_state.payload))
@@ -345,7 +345,7 @@ _CollectionTrackingRecord = statediff.MutualTrackingRecord[
 
 class _CollectionAction(NamedTuple):
     key: _CollectionKey
-    spec: _CollectionSpec | syn.NonExistenceType
+    spec: _CollectionSpec | syn.AbsentType
     main_action: statediff.DiffAction | None
 
 
@@ -391,7 +391,7 @@ class _CollectionHandler(
                 if action.main_action in ("replace", "delete"):
                     await self._delete_collection(client, key.collection_name)
 
-                if syn.is_non_existence(action.spec):
+                if syn.is_absent(action.spec):
                     outputs[i] = None
                     continue
 
@@ -482,7 +482,7 @@ class _CollectionHandler(
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: _CollectionSpec | syn.NonExistenceType,
+        desired_state: _CollectionSpec | syn.AbsentType,
         prev_possible_records: Collection[_CollectionTrackingRecord],
         prev_may_be_missing: bool,
         /,
@@ -493,10 +493,10 @@ class _CollectionHandler(
         | None
     ):
         key = _CollectionKey(*_COLLECTION_KEY_CHECKER.check(key))
-        tracking_record: _CollectionTrackingRecord | syn.NonExistenceType
+        tracking_record: _CollectionTrackingRecord | syn.AbsentType
 
-        if syn.is_non_existence(desired_state):
-            tracking_record = syn.NON_EXISTENCE
+        if syn.is_absent(desired_state):
+            tracking_record = syn.ABSENT
         else:
             tracking_record = statediff.MutualTrackingRecord(
                 tracking_record=_CollectionTrackingRecordCore(
@@ -545,7 +545,7 @@ class CollectionTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["CollectionTar
         ```python
         from qdrant_client.http import models as qdrant_models
 
-        @syn.fn
+        @syn.task
         def process_doc(doc: Doc, target: CollectionTarget) -> None:
             point = qdrant_models.PointStruct(
                 id=doc.id,
@@ -581,7 +581,7 @@ class CollectionTarget(Generic[syn.MaybePendingS], syn.ResolvesTo["CollectionTar
             ValueError: If the point ID is not an unsigned 64-bit integer or
                 a UUID (Qdrant rejects all other IDs at write time).
         """
-        syn.declare_target_state(
+        syn.ensure_target_state(
             self._provider.target_state(_validate_point_id(point.id), point)
         )
 
@@ -599,7 +599,7 @@ def collection_target(
     """
     Create a TargetState for a Qdrant collection target.
 
-    Use with ``syn.mount_target()`` to mount and get a child provider,
+    Use with ``syn.attach_target()`` to mount and get a child provider,
     or with ``mount_collection_target()`` for a convenience wrapper.
 
     Args:
@@ -634,7 +634,7 @@ def declare_collection_target(
     Returns:
         CollectionTarget for declaring points
     """
-    provider = syn.declare_target_state_with_child(
+    provider = syn.ensure_target_state_with_child(
         collection_target(db, collection_name, schema, managed_by=managed_by)
     )
     return CollectionTarget(provider)
@@ -650,7 +650,7 @@ async def mount_collection_target(
     """
     Mount a collection target and return a ready-to-use CollectionTarget.
 
-    Sugar over ``collection_target()`` + ``syn.mount_target()`` + wrapping.
+    Sugar over ``collection_target()`` + ``syn.attach_target()`` + wrapping.
 
     Args:
         db: ContextKey for the QdrantClient connection.
@@ -661,7 +661,7 @@ async def mount_collection_target(
     Returns:
         A CollectionTarget for declaring points.
     """
-    provider = await syn.mount_target(
+    provider = await syn.attach_target(
         collection_target(db, collection_name, schema, managed_by=managed_by)
     )
     return CollectionTarget(provider)

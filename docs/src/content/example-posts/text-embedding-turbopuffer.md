@@ -56,7 +56,7 @@ async def synor_lifespan(builder: syn.EnvironmentBuilder) -> AsyncIterator[None]
 A Turbopuffer row is an `id`, a `vector`, and an open bag of `attributes`. Instead of a typed table column per field, the filename, text, and offsets ride along as attributes — the embedding is the indexed vector.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
@@ -64,7 +64,7 @@ async def process_chunk(
     target: turbopuffer.NamespaceTarget,
 ) -> None:
     embedding_vec = await syn.use_context(EMBEDDER).embed(chunk.text)
-    target.declare_row(
+    target.ensure_row(
         turbopuffer.Row(
             id=str(await id_gen.next_id(chunk.text)),
             vector=embedding_vec,
@@ -78,14 +78,14 @@ async def process_chunk(
     )
 ```
 
-`target.declare_row` declares the row as a target state; Synor handles upserting and deleting it to match. The `id` is derived from the chunk's text, so unchanged chunks keep their id and embedding across runs.
+`target.ensure_row` declares the row as a target state; Synor handles upserting and deleting it to match. The `id` is derived from the chunk's text, so unchanged chunks keep their id and embedding across runs.
 
 ## Mount the namespace target
 
 `app_main` mounts the namespace, then fans out one processing component per file. The vector schema comes straight from the embedder, so the namespace's dimension matches what we write.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_namespace = await turbopuffer.mount_namespace_target(
         TPUF_DB,
@@ -100,10 +100,10 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_namespace)
+    await syn.spawn_each(process_file, files.items(), target_namespace)
 ```
 
-`mount_namespace_target` creates and manages the Turbopuffer namespace for you: schema, idempotent upserts, and orphan cleanup when a file disappears. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update them independently.
+`mount_namespace_target` creates and manages the Turbopuffer namespace for you: schema, idempotent upserts, and orphan cleanup when a file disappears. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update them independently.
 
 ## Setup and run
 
@@ -138,7 +138,7 @@ The query embeds your text with the *same* model and asks Turbopuffer for the ne
 
 ## Incremental updates
 
-Synor keeps the namespace in sync with your files and does the **minimum work** to get there — you never compute a diff. `@syn.fn(memo=True)` on `process_file` decides what to *recompute* (a file is skipped when its content and the function's code are unchanged), and `mount_namespace_target` decides what to *write* (each row's `id` is derived from its chunk's text, so only changed rows are upserted and rows whose source is gone are deleted).
+Synor keeps the namespace in sync with your files and does the **minimum work** to get there — you never compute a diff. `@syn.task(cache=True)` on `process_file` decides what to *recompute* (a file is skipped when its content and the function's code are unchanged), and `mount_namespace_target` decides what to *write* (each row's `id` is derived from its chunk's text, so only changed rows are upserted and rows whose source is gone are deleted).
 
 - **A file is added** — only that file is chunked and embedded, and its rows are upserted. The rest is untouched.
 - **A file is edited** — it is re-chunked; unchanged chunks keep their `id` and embedding, new chunks are embedded and upserted, and chunks that no longer exist are deleted.

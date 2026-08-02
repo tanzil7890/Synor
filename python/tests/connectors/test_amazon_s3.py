@@ -308,7 +308,7 @@ class TestMemoization:
             session = aiobotocore.session.get_session()
             async with session.create_client("s3", region_name="us-east-1") as client:
                 f = await amazon_s3.get_object(client, "memo-state-test", "f.txt")
-                outcome = await f.__synor_memo_state__(synor.NON_EXISTENCE)
+                outcome = await f.__synor_memo_state__(synor.ABSENT)
 
                 assert isinstance(outcome, synor.MemoStateOutcome)
                 # First run: memo_valid defaults to False (no previous cache to reuse)
@@ -332,7 +332,7 @@ class TestMemoization:
                 f = await amazon_s3.get_object(client, "memo-state-test2", "f.txt")
 
                 # Get initial state
-                outcome1 = await f.__synor_memo_state__(synor.NON_EXISTENCE)
+                outcome1 = await f.__synor_memo_state__(synor.ABSENT)
 
                 # Same file, same state → valid
                 f2 = await amazon_s3.get_object(client, "memo-state-test2", "f.txt")
@@ -365,7 +365,7 @@ class TestMemoization:
                 fp = await f.content_fingerprint()
                 assert isinstance(fp, bytes)
 
-                outcome = await f.__synor_memo_state__(synor.NON_EXISTENCE)
+                outcome = await f.__synor_memo_state__(synor.ABSENT)
 
                 # Resolve the prev_state type hint exactly as the engine does,
                 # then verify the persisted state decodes back without error.

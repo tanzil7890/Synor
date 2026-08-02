@@ -16,7 +16,7 @@ from typing import (
 
 from . import core
 from .memo_fingerprint import StateFnEntry, _canonicalize
-from .typing import NON_EXISTENCE
+from .typing import ABSENT
 
 _lock = threading.Lock()
 _used_keys = set[str]()
@@ -46,7 +46,7 @@ def resolve_awaitables_sync(
 
     *running_loop_error_msg* is the ``RuntimeError`` message used when we
     detect a running event loop — callers supply a message that points at
-    their own remediation (e.g. ``@syn.fn.as_async`` for per-call state fns,
+    their own remediation (e.g. ``@syn.task.as_async`` for per-call state fns,
     or "provide the value outside an async context" for ``provide()``).
     """
     awaitable_indices = [i for i, o in enumerate(items) if isinstance(o, Awaitable)]
@@ -72,7 +72,7 @@ def resolve_awaitables_sync(
 def _compute_initial_context_states(
     state_fns: list[StateFnEntry], key_name: str
 ) -> list[Any]:
-    """Call each state function with ``NON_EXISTENCE`` and return their states.
+    """Call each state function with ``ABSENT`` and return their states.
 
     This is the one-time initial-state collection at ``provide()`` time. The
     resulting states are cached on the :class:`ContextProvider` and reused on
@@ -83,7 +83,7 @@ def _compute_initial_context_states(
     context. From within a running event loop, async state functions raise —
     async provide support would need a separate `aprovide` entry point.
     """
-    outcomes: list[Any] = [entry.call(NON_EXISTENCE) for entry in state_fns]
+    outcomes: list[Any] = [entry.call(ABSENT) for entry in state_fns]
     outcomes = resolve_awaitables_sync(
         outcomes,
         running_loop_error_msg=(

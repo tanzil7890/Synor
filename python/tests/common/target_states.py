@@ -78,7 +78,7 @@ class DictTargetStateStore:
     metrics: Metrics
     _lock: threading.Lock
     _action_sink: syn.TargetActionSink[
-        tuple[str, DictDataWithPrev | syn.NonExistenceType]
+        tuple[str, DictDataWithPrev | syn.AbsentType]
     ]
     sink_exception: bool = False
 
@@ -95,14 +95,14 @@ class DictTargetStateStore:
     def _sink(
         self,
         context_provider: syn.ContextProvider,
-        actions: Collection[tuple[str, DictDataWithPrev | syn.NonExistenceType]],
+        actions: Collection[tuple[str, DictDataWithPrev | syn.AbsentType]],
         /,
     ) -> None:
         if self.sink_exception:
             raise ValueError("injected sink exception")
         with self._lock:
             for key, value in actions:
-                if syn.is_non_existence(value):
+                if syn.is_absent(value):
                     del self.data[key]
                     self.metrics.increment("delete")
                 else:
@@ -113,7 +113,7 @@ class DictTargetStateStore:
     async def _async_sink(
         self,
         context_provider: syn.ContextProvider,
-        actions: Collection[tuple[str, DictDataWithPrev | syn.NonExistenceType]],
+        actions: Collection[tuple[str, DictDataWithPrev | syn.AbsentType]],
         /,
     ) -> None:
         self._sink(context_provider, actions)
@@ -121,18 +121,18 @@ class DictTargetStateStore:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
     ) -> (
         syn.TargetReconcileOutput[
-            tuple[str, DictDataWithPrev | syn.NonExistenceType], Any
+            tuple[str, DictDataWithPrev | syn.AbsentType], Any
         ]
         | None
     ):
         assert isinstance(key, str)
         # Short-circuit no-change case
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             if len(prev_possible_records) == 0:
                 return None
         else:
@@ -142,8 +142,8 @@ class DictTargetStateStore:
                 return None
 
         new_value = (
-            syn.NON_EXISTENCE
-            if syn.is_non_existence(desired_state)
+            syn.ABSENT
+            if syn.is_absent(desired_state)
             else DictDataWithPrev(
                 data=desired_state,
                 prev=prev_possible_records,
@@ -251,7 +251,7 @@ class DictsTargetStateStore:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: None | syn.NonExistenceType,
+        desired_state: None | syn.AbsentType,
         prev_possible_records: Collection[None],
         prev_may_be_missing: bool,
     ) -> (
@@ -261,13 +261,13 @@ class DictsTargetStateStore:
         | None
     ):
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             return syn.TargetReconcileOutput(
                 action=_DictTargetStateStoreAction(
                     name=key, exists=False, action="delete"
                 ),
                 sink=self._action_sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
                 child_invalidation=self.child_invalidation,
             )
         if not prev_may_be_missing and self.child_invalidation is None:
@@ -314,9 +314,9 @@ class DictsTarget:
     )
 
     @staticmethod
-    @syn.fn
+    @syn.task
     def declare_dict_target(name: str) -> syn.PendingTargetStateProvider[str, None]:
-        return syn.declare_target_state_with_child(
+        return syn.ensure_target_state_with_child(
             DictsTarget._provider.target_state(name, None)
         )
 
@@ -333,9 +333,9 @@ class AsyncDictsTarget:
     )
 
     @staticmethod
-    @syn.fn
+    @syn.task
     def declare_dict_target(name: str) -> syn.PendingTargetStateProvider[str, None]:
-        return syn.declare_target_state_with_child(
+        return syn.ensure_target_state_with_child(
             AsyncDictsTarget._provider.target_state(name, None)
         )
 
@@ -361,7 +361,7 @@ class _AttachmentChildHandler:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: Any | syn.NonExistenceType,
+        desired_state: Any | syn.AbsentType,
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
     ) -> None:
@@ -430,7 +430,7 @@ class AttachmentDictsTargetStateStore:
     def reconcile(
         self,
         key: syn.StableKey,
-        desired_state: None | syn.NonExistenceType,
+        desired_state: None | syn.AbsentType,
         prev_possible_records: Collection[None],
         prev_may_be_missing: bool,
     ) -> (
@@ -440,13 +440,13 @@ class AttachmentDictsTargetStateStore:
         | None
     ):
         assert isinstance(key, str)
-        if syn.is_non_existence(desired_state):
+        if syn.is_absent(desired_state):
             return syn.TargetReconcileOutput(
                 action=_DictTargetStateStoreAction(
                     name=key, exists=False, action="delete"
                 ),
                 sink=self._action_sink,
-                tracking_record=syn.NON_EXISTENCE,
+                tracking_record=syn.ABSENT,
                 child_invalidation=self.child_invalidation,
             )
         if not prev_may_be_missing and self.child_invalidation is None:
@@ -505,9 +505,9 @@ class AttachmentDictsTarget:
     )
 
     @staticmethod
-    @syn.fn
+    @syn.task
     def declare_dict_target(name: str) -> syn.PendingTargetStateProvider[str, None]:
-        return syn.declare_target_state_with_child(
+        return syn.ensure_target_state_with_child(
             AttachmentDictsTarget._provider.target_state(name, None)
         )
 
@@ -521,8 +521,8 @@ class MultiAttachmentDictsTarget:
     )
 
     @staticmethod
-    @syn.fn
+    @syn.task
     def declare_dict_target(name: str) -> syn.PendingTargetStateProvider[str, None]:
-        return syn.declare_target_state_with_child(
+        return syn.ensure_target_state_with_child(
             MultiAttachmentDictsTarget._provider.target_state(name, None)
         )

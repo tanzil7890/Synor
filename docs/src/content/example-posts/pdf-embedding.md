@@ -89,7 +89,7 @@ def pdf_converter() -> DocumentConverter:
     )
 
 
-@syn.fn.as_async(runner=syn.GPU)
+@syn.task.as_async(runner=syn.GPU)
 def pdf_to_markdown(content: bytes) -> str:
     source = DocumentStream(name="input.pdf", stream=io.BytesIO(content))
     return pdf_converter().convert(source).document.export_to_markdown()
@@ -97,7 +97,7 @@ def pdf_to_markdown(content: bytes) -> str:
 
 Two things make this hold up at scale:
 
-- **`@syn.fn.as_async(runner=syn.GPU)`** wraps a *synchronous*, CPU/GPU-heavy function so Synor runs it on a dedicated GPU runner instead of blocking the async event loop. PDF parsing is the slow part of this pipeline; offloading it keeps the rest of the flow responsive.
+- **`@syn.task.as_async(runner=syn.GPU)`** wraps a *synchronous*, CPU/GPU-heavy function so Synor runs it on a dedicated GPU runner instead of blocking the async event loop. PDF parsing is the slow part of this pipeline; offloading it keeps the rest of the flow responsive.
 - **`@functools.cache`** builds the docling `DocumentConverter` once and reuses it across every PDF — model load happens a single time, not per file.
 
 ## Process a file
@@ -107,7 +107,7 @@ Two things make this hold up at scale:
 `process_file` runs once per PDF. It converts the PDF to Markdown, splits the text into overlapping chunks, and maps each chunk to `process_chunk`.
 
 ```python title="main.py"
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(
     file: FileLike,
     table: postgres.TableTarget[PdfEmbedding],
@@ -120,21 +120,21 @@ async def process_file(
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
 ```
 
-`@syn.fn` with `memo=True` is what makes this incremental: if a PDF's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never re-run docling on a PDF you've already parsed. `syn.map` fans out to one `process_chunk` call per chunk.
+`@syn.task` with `cache=True` is what makes this incremental: if a PDF's content and this function's code are both unchanged, the whole file is skipped on the next run — so you never re-run docling on a PDF you've already parsed. `syn.map` fans out to one `process_chunk` call per chunk.
 
 ## Process a chunk
 
 `process_chunk` embeds the chunk with the shared embedder and declares the target row.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_chunk(
     chunk: Chunk,
     filename: pathlib.PurePath,
     id_gen: IdGenerator,
     table: postgres.TableTarget[PdfEmbedding],
 ) -> None:
-    table.declare_row(
+    table.ensure_row(
         row=PdfEmbedding(
             id=await id_gen.next_id(chunk.text),
             filename=str(filename),
@@ -146,7 +146,7 @@ async def process_chunk(
     )
 ```
 
-We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast model that runs locally with no API key. `table.declare_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match. Each row's `id` is derived from the chunk text, so a chunk that survives a re-parse keeps its row.
+We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast model that runs locally with no API key. `table.ensure_row` declares the row as a target state; Synor handles inserting, updating, or deleting it to match. Each row's `id` is derived from the chunk text, so a chunk that survives a re-parse keeps its row.
 
 ## Define the main function
 
@@ -155,7 +155,7 @@ We use `SentenceTransformerEmbedder` with `all-MiniLM-L6-v2` — a small, fast m
 `app_main` wires the source to the target. It mounts the Postgres table, walks the source directory for PDFs, and mounts one processing component per file.
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:
     target_table = await postgres.mount_table_target(
         PG_DB,
@@ -172,7 +172,7 @@ async def app_main(sourcedir: pathlib.Path) -> None:
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.pdf"]),
         live=True,  # watch for changes; pass -L to `synor update` to run live
     )
-    await syn.mount_each(process_file, files.items(), target_table)
+    await syn.spawn_each(process_file, files.items(), target_table)
 
 
 app = syn.App(
@@ -182,7 +182,7 @@ app = syn.App(
 )
 ```
 
-`mount_table_target` creates and manages the Postgres table for you — schema, idempotent upserts, and orphan cleanup when a PDF disappears. `live=True` makes the filesystem source watch for changes, and `mount_each` runs one component per file so the engine can track and update them independently.
+`mount_table_target` creates and manages the Postgres table for you — schema, idempotent upserts, and orphan cleanup when a PDF disappears. `live=True` makes the filesystem source watch for changes, and `spawn_each` runs one component per file so the engine can track and update them independently.
 
 > **No vector index here.** To keep the example minimal, this flow doesn't declare a vector index, so queries do a sequential scan — fine for a few PDFs. For a larger corpus, add one line — `target_table.declare_vector_index(column="embedding")` — exactly as the Semantic Search 101 example does, and pgvector serves approximate-nearest-neighbor queries instead.
 
@@ -232,7 +232,7 @@ With the sample papers indexed, the most semantically similar passages come back
 
 ## Incremental updates
 
-Synor keeps the index in sync with your PDFs and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.fn(memo=True)` decides what to *recompute* — a PDF is skipped when its bytes and the function's code are both unchanged, so docling never re-parses an unchanged file. `mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
+Synor keeps the index in sync with your PDFs and does the **minimum work** to get there. You never compute a diff or write update logic. Two pieces make this work. `@syn.task(cache=True)` decides what to *recompute* — a PDF is skipped when its bytes and the function's code are both unchanged, so docling never re-parses an unchanged file. `mount_table_target` decides what to *write* — each row's `id` is derived from its chunk's text, so it upserts only the rows that actually changed and deletes rows whose source is gone.
 
 - **A PDF is added** — only that file is parsed, chunked, and embedded; its rows are inserted. The rest is untouched.
 - **A PDF is replaced** — it is re-parsed and re-chunked; chunks whose text is unchanged keep their `id` and embedding, genuinely new chunks are embedded and inserted, and chunks that no longer exist are deleted.

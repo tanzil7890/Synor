@@ -90,7 +90,7 @@ The dataclass *is* the schema. When we mount the table below, `TableSchema.from_
 `process_message` runs once per message. It decodes the value, parses the JSON, and dispatches on shape — declaring a typed row on whichever table matches:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def process_message(
     msg: Message,
     products_table: lancedb.TableTarget[Product],
@@ -103,24 +103,24 @@ async def process_message(
     row = json.loads(text)
 
     if "sku" in row:
-        products_table.declare_row(
+        products_table.ensure_row(
             row=Product(**{**row, "price": float(row["price"])}),
         )
     elif "emp_id" in row:
-        employees_table.declare_row(row=Employee(**row))
+        employees_table.ensure_row(row=Employee(**row))
 ```
 
 Each message runs as its own processing component (mounted below), so the engine tracks each one independently. The component owns whichever row it declares; when its offset is committed, that row is durably in LanceDB. The `value()` may be `bytes` or `str` depending on the broker, so we normalize before `json.loads`. A message that matches neither shape declares nothing — it's quietly skipped, no row, no error.
 
 ## Declare rows, not writes
 
-The line worth pausing on is `declare_row` — deliberately *not* `insert()` or `upsert()`.
+The line worth pausing on is `ensure_row` — deliberately *not* `insert()` or `upsert()`.
 
 ```python
-products_table.declare_row(row=Product(...))
+products_table.ensure_row(row=Product(...))
 ```
 
-Synor is state-driven: like a spreadsheet cell or a SQL materialized view, you describe what the row *should be* as a function of the source, and the engine figures out the transition. You don't write separate insert / update / delete code paths. When you call `declare_row(row=r)`:
+Synor is state-driven: like a spreadsheet cell or a SQL materialized view, you describe what the row *should be* as a function of the source, and the engine figures out the transition. You don't write separate insert / update / delete code paths. When you call `ensure_row(row=r)`:
 
 - **the primary key is new, or the row changed** → it's **upserted** into the table.
 - **the primary key was declared before but isn't this time** → that row is **removed**.
@@ -133,7 +133,7 @@ It's the same `declare_*` shape as the Postgres target and the Kafka target on t
 `app_main` wires the source to the targets. It mounts both LanceDB tables, subscribes the Kafka consumer, and mounts one component per message:
 
 ```python title="main.py"
-@syn.fn
+@syn.task
 async def app_main() -> None:
     products_table = await lancedb.mount_table_target(
         LANCE_DB,
@@ -158,7 +158,7 @@ async def app_main() -> None:
 
     consumer = AIOConsumer(config)
     items = kafka.topic_as_map(consumer, [KAFKA_TOPIC])
-    await syn.mount_each(process_message, items, products_table, employees_table)
+    await syn.spawn_each(process_message, items, products_table, employees_table)
 
 
 app = syn.App(syn.AppConfig(name="KafkaToLanceDB"), app_main)
@@ -166,9 +166,9 @@ app = syn.App(syn.AppConfig(name="KafkaToLanceDB"), app_main)
 
 Three things to notice:
 
-1. `mount_table_target(...)` resolves the connection from the context key and creates the table from the dataclass schema — `products` keyed by `sku`, `employees` keyed by `emp_id`. The handle it returns is what you call `declare_row` on.
+1. `mount_table_target(...)` resolves the connection from the context key and creates the table from the dataclass schema — `products` keyed by `sku`, `employees` keyed by `emp_id`. The handle it returns is what you call `ensure_row` on.
 2. `enable.auto.commit` is **off** on purpose. Synor commits each offset *after* the row is durably written, so the consumer group always resumes from the last message it actually persisted — at-least-once delivery without `__consumer_offsets` drifting ahead of your data. `auto.offset.reset="earliest"` means a fresh group reads the topic from the start.
-3. `topic_as_map` treats the topic as a live keyed map: each message becomes an item keyed by its Kafka key, and a tombstone (null value) deletes that key's row. `mount_each` runs one `process_message` component per message.
+3. `topic_as_map` treats the topic as a live keyed map: each message becomes an item keyed by its Kafka key, and a tombstone (null value) deletes that key's row. `spawn_each` runs one `process_message` component per message.
 
 That's the whole pipeline — one file.
 

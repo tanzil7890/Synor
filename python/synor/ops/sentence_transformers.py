@@ -129,7 +129,7 @@ class SentenceTransformerEmbedder(_schema.VectorSchemaProvider):
                     )
         return self._model
 
-    @syn.fn.as_async(batching=True, runner=syn.GPU, max_batch_size=64)
+    @syn.task.as_async(batching=True, runner=syn.GPU, max_batch_size=64)
     def _embed(
         self,
         texts: list[str],
@@ -137,7 +137,7 @@ class SentenceTransformerEmbedder(_schema.VectorSchemaProvider):
         normalize_embeddings: bool = True,
     ) -> list[_NDArray[_np.float32]]:
         """Batched embedding. Concurrent single-text calls into :meth:`embed`
-        are grouped by the ``@syn.fn.as_async(batching=True)`` decorator;
+        are grouped by the ``@syn.task.as_async(batching=True)`` decorator;
         this method is the per-batch body invoked by the decorator.
 
         Args:
@@ -174,7 +174,7 @@ class SentenceTransformerEmbedder(_schema.VectorSchemaProvider):
             raise
         return list(embeddings)
 
-    @syn.fn(memo=True, version=1, logic_tracking="self")
+    @syn.task(cache=True, version=1, logic_tracking="self")
     async def embed(
         self,
         text: str,
@@ -212,7 +212,7 @@ class SentenceTransformerEmbedder(_schema.VectorSchemaProvider):
         dim = await self.dimension()
         return _schema.VectorSchema(dtype=_np.dtype(_np.float32), size=dim)
 
-    @syn.fn.as_async(runner=syn.GPU, memo=True)
+    @syn.task.as_async(runner=syn.GPU, cache=True)
     def dimension(self) -> int:
         """Return the embedding dimension for this model.
 

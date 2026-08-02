@@ -29,7 +29,7 @@ class PatientExtractor(dspy.Module):
         return self.extract(form_images=form_images).patient
 
 
-@syn.fn
+@syn.task
 def extract_patient(pdf_content: bytes) -> Patient:
     pdf_doc = pymupdf.open(stream=pdf_content, filetype="pdf")
     form_images = []
@@ -40,14 +40,14 @@ def extract_patient(pdf_content: bytes) -> Patient:
     return PatientExtractor()(form_images=form_images)
 ```
 
-Because the `OutputField` is typed as `Patient`, DSPy asks the model for that exact shape and hands back a validated object, not a string to parse. The LM is configured once at module load — `dspy.configure(lm=dspy.LM("gemini/gemini-2.5-flash"))`. `process_patient_form` (decorated `@syn.fn(memo=True)`) reads each PDF, extracts the `Patient`, and declares one JSON file named after the source form; `app_main` runs one component per file with `mount_each`.
+Because the `OutputField` is typed as `Patient`, DSPy asks the model for that exact shape and hands back a validated object, not a string to parse. The LM is configured once at module load — `dspy.configure(lm=dspy.LM("gemini/gemini-2.5-flash"))`. `process_patient_form` (decorated `@syn.task(cache=True)`) reads each PDF, extracts the `Patient`, and declares one JSON file named after the source form; `app_main` runs one component per file with `spawn_each`.
 
 ## Why this example is useful
 
 - **Read the form, not the text.** Each page is rendered at `Matrix(2, 2)` so small hand-entered text stays legible — the difference between reading a zip code and guessing one. No OCR, no Markdown step.
 - **Declared, not prompted.** A typed `Signature` plus `ChainOfThought` is the whole spec; DSPy compiles the typed in/out into the actual prompt and reasons before answering on dense, checkbox-heavy forms.
 - **Typed and validated.** The `OutputField` is `Patient`, so DSPy returns a validated Pydantic object; optional fields and `default_factory=list` mean a form that omits medications yields an empty list, not a failure.
-- **Incremental by default.** `@syn.fn(memo=True)` skips a form entirely when its bytes and the function's code are unchanged, so you never re-run the slow, paid vision extraction on a PDF you've already processed.
+- **Incremental by default.** `@syn.task(cache=True)` skips a form entirely when its bytes and the function's code are unchanged, so you never re-run the slow, paid vision extraction on a PDF you've already processed.
 - **Compare libraries on one flow.** A BAML twin runs the exact same task with a BAML schema instead of a DSPy signature — same input, same output, swap the extraction layer.
 
 ## Run it

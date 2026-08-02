@@ -13,8 +13,8 @@ rows for files that disappear.
 | --- | --- |
 | Connection | `sqlite::Database::connect(path)` |
 | Schema | `sqlite::TableSchema` + `sqlite::ColumnDef` |
-| Target | `sqlite::mount_table_target` + `TableTarget::declare_row` |
-| Source | `synor::fs::walk` + `Ctx::mount_each` |
+| Target | `sqlite::mount_table_target` + `TableTarget::ensure_row` |
+| Source | `synor::fs::walk` + `Ctx::spawn_each` |
 
 ## Run
 

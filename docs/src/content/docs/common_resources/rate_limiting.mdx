@@ -78,7 +78,7 @@ async def lifespan(builder: syn.EnvironmentBuilder):
     yield
 
 
-@syn.fn
+@syn.task
 async def fetch_one(item: Item) -> Data:
     await syn.use_context(RATE_LIMIT).acquire()
     return await call_external_api(item)
@@ -90,7 +90,7 @@ draws from the same 50/s budget.
 ## When to use it
 
 Reach for a `RateLimiter` whenever a pipeline makes outbound calls to a
-rate-limited service — an API you query from a `@syn.fn`, an embedding or LLM
+rate-limited service — an API you query from a `@syn.task`, an embedding or LLM
 endpoint, a bucket or database with a request cap — and you want the whole
 pipeline to stay within one budget rather than each call site guessing at its own
 `sleep`. Because a fan-out (e.g. one component per source item) can otherwise

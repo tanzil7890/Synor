@@ -30,7 +30,7 @@ P = ParamSpec("P")
 R = TypeVar("R")
 
 # Flag indicating if we're running inside a subprocess (GPU runner)
-# When True, @syn.fn decorators should execute the raw function
+# When True, @syn.task decorators should execute the raw function
 # without batching/runner/memo since those are already handled by the parent.
 _in_subprocess: bool = False
 

@@ -19,9 +19,9 @@ async def test_runtime_records_provenance_and_verifies_replay(
     app_source = tmp_path / "main.py"
     app_source.write_text("# replay source\n", encoding="utf-8")
 
-    @syn.fn(memo=True)
+    @syn.task(cache=True)
     def build() -> None:
-        localfs.declare_file(
+        localfs.ensure_file(
             output,
             b"artifact bytes",
             create_parent_dirs=True,
@@ -113,9 +113,9 @@ async def test_runtime_quarantines_pii_preview_without_applying(
     env = syn.Environment(syn.Settings(db_path=tmp_path / "native"))
     output = tmp_path / "pii.txt"
 
-    @syn.fn
+    @syn.task
     def build() -> None:
-        localfs.declare_file(
+        localfs.ensure_file(
             output,
             "alice@example.com",
             create_parent_dirs=True,

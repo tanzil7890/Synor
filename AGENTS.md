@@ -72,12 +72,12 @@ synor/
 │   │   ├── __init__.py         # Package entry point
 │   │   ├── cli.py              # CLI commands
 │   │   ├── _internal/          # Internal implementation for the core engine
-│   │   │   ├── api.py          # Public API: mount, use_mount, mount_each, map, mount_target, App, fn, start/stop
+│   │   │   ├── api.py          # Public API: mount, call, spawn_each, map, attach_target, App, fn, start/stop
 │   │   │   ├── app.py          # App base implementation
 │   │   │   ├── context_keys.py # ContextKey and ContextProvider
 │   │   │   ├── environment.py  # Environment and lifespan handling
-│   │   │   ├── function.py     # @syn.fn decorator implementation
-│   │   │   ├── component_ctx.py # ComponentContext and component_subpath
+│   │   │   ├── function.py     # @syn.task decorator implementation
+│   │   │   ├── component_ctx.py # ComponentContext and unit_path
 │   │   │   ├── target_state.py # Target state implementation
 │   │   │   └── core.pyi        # Type stubs for the Rust extension module (update when PyO3 APIs change)
 │   │   ├── connectors/         # External system connectors (localfs, postgres, qdrant, lancedb, google_drive)
@@ -107,9 +107,9 @@ Use three questions to reason about a run:
 
 **App** — The top-level runnable unit. Bundles a main function with its arguments. When you call `app.update()`, the main function runs as the root processing component.
 
-**Processing Component** — The unit of execution that owns a set of target states. Created by `mount()` or `use_mount()` at a specific component path. When a component finishes, its target states sync atomically to external systems.
+**Processing Component** — The unit of execution that owns a set of target states. Created by `spawn()` or `call()` at a specific component path. When a component finishes, its target states sync atomically to external systems.
 
-**Component Path** — Stable identifier for a processing component across runs. Created via `syn.component_subpath("process", filename)`. Synor uses component paths to:
+**Component Path** — Stable identifier for a processing component across runs. Created via `syn.unit_path("process", filename)`. Synor uses component paths to:
 
 * Match components to their previous runs for change detection
 * Determine ownership of target states (if a path disappears, its target states are cleaned up)
@@ -118,7 +118,7 @@ Use three questions to reason about a run:
 
 **Target** — The API object used to declare target states (e.g., `DirTarget`, `TableTarget`). Targets can be nested: a container target state (directory/table) provides a Target for declaring child target states (files/rows).
 
-**Function** — A Python function decorated with `@syn.fn`. Use `memo=True` to enable memoization (skip execution when inputs and code are unchanged).
+**Function** — A Python function decorated with `@syn.task`. Use `cache=True` to enable memoization (skip execution when inputs and code are unchanged).
 
 **Context** — Typed provider mechanism for sharing resources. Define keys with `ContextKey[T]`, provide values in lifespan via `builder.provide()`, use in functions via `syn.use_context(key)`.
 
@@ -126,25 +126,25 @@ Use three questions to reason about a run:
 
 ```python
 # Mounting processing components (subpath auto-derived from fn.__name__)
-await syn.mount(fn, *args, **kw)                                       # child runs independently
-result = await syn.use_mount(fn, *args, **kw)                          # returns value directly
+await syn.spawn(fn, *args, **kw)                                       # child runs independently
+result = await syn.call(fn, *args, **kw)                          # returns value directly
 
 # Explicit subpath (for multi-part paths or multiple mounts of same function)
-await syn.mount(syn.component_subpath("process", filename), fn, *args, **kw)
-result = await syn.use_mount(syn.component_subpath("name"), fn, *args, **kw)
+await syn.spawn(syn.unit_path("process", filename), fn, *args, **kw)
+result = await syn.call(syn.unit_path("name"), fn, *args, **kw)
 
 # Component subpath composition
-subpath = syn.component_subpath("process", filename)  # multiple parts
-subpath = syn.component_subpath("a") / "b" / "c"      # chaining with /
+subpath = syn.unit_path("process", filename)  # multiple parts
+subpath = syn.unit_path("a") / "b" / "c"      # chaining with /
 
-# Using component_subpath as context manager (applies to all nested mount calls)
-with syn.component_subpath("process"):
+# Using unit_path as context manager (applies to all nested mount calls)
+with syn.unit_path("process"):
     for f in files:
-        await syn.mount(syn.component_subpath(str(f.relative_path)), process_file, f, target)
+        await syn.spawn(syn.unit_path(str(f.relative_path)), process_file, f, target)
 
 # Declaring target states (typically via Target methods)
-dir_target.declare_file(filename=name, content=data)
-table_target.declare_row(row=MyRow(...))
+dir_target.ensure_file(filename=name, content=data)
+table_target.ensure_row(row=MyRow(...))
 
 # Using context values
 db = syn.use_context(PG_DB)  # retrieve value provided in lifespan
@@ -153,13 +153,13 @@ db = syn.use_context(PG_DB)  # retrieve value provided in lifespan
 ctx = syn.get_component_context()
 with ctx.attach():
     # Synor APIs work correctly in this thread
-    syn.mount(...)
+    syn.spawn(...)
 ```
 
 **Mount handles:**
 
-* `mount()` → `ComponentMountHandle`: call `await handle.ready()` to wait until target states are synced
-* `use_mount()` → returns the result value directly (awaitable)
+* `spawn()` → `SpawnHandle`: call `await handle.ready()` to wait until target states are synced
+* `call()` → returns the result value directly (awaitable)
 
 ### How syncing works
 
@@ -180,22 +180,22 @@ import synor as syn
 from synor.connectors import localfs
 from synor.resources.file import FileLike, PatternFilePathMatcher
 
-@syn.fn(memo=True)
+@syn.task(cache=True)
 async def process_file(file: FileLike, target: localfs.DirTarget) -> None:
     html = _markdown_it.render(await file.read_text())
     outname = "__".join(file.file_path.path.parts) + ".html"
-    target.declare_file(filename=outname, content=html)
+    target.ensure_file(filename=outname, content=html)
 
-@syn.fn
+@syn.task
 async def app_main(sourcedir: pathlib.Path, outdir: pathlib.Path) -> None:
-    target = await syn.use_mount(localfs.declare_dir_target, outdir)
+    target = await syn.call(localfs.ensure_dir_target, outdir)
 
     files = localfs.walk_dir(
         sourcedir,
         recursive=True,
         path_matcher=PatternFilePathMatcher(included_patterns=["**/*.md"]),
     )
-    await syn.mount_each(process_file, files.items(), target)
+    await syn.spawn_each(process_file, files.items(), target)
 
 
 app = syn.App(
@@ -300,7 +300,7 @@ The Rust core (`rust/core`, `rust/utils`) uses **async-first** design with Tokio
 
 * Rust core exposes async functions
 * `rust/py` provides sync wrappers that use `block_on()` to call async Rust from sync Python
-* Python's `synor` API is **async-first**: mount APIs (`mount`, `use_mount`, `mount_each`, `map`) are all `async def`; `App.update()`/`App.drop()` are async; sync entry points (`App.update_blocking()`, `App.drop_blocking()`, `start_blocking()`, `stop_blocking()`) are available for CLI and blocking contexts
+* Python's `synor` API is **async-first**: mount APIs (`mount`, `call`, `spawn_each`, `map`) are all `async def`; `App.update()`/`App.drop()` are async; sync entry points (`App.update_blocking()`, `App.drop_blocking()`, `start_blocking()`, `stop_blocking()`) are available for CLI and blocking contexts
 
 When adding new functionality that involves I/O or concurrency:
 
