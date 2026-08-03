@@ -222,13 +222,11 @@ When `live_stream` is provided, `items()` returns a [`LiveMapView`](../advanced_
 The typical setup uses **OCI Streaming**. Configure an [OCI Events Rule](https://docs.oracle.com/en-us/iaas/Content/Events/Concepts/eventsoverview.htm) that forwards Object Storage events (`createobject`, `updateobject`, `deleteobject`) to an OCI Streaming stream, then consume that stream as a `LiveStream[bytes]` via the Kafka connector — see [`topic_as_stream()` and `payloads()`](./kafka#as-a-live-stream) for the consumer / stream setup — and pass it as `live_stream`:
 
 ```python
-from confluent_kafka.aio import AIOConsumer
 from synor.connectors import kafka, oci_object_storage
 
-consumer = AIOConsumer({
+consumer = kafka.create_consumer({
     "bootstrap.servers": "<oci-streaming-bootstrap-host>:9092",
     "group.id": "my-group",
-    "enable.auto.commit": "false",
 })
 topic_stream = kafka.topic_as_stream(consumer, ["object-storage-events"])
 
@@ -240,6 +238,8 @@ walker = oci_object_storage.list_objects(
 await syn.spawn_each(process_file, walker.items(), target)
 ```
 
+Because this consumer comes from `kafka.create_consumer()`, binding it transfers ownership to the single-use topic stream. The stream drains pending work, unsubscribes, and closes the consumer whenever watching ends.
+
 See [Live Mode](../programming_guide/live_mode) for how live mode works and how to enable it on the app.
 
 ### Example
@@ -247,7 +247,6 @@ See [Live Mode](../programming_guide/live_mode) for how live mode works and how 
 ```python
 import pathlib
 
-from confluent_kafka.aio import AIOConsumer
 import oci
 from oci.object_storage import ObjectStorageClient
 
@@ -271,10 +270,9 @@ async def app_main(
     config = oci.config.from_file()
     client = ObjectStorageClient(config)
 
-    consumer = AIOConsumer({
+    consumer = kafka.create_consumer({
         "bootstrap.servers": "<oci-streaming-host>:9092",
         "group.id": "my-group",
-        "enable.auto.commit": "false",
     })
     topic_stream = kafka.topic_as_stream(consumer, ["object-storage-events"])
 

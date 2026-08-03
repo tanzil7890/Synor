@@ -18,10 +18,9 @@
 //! - A `LiveComponent` is a trait with `process` (one full pass) and
 //!   `process_live` (the long-lived reactive body), instead of a Python class
 //!   with two coroutine methods.
-//! - An [`ExceptionHandler`] is a synchronous closure that returns `Ok(())` to
-//!   swallow a background failure or `Err(_)` to propagate it — the same
-//!   "return = swallow, raise = propagate" contract the Python handler chain
-//!   has, expressed through `Result`.
+//! - An [`ExceptionHandler`] is a synchronous reporting closure. `Ok(())`
+//!   stops the reporting chain; `Err(_)` delegates reporting to an outer
+//!   handler. The component failure remains terminal either way.
 
 use std::fmt::Display;
 use std::future::Future;
@@ -42,20 +41,21 @@ use crate::app::AppInner;
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::profile::{BoxedProcessor, RustProfile, Value};
+use crate::readiness::ReadinessOutcome;
 use crate::user_state::{IntoStateKey, decode_state, encode_state};
 
 type CoreError = synor_utils::error::Error;
 
 /// Map a core engine error into the SDK error type. Matches the conversion
 /// already used by `Ctx::auto_refresh`.
-pub(crate) fn engine_err(e: impl Display) -> Error {
-    Error::engine(format!("{e}"))
+pub(crate) fn engine_err(e: CoreError) -> Error {
+    Error::from(e)
 }
 
 /// Map an SDK error back into a core engine error, for propagation across the
 /// `controller.start` / `on_error` boundary (both speak the core error type).
 fn to_core_error(e: Error) -> CoreError {
-    CoreError::internal_msg(format!("{e}"))
+    e.into_core()
 }
 
 // ---------------------------------------------------------------------------
@@ -98,18 +98,16 @@ pub struct ExceptionContext {
 
 /// A handler for failures of background work owned by a live component.
 ///
-/// Returning `Ok(())` **swallows** the failure (the operation's handle resolves
-/// `Ok`); returning `Err(_)` **re-raises** it — propagating to the next outer
-/// handler in the chain, or to the operation's handle if none remain. This is
-/// the Rust expression of the Python handler chain's "return = swallow, raise =
-/// propagate" rule.
+/// Returning `Ok(())` marks the failure as reported and stops the reporting
+/// chain. Returning `Err(_)` delegates reporting to the next outer handler.
+/// Neither result changes the operation's terminal failure.
 pub type ExceptionHandler =
     Arc<dyn Fn(&Error, &ExceptionContext) -> Result<()> + Send + Sync + 'static>;
 
 /// Wrap a chain of [`ExceptionHandler`]s (innermost component last) plus the
 /// failure's static context as a core `OnError`. Handlers run nearest-first;
-/// the first to return `Ok` swallows the error, otherwise the (possibly
-/// rewritten) error propagates to the next outer handler and finally out.
+/// the first to return `Ok` completes reporting, otherwise the (possibly
+/// rewritten) reporting error propagates to the next outer handler.
 pub(crate) fn build_chained_on_error(
     chain: &[ExceptionHandler],
     ctx: ExceptionContext,
@@ -208,9 +206,14 @@ impl LiveComponentOperator {
 
     /// Run a full `process()` pass. Reconciles the complete desired state and
     /// garbage-collects children no longer declared. Failures route through the
-    /// component's [`ExceptionHandler`] if one was registered (returning the
-    /// handler's verdict), otherwise surface as `Err`.
+    /// component's [`ExceptionHandler`] if one was registered, then surface as
+    /// `Err` regardless of the observer's result.
     pub async fn update_full(&self) -> Result<()> {
+        self.update_full_outcome().await.into_result()
+    }
+
+    /// Run a full `process()` pass and return its explicit terminal outcome.
+    pub async fn update_full_outcome(&self) -> ReadinessOutcome {
         let instance = self.instance.clone();
         let state = self.state.clone();
         let chain = self.handler_chain.clone();
@@ -233,16 +236,30 @@ impl LiveComponentOperator {
         );
         let on_error =
             build_chained_on_error(&self.handler_chain, self.exc_ctx(MountKind::UpdateFull));
-        self.controller
-            .update_full(processor, on_error)
-            .await
-            .map_err(engine_err)
+        ReadinessOutcome::from_result(
+            self.controller
+                .update_full(processor, on_error)
+                .await
+                .map_err(engine_err),
+        )
     }
 
     /// Incrementally mount (or replace) a single child under `key`, running
     /// `f` to declare its state. Same-key rapid calls coalesce. Awaits until the
     /// child's state has synced.
     pub async fn update<K, F, Fut>(&self, key: K, f: F) -> Result<()>
+    where
+        K: Display,
+        F: FnOnce(Ctx) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.update_outcome(key, f).await.into_result()
+    }
+
+    /// Incrementally mount or replace a child and return its explicit terminal
+    /// outcome. In particular, a queued operation displaced by a newer update
+    /// is reported as [`ReadinessOutcome::Superseded`].
+    pub async fn update_outcome<K, F, Fut>(&self, key: K, f: F) -> ReadinessOutcome
     where
         K: Display,
         F: FnOnce(Ctx) -> Fut + Send + 'static,
@@ -271,28 +288,41 @@ impl LiveComponentOperator {
             &self.handler_chain,
             self.child_exc_ctx(MountKind::Update, &child_path),
         );
-        let handle = self
+        let handle = match self
             .controller
             .update(child_path, processor, on_error)
             .await
-            .map_err(engine_err)?;
-        handle.ready().await.map_err(engine_err)
+            .map_err(engine_err)
+        {
+            Ok(handle) => handle,
+            Err(error) => return ReadinessOutcome::from_result(Err(error)),
+        };
+        ReadinessOutcome::from_core(handle.outcome().await)
     }
 
     /// Incrementally remove the child mounted under `key`, cleaning up its
     /// target states. Awaits until the deletion has synced.
     pub async fn delete<K: Display>(&self, key: K) -> Result<()> {
+        self.delete_outcome(key).await.into_result()
+    }
+
+    /// Incrementally remove a child and return its explicit terminal outcome.
+    pub async fn delete_outcome<K: Display>(&self, key: K) -> ReadinessOutcome {
         let child_path = self.child_path(&key);
         let on_error = build_chained_on_error(
             &self.handler_chain,
             self.child_exc_ctx(MountKind::Delete, &child_path),
         );
-        let handle = self
+        let handle = match self
             .controller
             .delete(child_path, on_error)
             .await
-            .map_err(engine_err)?;
-        handle.ready().await.map_err(engine_err)
+            .map_err(engine_err)
+        {
+            Ok(handle) => handle,
+            Err(error) => return ReadinessOutcome::from_result(Err(error)),
+        };
+        ReadinessOutcome::from_core(handle.outcome().await)
     }
 
     /// Signal that the initial catch-up is complete. Idempotent. In catch-up

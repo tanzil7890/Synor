@@ -1,7 +1,9 @@
 # Provable Index Revocation: implementation plan
 
 - **Status:** Phases 0–6 ✅ complete for their explicitly bounded milestones.
-  Phase 6 now includes additive LMDB schema v3/effect-record v2 state,
+  Phase 6 now includes additive LMDB schema v4/effect-record v2 state,
+  with transactional unresolved-obligation summaries over the v3 evidence and
+  lineage keyspaces,
   immutable evidence lineages, verified-sink capability, write-free strict
   preview, strict provider recovery, retained evidence, rich tombstones, an
   OS-backed app-operation lease and environment snapshot barrier,
@@ -68,7 +70,7 @@ completed unless a nearby implementation-status block says otherwise.
 | Phase 3 | **✅ Complete for the governed source milestone** | Stable Drive-ID identity, privacy-safe ACL normalization, authoritative snapshots, user/shared-drive and drive-authority change replay, bounded descendant invalidation, strict newly-in-scope subtree discovery, permission expiry, semantic-policy rescan fencing, explicit ambiguity, and durable-readiness checkpointing are implemented and fake-service tested. Live Workspace acceptance remains operator-gated. |
 | Phase 4 | **✅ Complete for the internal certified-adapter milestone** | Additive governed point lineage/content binding, exact Phase 2 suppression-state freshness/current-generation checks, mandatory source/tenant/policy/generation/principal filters, configured-`WCF == RF` preflight plus strong completed writes, collection/index and RF>1 replicated-topology preflight, target-native suppression, exact-ID delete, ACL narrowing, strict collection absence, durable provider operation evidence, a 30-second Qdrant operation timeout, caller-bounded metadata reads, compatibility coverage, and runtime reconstruction are locally tested. Principal authentication/context issuance, live acceptance, and a production declarative Qdrant handler remain open. `consistency=all` proves guarded non-return for the verified operation, not physical per-replica absence. |
 | Phase 5 | **✅ Complete for the public/reference milestone** | Minimal public types alias the proven schemas; strict `SynorRuntime` adds startup repair/health, controlled finalization, explicit outcome status, and optional revocation summaries; the redacted/versioned operator CLI and generated docs are tested; and the two-tenant local flagship runs twice with ACL-only revocation, pre-score suppression, delayed convergence, receipts, partial-scan safety, restore non-resurrection, and content-free evidence. Optional real Drive/Qdrant mode is configuration-only; live acceptance and a production declarative handler remain open. |
-| Phase 6 | **✅ Complete for the locally certifiable native milestone; external gates open** | Schema-v3/effect-record-v2 LMDB effects, immutable evidence lineages, safe inspection, verified-sink/PyO3 integration, write-free preview, precommit → verified → final-commit ordering, strict recovery and drop protection, rich tombstones, OS-backed app-operation serialization and whole-environment snapshot exclusion, deterministic live/Qdrant generation races, process-kill recovery, copied real-fixture migration, native writer stress, million-action correlation, compatibility benchmarks, and archive/compaction/downgrade tooling are implemented and tested. Sudden physical power loss, storage-controller failure, generic connector-side multi-host fencing, and live production acceptance remain open. |
+| Phase 6 | **✅ Complete for the locally certifiable native milestone; external gates open** | Schema-v4/effect-record-v2 LMDB effects, transactional obligation summaries, immutable evidence lineages, safe inspection, verified-sink/PyO3 integration, write-free preview, precommit → verified → final-commit ordering, strict recovery and drop protection, rich tombstones, OS-backed app-operation serialization and whole-environment snapshot exclusion, deterministic live/Qdrant generation races, process-kill recovery, copied real-fixture migration, native writer stress, million-action correlation, compatibility benchmarks, and archive/compaction/downgrade tooling are implemented and tested. Sudden physical power loss, storage-controller failure, generic connector-side multi-host fencing, and live production acceptance remain open. |
 | Phase 7 | **Not started** | Drift/orphan scanning, cache-recipient assurance, and restore gating remain planned. |
 | Phase 8 | **Not started** | Connector expansion, conformance kit, SLOs, and GA hardening remain planned. |
 
@@ -252,7 +254,7 @@ behavior rather than listing unrelated operations and connectors.
 | `rust/core/src/engine/execution.rs` | Reconciles desired target states, performs write-free preview planning, precommits tracking plus described native effects, applies sinks, records verification/failure, and final-commits tracking/effects. | Strict cleanup rejects legacy sinks before apply, retains missing-provider blockers, validates evidence lineage on retry, and completes effects only in final tracking commit. |
 | `rust/core/src/engine/target_state.rs` | Batches flat sink actions and declares internal legacy/query-verified assurance plus safe effect description. | The existing action order and four-field reconcile output remain intact; legacy sinks stay compatible. |
 | `rust/core/src/state_store/submit_session.rs` | Atomically writes ownership, tracking, native intents, final effect status, and existence/tombstone reconciliation inside LMDB transactions. | Every new write remains inside a caller-owned transaction opened through `Storage::run_txn`. |
-| `rust/core/src/state/db_schema.rs` and `state/native_effect.rs` | Define target ownership, schema-v3/effect-record-v2 native evidence, `0x48` obligation and `0x50` lineage cursors, component existence, and rich compatible tombstones. | Connector action IDs remain receipt-correlation IDs; engine evidence IDs are epoch-derived and immutable. Legacy values have safe defaults, supported v1/v2 state upgrades before write, and future/corrupt native state fails closed. |
+| `rust/core/src/state/db_schema.rs` and `state/native_effect.rs` | Define target ownership, schema-v4/effect-record-v2 native evidence, `0x48` obligation and `0x50` lineage cursors, the `0x58` transactional obligation summary, component existence, and rich compatible tombstones. | Connector action IDs remain receipt-correlation IDs; engine evidence IDs are epoch-derived and immutable. Legacy values have safe defaults, supported v1-v3 state upgrades before write, and future/corrupt native state fails closed. |
 | `rust/core/src/engine/live_component.rs` | Applies live work with a durable local generation, generation-checked committed state, cancellation fence, one per-subpath live/plain/delete queue, and generation-bound tombstones. | The latest queued transition wins and a handoff timeout fails without installing a successor. The deterministic delete/reinsert race proves the replacement waits for the old verified-effect boundary. |
 | `rust/core/src/engine/app.rs` | Configures compatibility/strict root update behavior, protected drop, and the app-operation lease lifecycle. | Strict updates surface unresolved native effects; drop refuses every non-completed effect and otherwise retains native evidence; every update mode and drop serializes against other processes for the same app. |
 | `rust/py/src/target_state.rs` | Bridges the unchanged four-field reconcile output plus optional verified-sink descriptors. | Invalid descriptors become fixed redacted errors; no fifth tuple field was added. |
@@ -2386,7 +2388,8 @@ production/GA ready. This phase is deliberately after the contract is proven.
 
 The additive native design is implemented across the Rust engine, LMDB state,
 PyO3, and the internal Python controlled runtime. It establishes local effect
-intent/finalization ordering, schema-v3 immutable evidence lineages, strict
+intent/finalization ordering, schema-v4 transactional obligation summaries
+over immutable evidence lineages, strict
 verified-sink enforcement, write-free preview parity, strict provider-missing
 blockers and fresh-process recovery, retained metadata-only evidence, richer
 compatible tombstones, an OS-backed app-operation lease with an exclusive
@@ -2556,18 +2559,22 @@ when a later app lifecycle repeats the same connector action ID.
 
 #### Schema and migration
 
-- [x] Add the schema-v3 singleton at `0x38`; metadata-only effect records at
-  `0x40`; provider-missing allocation cursors at `0x48`; and ordinary
-  per-locator lineage cursors at `0x50` in each existing app database.
+- [x] Add the schema singleton at `0x38`; metadata-only effect records at
+  `0x40`; provider-missing allocation cursors at `0x48`; ordinary per-locator
+  lineage cursors at `0x50`; and the schema-v4 transactional obligation
+  summary at `0x58` in each activated app database.
 - [x] Use native effect record version 2 to persist a separate engine evidence
   ID while retaining connector action ID in the descriptor. Version-1 records
   decode with the action ID as their legacy evidence ID.
 - [x] Treat a missing marker plus empty effect, obligation, and lineage
-  keyspaces as an untouched pre-feature database. Install version 3 lazily in
-  the first native-effect transaction.
+  keyspaces as an untouched pre-feature database. Install version 4 lazily in
+  the first native-effect transaction; a strict no-op check leaves an untouched
+  database untouched.
 - [x] Read supported schema-v1/v2 state and, before its next native write,
   perform one bounded evidence scan that builds every ordinary per-locator
-  lineage cursor and atomically advances the marker to v3.
+  lineage cursor and obligation summary before atomically advancing to v4.
+  Read schema-v3 state by validating its cursors and atomically adding the
+  summary and v4 marker.
 - [x] Make native-effect reads/writes, strict completion checks, inspection,
   and protected drop in the current binary refuse future native schema
   versions and any native metadata that exists without a schema marker.
@@ -2589,7 +2596,7 @@ when a later app lifecycle repeats the same connector action ID.
   `native-effect-operations-runbook.md`. The downgrade command uses an
   LMDB-consistent staging copy, refuses unresolved effects or any tombstone,
   archives before publication, strips only native metadata from the copy,
-  publishes a readiness hash, and leaves the schema-v3 source untouched. A
+  publishes a readiness hash, and leaves the schema-v3/v4 source untouched. A
   wheel built from the pre-native revision completed
   `update -> drop -> update` against the prepared copy.
 - [x] Define and validate completed-effect retention, export, and compaction.
@@ -2645,7 +2652,9 @@ when a later app lifecycle repeats the same connector action ID.
   shared queue with latest-operation-wins behavior.
 - [x] Exercise one million batched Phase 2 descriptors/receipts and one
   million real native effect lifecycles. Both runs recompute exact
-  correlation; the native run persists and re-reads every schema-v3 record.
+  correlation; the original native run persisted and re-read every schema-v3
+  record, and the v4 regression separately verifies constant-time summary
+  lookup against a full retained-evidence scan.
 - [x] Reproduce the complete live delete/reinsert race under deterministic
   scheduling and prove the replacement waits for the old verified-effect
   boundary. Separately, pause a Qdrant delete after remote apply, reinsert a
@@ -2684,8 +2693,8 @@ the later GA gates remain open.
 
 Disable creation of new strict effects while retaining read, retry, inspection,
 and drop protection. Never downgrade the source by deleting its native
-keyspace or suppression evidence. Do not open a schema-v3 database with a
-binary that predates native schema version 3. Use the copy-only
+keyspace or suppression evidence. Do not open a schema-v3 or schema-v4 database
+with a binary that predates that schema. Use the copy-only
 `native-effects prepare-downgrade` procedure and retain the original database,
 archive, and readiness hash through the rollback window.
 
@@ -2925,16 +2934,18 @@ database without repurposing target tracking:
 
 - a missing schema marker plus empty `0x40` effect, `0x48` obligation, and
   `0x50` lineage keyspaces remains the valid pre-feature state;
-- the first native effect write installs schema version 3 atomically with the
-  effect and its cursor metadata;
+- the first native effect write installs schema version 4 atomically with the
+  effect, cursor metadata, and `0x58` obligation summary;
 - schema-v1/v2 databases remain readable and perform one bounded effect scan
   to create ordinary lineage cursors before their next native write installs
-  v3;
+  v4; schema-v3 databases validate their cursors and perform one scan to build
+  the summary before the marker advances atomically;
 - effect record version 2 separates the connector action ID from the
   engine-owned, locator/epoch-derived evidence ID while retaining v1 fallback;
 - native-effect access, strict completion checks, inspection, and protected
   drop in the current binary fail closed on a future schema marker, native
-  records with no marker, or corrupt cursor/evidence bindings;
+  records with no marker, a missing/invalid current summary, or corrupt
+  cursor/evidence bindings;
 - legacy child-existence records decode with unknown generation, and empty
   tombstones decode with conservative legacy defaults;
 - strict provider blockers retain target tracking, and app drop is
@@ -2943,8 +2954,8 @@ database without repurposing target tracking:
 
 Native activation is one-way for the source database. A genuinely older
 executable cannot know about a schema added after it was released, so it cannot
-be made to refuse that schema retroactively. Do not downgrade a schema-v3 app
-database in place. The checked-in pre-feature fixtures validate forward
+be made to refuse that schema retroactively. Do not downgrade a schema-v3 or
+schema-v4 app database in place. The checked-in pre-feature fixtures validate forward
 migration. For an older executable, use the documented copy-only downgrade
 command, verify its external archive/readiness hash, and retain the source for
 rollback.

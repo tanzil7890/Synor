@@ -49,6 +49,7 @@ pub mod prelude;
 pub(crate) mod profile;
 #[cfg(feature = "qdrant")]
 pub mod qdrant;
+pub mod readiness;
 pub mod resources;
 pub mod row_schema;
 #[cfg(any(feature = "doris", feature = "sqlite", feature = "surrealdb"))]
@@ -102,6 +103,7 @@ pub use live_component::{
 };
 #[doc(hidden)]
 pub use logic::{FnLogicEntry, SYNOR_FN_LOGIC};
+pub use readiness::ReadinessOutcome;
 pub use resources::chunk::{Chunk, TextPosition};
 pub use resources::embedder::Embedder;
 pub use resources::live_map::LiveMap;

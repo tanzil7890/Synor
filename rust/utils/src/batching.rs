@@ -1,8 +1,11 @@
 use async_trait::async_trait;
 use hashlink::LinkedHashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex, Weak};
-use tokio::sync::{oneshot, watch};
+use std::sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicUsize, Ordering},
+};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot, watch};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{Instrument, Span, error};
 
@@ -13,6 +16,12 @@ use crate::internal_bail;
 pub trait Runner: Send + Sync {
     type Input: Send;
     type Output: Send;
+
+    /// Best-effort in-memory size used for queue backpressure. Runners whose
+    /// inputs own heap allocations should override this method.
+    fn input_size_bytes(&self, input: &Self::Input) -> usize {
+        std::mem::size_of_val(input).max(1)
+    }
 
     async fn run(
         &self,
@@ -67,6 +76,7 @@ impl<R: Runner + 'static> Default for BatchQueue<R> {
 struct Batch<I, O> {
     inputs: Vec<I>,
     output_txs: Vec<oneshot::Sender<Result<O>>>,
+    _capacity_permits: Vec<InputCapacityPermits>,
     num_cancelled_tx: watch::Sender<usize>,
     num_cancelled_rx: watch::Receiver<usize>,
 }
@@ -77,6 +87,7 @@ impl<I, O> Default for Batch<I, O> {
         Self {
             inputs: Vec::new(),
             output_txs: Vec::new(),
+            _capacity_permits: Vec::new(),
             num_cancelled_tx,
             num_cancelled_rx,
         }
@@ -87,14 +98,80 @@ struct BatcherData<R: Runner + 'static> {
     runner: R,
     options: BatchingOptions,
     queue: Arc<BatchQueue<R>>,
+    item_capacity: Arc<Semaphore>,
+    byte_capacity: Arc<Semaphore>,
+    execution_capacity: Arc<Semaphore>,
+    capacity_waiters: AtomicUsize,
+    /// Sum of runner-provided estimates for admitted inputs. This is tracked
+    /// separately from byte-semaphore permits because one oversized legacy
+    /// input reserves the whole semaphore but can be larger than that limit.
+    in_flight_bytes: Arc<AtomicUsize>,
+}
+
+struct InputCapacityPermits {
+    _item: OwnedSemaphorePermit,
+    _bytes: OwnedSemaphorePermit,
+    _byte_accounting: InFlightByteAccounting,
+}
+
+struct InFlightByteAccounting {
+    total: Arc<AtomicUsize>,
+    input_size: usize,
+}
+
+impl InFlightByteAccounting {
+    fn new(total: Arc<AtomicUsize>, input_size: usize) -> Result<Self> {
+        total
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(input_size)
+            })
+            .map_err(|_| Error::internal_msg("batch in-flight byte estimate overflow"))?;
+        Ok(Self { total, input_size })
+    }
+}
+
+impl Drop for InFlightByteAccounting {
+    fn drop(&mut self) {
+        let previous = self.total.fetch_sub(self.input_size, Ordering::Relaxed);
+        debug_assert!(previous >= self.input_size);
+    }
+}
+
+struct CapacityWaiterGuard<'a> {
+    waiters: &'a AtomicUsize,
+}
+
+impl<'a> CapacityWaiterGuard<'a> {
+    fn new(waiters: &'a AtomicUsize) -> Self {
+        waiters.fetch_add(1, Ordering::Relaxed);
+        Self { waiters }
+    }
+}
+
+impl Drop for CapacityWaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.waiters.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 impl<R: Runner + 'static> BatcherData<R> {
     async fn run_batch(self: &Arc<Self>, batch: Batch<R::Input, R::Output>) {
         let _kick_off_next = BatchKickOffNext { queue: &self.queue };
         let num_inputs = batch.inputs.len();
-
         let mut num_cancelled_rx = batch.num_cancelled_rx;
+
+        let execution_permit = tokio::select! {
+            permit = self.execution_capacity.clone().acquire_owned() => permit,
+            _ = num_cancelled_rx.wait_for(|v| *v == num_inputs) => return,
+        };
+        let Ok(_execution_permit) = execution_permit else {
+            let message = "batch execution capacity closed";
+            for sender in batch.output_txs {
+                sender.send(Err(Error::internal_msg(message))).ok();
+            }
+            return;
+        };
+
         let outputs = tokio::select! {
             outputs = self.runner.run(batch.inputs) => {
                 outputs
@@ -147,6 +224,7 @@ pub struct Batcher<R: Runner + 'static> {
 enum BatchExecutionAction<R: Runner + 'static> {
     Inline {
         input: R::Input,
+        _capacity_permits: InputCapacityPermits,
     },
     Batched {
         output_rx: oneshot::Receiver<Result<R::Output>>,
@@ -154,23 +232,141 @@ enum BatchExecutionAction<R: Runner + 'static> {
     },
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BatchingOptions {
     pub max_batch_size: Option<usize>,
+    /// Maximum submitted inputs (queued plus executing) per batcher.
+    pub max_pending_items: usize,
+    /// Best-effort maximum submitted input bytes per batcher.
+    pub max_pending_bytes: usize,
+    /// Maximum runner batches executing concurrently per batcher.
+    pub max_concurrent_batches: usize,
+}
+
+impl Default for BatchingOptions {
+    fn default() -> Self {
+        Self {
+            // Preserve the historical batching boundary unless a caller
+            // explicitly opts into segmentation. Capacity is bounded by the
+            // item and byte semaphores independently of this setting.
+            max_batch_size: None,
+            max_pending_items: 4096,
+            max_pending_bytes: 64 * 1024 * 1024,
+            // Segmented callers historically ran full batches concurrently.
+            // Keep bounded concurrency for that opt-in behavior; the default
+            // unsegmented queue remains serial.
+            max_concurrent_batches: 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatcherStats {
+    pub ongoing_batches: usize,
+    pub queued_batches: usize,
+    pub queued_inputs: usize,
+    pub in_flight_inputs: usize,
+    pub in_flight_bytes: usize,
+    pub capacity_waiters: usize,
 }
 impl<R: Runner + 'static> Batcher<R> {
     pub fn new(runner: R, queue: Arc<BatchQueue<R>>, options: BatchingOptions) -> Self {
+        assert!(
+            options.max_pending_items > 0,
+            "max_pending_items must be positive"
+        );
+        assert!(
+            options.max_pending_bytes > 0,
+            "max_pending_bytes must be positive"
+        );
+        assert!(
+            u32::try_from(options.max_pending_bytes).is_ok(),
+            "max_pending_bytes must fit in a u32 semaphore permit count"
+        );
+        assert!(
+            options.max_concurrent_batches > 0,
+            "max_concurrent_batches must be positive"
+        );
+        if let Some(max_batch_size) = options.max_batch_size {
+            assert!(max_batch_size > 0, "max_batch_size must be positive");
+        }
         Self {
             data: Arc::new(BatcherData {
                 runner,
+                item_capacity: Arc::new(Semaphore::new(options.max_pending_items)),
+                byte_capacity: Arc::new(Semaphore::new(options.max_pending_bytes)),
+                execution_capacity: Arc::new(Semaphore::new(options.max_concurrent_batches)),
+                capacity_waiters: AtomicUsize::new(0),
+                in_flight_bytes: Arc::new(AtomicUsize::new(0)),
                 options,
                 queue,
             }),
         }
     }
 
+    pub fn stats(&self) -> BatcherStats {
+        let batcher_key = Arc::as_ptr(&self.data) as usize;
+        let queue_state = self.data.queue.state.lock().unwrap();
+        let (queued_batches, queued_inputs) = queue_state
+            .pending_batches
+            .get(&batcher_key)
+            .map(|entry| (1, entry.batch.inputs.len()))
+            .unwrap_or((0, 0));
+        BatcherStats {
+            ongoing_batches: queue_state.ongoing_count,
+            queued_batches,
+            queued_inputs,
+            in_flight_inputs: self.data.options.max_pending_items
+                - self.data.item_capacity.available_permits(),
+            in_flight_bytes: self.data.in_flight_bytes.load(Ordering::Relaxed),
+            capacity_waiters: self.data.capacity_waiters.load(Ordering::Relaxed),
+        }
+    }
+
     pub async fn run(&self, input: R::Input) -> Result<R::Output> {
         let batcher_key = Arc::as_ptr(&self.data) as usize;
+        // Acquire item admission before asking the runner to size the input.
+        // Sizing generic inputs can itself be non-trivial, so doing it first
+        // would allow an unbounded number of callers to allocate or traverse
+        // their payloads outside backpressure.
+        //
+        // The guard keeps telemetry correct even if the caller is cancelled
+        // during either admission phase.
+        let waiter_guard = CapacityWaiterGuard::new(&self.data.capacity_waiters);
+        let item = self
+            .data
+            .item_capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::internal_msg("batch item capacity closed"))?;
+
+        let input_size = self.data.runner.input_size_bytes(&input).max(1);
+        // A caller already owns `input`, so rejecting one legacy oversized
+        // value would not recover that allocation and would break previously
+        // valid workloads. Reserve the entire byte semaphore instead: at most
+        // one such value is admitted to this batcher at a time, and it cannot
+        // be coalesced behind other byte-bearing inputs. Telemetry reports the
+        // actual runner-provided estimate while it is in flight.
+        let reserved_input_size = input_size.min(self.data.options.max_pending_bytes);
+        let byte_permits = u32::try_from(reserved_input_size)
+            .map_err(|_| Error::internal_msg("batch input size exceeds semaphore capacity"))?;
+        let bytes = self
+            .data
+            .byte_capacity
+            .clone()
+            .acquire_many_owned(byte_permits)
+            .await
+            .map_err(|_| Error::internal_msg("batch byte capacity closed"))?;
+        drop(waiter_guard);
+        let capacity_permits = InputCapacityPermits {
+            _item: item,
+            _bytes: bytes,
+            _byte_accounting: InFlightByteAccounting::new(
+                Arc::clone(&self.data.in_flight_bytes),
+                input_size,
+            )?,
+        };
 
         let batch_exec_action: BatchExecutionAction<R> = {
             let mut queue_state = self.data.queue.state.lock().unwrap();
@@ -178,7 +374,10 @@ impl<R: Runner + 'static> Batcher<R> {
             if queue_state.ongoing_count == 0 {
                 // Queue is idle - execute inline
                 queue_state.ongoing_count = 1;
-                BatchExecutionAction::Inline { input }
+                BatchExecutionAction::Inline {
+                    input,
+                    _capacity_permits: capacity_permits,
+                }
             } else {
                 // Queue is busy - add to pending batch for this batcher
                 let entry = queue_state
@@ -190,6 +389,7 @@ impl<R: Runner + 'static> Batcher<R> {
                     });
 
                 entry.batch.inputs.push(input);
+                entry.batch._capacity_permits.push(capacity_permits);
                 let (output_tx, output_rx) = oneshot::channel();
                 entry.batch.output_txs.push(output_tx);
                 let num_cancelled_tx = entry.batch.num_cancelled_tx.clone();
@@ -220,7 +420,10 @@ impl<R: Runner + 'static> Batcher<R> {
         };
 
         match batch_exec_action {
-            BatchExecutionAction::Inline { input } => {
+            BatchExecutionAction::Inline {
+                input,
+                _capacity_permits,
+            } => {
                 let _kick_off_next = BatchKickOffNext {
                     queue: &self.data.queue,
                 };
@@ -228,6 +431,12 @@ impl<R: Runner + 'static> Batcher<R> {
                 let data = self.data.clone();
                 let handle = AbortOnDropHandle::new(tokio::spawn(
                     async move {
+                        let _execution_permit = data
+                            .execution_capacity
+                            .clone()
+                            .acquire_owned()
+                            .await
+                            .map_err(|_| Error::internal_msg("batch execution capacity closed"))?;
                         let mut outputs = data.runner.run(vec![input]).await?;
                         if outputs.len() != 1 {
                             internal_bail!("Expected 1 output, got {}", outputs.len());
@@ -308,13 +517,66 @@ impl BatchRecvCancellationGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use tokio::sync::oneshot;
     use tokio::time::{Duration, sleep};
 
     struct TestRunner {
         // Records each call's input values as a vector, in call order
         recorded_calls: Arc<Mutex<Vec<Vec<i64>>>>,
+    }
+
+    struct BlockingSizedRunner {
+        entered: Mutex<Option<oneshot::Sender<()>>>,
+    }
+
+    struct GatedSizingRunner {
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+
+    #[async_trait]
+    impl Runner for BlockingSizedRunner {
+        type Input = (Vec<u8>, oneshot::Receiver<()>);
+        type Output = usize;
+
+        fn input_size_bytes(&self, input: &Self::Input) -> usize {
+            input.0.len()
+        }
+
+        async fn run(
+            &self,
+            inputs: Vec<Self::Input>,
+        ) -> Result<impl ExactSizeIterator<Item = Self::Output>> {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                entered.send(()).ok();
+            }
+            let mut outputs = Vec::with_capacity(inputs.len());
+            for (input, release) in inputs {
+                release.await.ok();
+                outputs.push(input.len());
+            }
+            Ok(outputs.into_iter())
+        }
+    }
+
+    #[async_trait]
+    impl Runner for GatedSizingRunner {
+        type Input = usize;
+        type Output = usize;
+
+        fn input_size_bytes(&self, input: &Self::Input) -> usize {
+            self.entered.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+            *input
+        }
+
+        async fn run(
+            &self,
+            inputs: Vec<Self::Input>,
+        ) -> Result<impl ExactSizeIterator<Item = Self::Output>> {
+            Ok(inputs.into_iter())
+        }
     }
 
     #[async_trait]
@@ -433,6 +695,7 @@ mod tests {
             queue,
             BatchingOptions {
                 max_batch_size: Some(2),
+                ..BatchingOptions::default()
             },
         ));
 
@@ -537,6 +800,7 @@ mod tests {
             queue,
             BatchingOptions {
                 max_batch_size: Some(2),
+                ..BatchingOptions::default()
             },
         ));
 
@@ -634,6 +898,202 @@ mod tests {
         assert_eq!(calls[2], vec![4, 5]);
         assert_eq!(calls[3], vec![6]);
 
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn applies_pending_capacity_backpressure_and_reports_queue_stats() -> Result<()> {
+        let recorded_calls = Arc::new(Mutex::new(Vec::<Vec<i64>>::new()));
+        let runner = TestRunner {
+            recorded_calls: recorded_calls.clone(),
+        };
+        let queue = Arc::new(BatchQueue::<TestRunner>::new());
+        let batcher = Arc::new(Batcher::new(
+            runner,
+            queue,
+            BatchingOptions {
+                max_batch_size: None,
+                max_pending_items: 2,
+                max_pending_bytes: 1024,
+                max_concurrent_batches: 1,
+            },
+        ));
+
+        let (n1_tx, n1_rx) = oneshot::channel::<()>();
+        let (n2_tx, n2_rx) = oneshot::channel::<()>();
+        let (n3_tx, n3_rx) = oneshot::channel::<()>();
+
+        let b1 = batcher.clone();
+        let f1 = tokio::spawn(async move { b1.run((1_i64, n1_rx)).await });
+        wait_until_len(&recorded_calls, 1).await;
+
+        let b2 = batcher.clone();
+        let f2 = tokio::spawn(async move { b2.run((2_i64, n2_rx)).await });
+        let b3 = batcher.clone();
+        let f3 = tokio::spawn(async move { b3.run((3_i64, n3_rx)).await });
+
+        for _ in 0..200 {
+            let stats = batcher.stats();
+            if stats.queued_inputs == 1 && stats.capacity_waiters == 1 {
+                assert_eq!(stats.ongoing_batches, 1);
+                assert_eq!(stats.queued_batches, 1);
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        let stats = batcher.stats();
+        assert_eq!(stats.queued_inputs, 1);
+        assert_eq!(stats.capacity_waiters, 1);
+
+        n1_tx.send(()).ok();
+        assert_eq!(f1.await??, 2);
+        wait_until_len(&recorded_calls, 2).await;
+
+        n2_tx.send(()).ok();
+        assert_eq!(f2.await??, 4);
+        wait_until_len(&recorded_calls, 3).await;
+
+        n3_tx.send(()).ok();
+        assert_eq!(f3.await??, 6);
+        assert_eq!(batcher.stats().capacity_waiters, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn admits_one_oversized_input_and_reports_its_actual_estimated_bytes() -> Result<()> {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let batcher = Arc::new(Batcher::new(
+            BlockingSizedRunner {
+                entered: Mutex::new(Some(entered_tx)),
+            },
+            Arc::new(BatchQueue::new()),
+            BatchingOptions {
+                max_pending_bytes: 4,
+                ..BatchingOptions::default()
+            },
+        ));
+
+        let (release_tx, release_rx) = oneshot::channel();
+        let running_batcher = Arc::clone(&batcher);
+        let running =
+            tokio::spawn(async move { running_batcher.run((vec![0; 5], release_rx)).await });
+        entered_rx.await.unwrap();
+        assert_eq!(batcher.stats().in_flight_inputs, 1);
+        assert_eq!(batcher.stats().in_flight_bytes, 5);
+
+        let (second_release_tx, second_release_rx) = oneshot::channel();
+        let second_batcher = Arc::clone(&batcher);
+        let second =
+            tokio::spawn(async move { second_batcher.run((vec![0; 1], second_release_rx)).await });
+        for _ in 0..200 {
+            if batcher.stats().capacity_waiters == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(batcher.stats().capacity_waiters, 1);
+        assert!(!second.is_finished());
+
+        release_tx.send(()).unwrap();
+        assert_eq!(running.await??, 5);
+        for _ in 0..200 {
+            let stats = batcher.stats();
+            if stats.capacity_waiters == 0 && stats.in_flight_bytes == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(batcher.stats().capacity_waiters, 0);
+        assert_eq!(batcher.stats().in_flight_inputs, 1);
+        assert_eq!(batcher.stats().in_flight_bytes, 1);
+
+        second_release_tx.send(()).unwrap();
+        assert_eq!(second.await??, 1);
+        assert_eq!(batcher.stats().in_flight_inputs, 0);
+        assert_eq!(batcher.stats().in_flight_bytes, 0);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn acquires_item_admission_before_running_input_sizing() -> Result<()> {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let batcher = Arc::new(Batcher::new(
+            GatedSizingRunner {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            },
+            Arc::new(BatchQueue::new()),
+            BatchingOptions {
+                max_pending_items: 1,
+                max_pending_bytes: 1024,
+                ..BatchingOptions::default()
+            },
+        ));
+
+        let first_batcher = batcher.clone();
+        let first = tokio::spawn(async move { first_batcher.run(1).await });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("first input should enter sizing");
+
+        let second_batcher = batcher.clone();
+        let second = tokio::spawn(async move { second_batcher.run(1).await });
+        assert!(
+            entered_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "a second input must not be sized before item admission"
+        );
+
+        release_tx.send(()).unwrap();
+        assert_eq!(first.await??, 1);
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("second input should enter sizing after the first releases capacity");
+        release_tx.send(()).unwrap();
+        assert_eq!(second.await??, 1);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelling_capacity_wait_does_not_leak_waiter_telemetry() -> Result<()> {
+        let recorded_calls = Arc::new(Mutex::new(Vec::<Vec<i64>>::new()));
+        let runner = TestRunner {
+            recorded_calls: recorded_calls.clone(),
+        };
+        let batcher = Arc::new(Batcher::new(
+            runner,
+            Arc::new(BatchQueue::new()),
+            BatchingOptions {
+                max_pending_items: 1,
+                ..BatchingOptions::default()
+            },
+        ));
+
+        let (n1_tx, n1_rx) = oneshot::channel::<()>();
+        let (_n2_tx, n2_rx) = oneshot::channel::<()>();
+        let b1 = batcher.clone();
+        let f1 = tokio::spawn(async move { b1.run((1_i64, n1_rx)).await });
+        wait_until_len(&recorded_calls, 1).await;
+
+        let b2 = batcher.clone();
+        let f2 = tokio::spawn(async move { b2.run((2_i64, n2_rx)).await });
+        for _ in 0..200 {
+            if batcher.stats().capacity_waiters == 1 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(batcher.stats().capacity_waiters, 1);
+
+        f2.abort();
+        assert!(f2.await.unwrap_err().is_cancelled());
+        assert_eq!(batcher.stats().capacity_waiters, 0);
+
+        n1_tx.send(()).ok();
+        assert_eq!(f1.await??, 2);
         Ok(())
     }
 }

@@ -88,6 +88,39 @@ class _VerifiedPreviewHarness:
     recorded_outcomes: list[tuple[TargetVerificationOutcome, ...]]
 
 
+def test_verified_sink_contract_reports_query_verified_completion() -> None:
+    async def apply(
+        context_provider: ContextProvider,
+        actions: Sequence[_Action],
+        /,
+    ) -> None:
+        del context_provider, actions
+
+    async def verify(
+        context_provider: ContextProvider,
+        actions: Sequence[_Action],
+        applied: None,
+        /,
+    ) -> Sequence[TargetVerificationResult]:
+        del context_provider, applied
+        return [TargetVerificationResult(VerificationOutcome.ABSENT) for _ in actions]
+
+    async def record(
+        context_provider: ContextProvider,
+        outcomes: Sequence[TargetVerificationOutcome],
+        /,
+    ) -> None:
+        del context_provider, outcomes
+
+    verified = VerifiedTargetActionSink[_Action, None](
+        apply=apply,
+        verify=verify,
+        record=record,
+    )
+
+    assert verified.sink.capabilities.completion_verification == "query_verified"
+
+
 def _make_verified_preview_harness(
     name: str,
     *,

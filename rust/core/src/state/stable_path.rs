@@ -135,6 +135,26 @@ impl std::fmt::Display for StableKey {
     }
 }
 
+impl StableKey {
+    /// Best-effort bytes retained behind this key's inline enum storage.
+    ///
+    /// Used for component declaration admission accounting. Shared `Arc`
+    /// allocations may be counted more than once, which deliberately makes
+    /// the bound conservative rather than allowing an unbounded key graph.
+    pub(crate) fn retained_heap_size_bytes(&self) -> usize {
+        match self {
+            Self::Symbol(value) | Self::Str(value) => value.len(),
+            Self::Bytes(value) => value.len(),
+            Self::Array(values) => values
+                .iter()
+                .fold(std::mem::size_of_val(values.as_ref()), |total, value| {
+                    total.saturating_add(value.retained_heap_size_bytes())
+                }),
+            Self::Null | Self::Bool(_) | Self::Int(_) | Self::Uuid(_) | Self::Fingerprint(_) => 0,
+        }
+    }
+}
+
 impl storekey::Encode for StableKey {
     fn encode<W: Write>(&self, e: &mut storekey::Writer<W>) -> Result<(), storekey::EncodeError> {
         match self {

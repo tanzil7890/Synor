@@ -9,11 +9,19 @@ use crate::{
     },
 };
 
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     hash::{Hash, Hasher},
 };
 use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
+
+// Keep independently reconciling component inputs from being coalesced into
+// an arbitrarily large sink call. These are internal packing thresholds, not
+// compatibility-breaking limits on one component's indivisible action set.
+// Connectors publish hard per-call limits explicitly in `SinkCapabilities`.
+const DEFAULT_MAX_SINK_BATCH_ACTIONS: usize = 4_096;
+const DEFAULT_MAX_SINK_BATCH_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct ChildTargetDef<Prof: EngineProfile> {
     pub handler: Prof::TargetHdl,
@@ -23,6 +31,160 @@ pub struct ChildTargetDef<Prof: EngineProfile> {
 pub enum SinkAssurance {
     Legacy,
     Verified(NativeVerificationPolicy),
+}
+
+/// Whether a sink contract explicitly supports a behavior. `Unknown` is kept
+/// distinct from `Unsupported` so legacy connectors remain compatible without
+/// accidentally making a stronger claim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkCapabilitySupport {
+    #[default]
+    Unknown,
+    Unsupported,
+    Supported,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkBatchAtomicity {
+    #[default]
+    Unknown,
+    None,
+    PerAction,
+    PerApply,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkApplyOrdering {
+    #[default]
+    Unknown,
+    Unordered,
+    InputOrder,
+}
+
+/// Evidence established before a sink reports successful completion.
+///
+/// `Acknowledged` means the external write API or transaction has accepted the
+/// operation. `QueryVerified` is stronger: the sink has also checked the
+/// resulting external state against the requested postcondition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkCompletionVerification {
+    #[default]
+    Unknown,
+    Unverified,
+    Acknowledged,
+    QueryVerified,
+}
+
+/// Versioned, machine-readable operational contract for a target sink.
+///
+/// All fields default conservatively, preserving existing connectors while
+/// making unknown guarantees explicit. Connectors can opt into stronger claims
+/// only when their conformance tests establish them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SinkCapabilities {
+    pub schema_version: u16,
+    pub batch_atomicity: SinkBatchAtomicity,
+    pub idempotent_replay: SinkCapabilitySupport,
+    /// Whether the engine may split one component's action set across several
+    /// `apply` calls. This weakens external all-at-once visibility and is safe
+    /// only when replaying an already-applied prefix is idempotent.
+    #[serde(default)]
+    pub segmented_replay_safe: SinkCapabilitySupport,
+    pub apply_ordering: SinkApplyOrdering,
+    pub cancellation_safe: SinkCapabilitySupport,
+    pub completion_verification: SinkCompletionVerification,
+    pub max_batch_actions: Option<usize>,
+    pub max_batch_bytes: Option<usize>,
+}
+
+impl Default for SinkCapabilities {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            batch_atomicity: SinkBatchAtomicity::Unknown,
+            idempotent_replay: SinkCapabilitySupport::Unknown,
+            segmented_replay_safe: SinkCapabilitySupport::Unknown,
+            apply_ordering: SinkApplyOrdering::Unknown,
+            cancellation_safe: SinkCapabilitySupport::Unknown,
+            completion_verification: SinkCompletionVerification::Unknown,
+            max_batch_actions: None,
+            max_batch_bytes: None,
+        }
+    }
+}
+
+impl SinkCapabilities {
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != 1 {
+            client_bail!(
+                "unsupported target sink capability schema_version: {}",
+                self.schema_version
+            );
+        }
+        if self.max_batch_actions == Some(0) {
+            client_bail!("sink capability max_batch_actions must be positive");
+        }
+        if self.max_batch_bytes == Some(0) {
+            client_bail!("sink capability max_batch_bytes must be positive");
+        }
+        if self.segmented_replay_safe == SinkCapabilitySupport::Supported
+            && self.idempotent_replay != SinkCapabilitySupport::Supported
+        {
+            client_bail!(
+                "sink capability segmented_replay_safe requires idempotent_replay=supported"
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_declared_batch_limits(
+        &self,
+        action_count: usize,
+        action_bytes: usize,
+    ) -> Result<()> {
+        self.validate()?;
+        if let Some(max_actions) = self.max_batch_actions
+            && action_count > max_actions
+        {
+            client_bail!(
+                "target sink batch has {action_count} actions, exceeding its declared limit of {max_actions}"
+            );
+        }
+        if let Some(max_bytes) = self.max_batch_bytes
+            && action_bytes > max_bytes
+        {
+            client_bail!(
+                "target sink batch is approximately {action_bytes} bytes, exceeding its declared limit of {max_bytes}"
+            );
+        }
+        Ok(())
+    }
+
+    fn packing_limits(&self) -> (usize, usize) {
+        (
+            self.max_batch_actions
+                .unwrap_or(DEFAULT_MAX_SINK_BATCH_ACTIONS)
+                .min(DEFAULT_MAX_SINK_BATCH_ACTIONS),
+            self.max_batch_bytes
+                .unwrap_or(DEFAULT_MAX_SINK_BATCH_BYTES)
+                .min(DEFAULT_MAX_SINK_BATCH_BYTES),
+        )
+    }
+}
+
+/// Point-in-time pressure telemetry for one target sink queue.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SinkQueueStats {
+    pub ongoing_batches: usize,
+    pub queued_batches: usize,
+    pub queued_inputs: usize,
+    pub in_flight_inputs: usize,
+    pub in_flight_bytes: usize,
+    pub capacity_waiters: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -38,11 +200,21 @@ pub trait TargetActionSink<Prof: EngineProfile>: Send + Sync + 'static {
 
     /// Describe the assurance established when [`Self::apply`] returns.
     ///
-    /// Existing sinks are acknowledgement-only. Verified wrappers opt in and
-    /// must return normally only after every action's required postcondition
-    /// and evidence write have completed.
+    /// `Legacy` means no engine-governed native-effect descriptor/evidence
+    /// binding is present. A legacy sink may self-declare operational
+    /// completion evidence in [`Self::capabilities`], but that declaration
+    /// alone does not satisfy strict native-effect policy. Verified wrappers
+    /// opt in here and must return normally only after every action's required
+    /// postcondition and evidence write have completed.
     fn assurance(&self) -> SinkAssurance {
         SinkAssurance::Legacy
+    }
+
+    /// Describe atomicity, replay, segmentation, ordering, cancellation,
+    /// completion verification, and batch limits.
+    /// Legacy sinks get a conservative all-unknown contract.
+    fn capabilities(&self) -> SinkCapabilities {
+        SinkCapabilities::default()
     }
 
     /// Extract the privacy-safe descriptor for one governed action.
@@ -98,6 +270,22 @@ impl<Prof: EngineProfile> TargetActionSinkKeeper<Prof> {
         self.inner.sink.assurance()
     }
 
+    pub fn capabilities(&self) -> SinkCapabilities {
+        self.inner.sink.capabilities()
+    }
+
+    pub fn queue_stats(&self) -> SinkQueueStats {
+        let stats = self.inner.batcher.stats();
+        SinkQueueStats {
+            ongoing_batches: stats.ongoing_batches,
+            queued_batches: stats.queued_batches,
+            queued_inputs: stats.queued_inputs,
+            in_flight_inputs: stats.in_flight_inputs,
+            in_flight_bytes: stats.in_flight_bytes,
+            capacity_waiters: stats.capacity_waiters,
+        }
+    }
+
     pub fn describe_effect(
         &self,
         action: &Prof::TargetAction,
@@ -114,15 +302,100 @@ impl<Prof: EngineProfile> TargetActionSinkKeeper<Prof> {
         if actions.is_empty() {
             return Ok(None);
         }
-        self.inner
-            .batcher
-            .run(TargetActionRunnerInput {
-                host_runtime_ctx: host_runtime_ctx.clone(),
-                host_ctx,
-                actions,
-            })
-            .await
+
+        let capabilities = self.capabilities();
+        capabilities.validate()?;
+        let (max_actions, max_bytes) = capabilities.packing_limits();
+
+        // Explicit connector limits are hard contracts. Internal packing
+        // thresholds never reject or split one legacy component action set.
+        if capabilities.segmented_replay_safe != SinkCapabilitySupport::Supported {
+            let action_bytes = actions
+                .iter()
+                .map(|action| Prof::target_action_size_bytes(action).max(1))
+                .fold(0usize, usize::saturating_add);
+            capabilities.validate_declared_batch_limits(actions.len(), action_bytes)?;
+            return self
+                .inner
+                .batcher
+                .run(TargetActionRunnerInput {
+                    host_runtime_ctx: host_runtime_ctx.clone(),
+                    host_ctx,
+                    actions,
+                })
+                .await?;
+        }
+
+        // For opted-in segmentation, preflight every individual action against
+        // connector-declared hard limits before applying the first segment. Do
+        // not retain a second O(total actions) size vector: recomputing the
+        // best-effort estimate during packing keeps auxiliary segment state
+        // bounded by the selected action/byte thresholds. An action larger
+        // than an internal packing threshold is sent alone.
+        for action in &actions {
+            capabilities
+                .validate_declared_batch_limits(1, Prof::target_action_size_bytes(action).max(1))?;
+        }
+
+        let mut combined_handlers: Option<Vec<Option<ChildTargetDef<Prof>>>> = None;
+        let mut handlers_expected: Option<bool> = None;
+        let mut chunk = Vec::with_capacity(max_actions.min(actions.len()));
+        let mut chunk_bytes = 0usize;
+
+        for action in actions {
+            let action_bytes = Prof::target_action_size_bytes(&action).max(1);
+            if !chunk.is_empty()
+                && (chunk.len() >= max_actions
+                    || chunk_bytes.saturating_add(action_bytes) > max_bytes)
+            {
+                let handlers = self
+                    .inner
+                    .batcher
+                    .run(TargetActionRunnerInput {
+                        host_runtime_ctx: host_runtime_ctx.clone(),
+                        host_ctx: host_ctx.clone(),
+                        actions: std::mem::take(&mut chunk),
+                    })
+                    .await??;
+                merge_child_handlers(&mut combined_handlers, &mut handlers_expected, handlers)?;
+                chunk = Vec::with_capacity(max_actions);
+                chunk_bytes = 0;
+            }
+            chunk_bytes = chunk_bytes.saturating_add(action_bytes);
+            chunk.push(action);
+        }
+
+        if !chunk.is_empty() {
+            let handlers = self
+                .inner
+                .batcher
+                .run(TargetActionRunnerInput {
+                    host_runtime_ctx: host_runtime_ctx.clone(),
+                    host_ctx,
+                    actions: chunk,
+                })
+                .await??;
+            merge_child_handlers(&mut combined_handlers, &mut handlers_expected, handlers)?;
+        }
+
+        Ok(combined_handlers)
     }
+}
+
+fn merge_child_handlers<Prof: EngineProfile>(
+    combined: &mut Option<Vec<Option<ChildTargetDef<Prof>>>>,
+    expected: &mut Option<bool>,
+    handlers: Option<Vec<Option<ChildTargetDef<Prof>>>>,
+) -> Result<()> {
+    let has_handlers = handlers.is_some();
+    if expected.is_some_and(|value| value != has_handlers) {
+        client_bail!("target sink returned child handlers for only some segmented batches");
+    }
+    expected.get_or_insert(has_handlers);
+    if let Some(handlers) = handlers {
+        combined.get_or_insert_with(Vec::new).extend(handlers);
+    }
+    Ok(())
 }
 
 impl<Prof: EngineProfile> PartialEq for TargetActionSinkKeeper<Prof> {
@@ -150,6 +423,12 @@ struct TargetActionRunnerContext<Prof: EngineProfile> {
     host_ctx: Arc<Prof::HostCtx>,
 }
 
+struct PreparedTargetActionRunnerInput<Prof: EngineProfile> {
+    input_idx: usize,
+    actions: Vec<Prof::TargetAction>,
+    action_bytes: usize,
+}
+
 impl<Prof: EngineProfile> PartialEq for TargetActionRunnerContext<Prof> {
     fn eq(&self, other: &Self) -> bool {
         self.host_runtime_ctx == other.host_runtime_ctx
@@ -170,10 +449,94 @@ struct TargetActionRunner<Prof: EngineProfile> {
     sink: Arc<Prof::TargetActionSink>,
 }
 
+impl<Prof: EngineProfile> TargetActionRunner<Prof> {
+    async fn apply_chunk(
+        &self,
+        context: &TargetActionRunnerContext<Prof>,
+        capabilities: SinkCapabilities,
+        actions: Vec<Prof::TargetAction>,
+        action_bytes: usize,
+    ) -> Result<Option<Vec<Option<ChildTargetDef<Prof>>>>> {
+        capabilities.validate_declared_batch_limits(actions.len(), action_bytes)?;
+        let actions_len = actions.len();
+        let handlers = self
+            .sink
+            .apply(&context.host_runtime_ctx, context.host_ctx.clone(), actions)
+            .await?;
+        if let Some(handlers) = &handlers {
+            if handlers.len() != actions_len {
+                client_bail!(
+                    "expect child providers returned by Sink to be the same length as the actions ({}), got {}",
+                    actions_len,
+                    handlers.len(),
+                );
+            }
+        }
+        Ok(handlers)
+    }
+
+    async fn apply_packed_inputs(
+        &self,
+        context: &TargetActionRunnerContext<Prof>,
+        capabilities: SinkCapabilities,
+        inputs: Vec<PreparedTargetActionRunnerInput<Prof>>,
+    ) -> Vec<(usize, Result<Option<Vec<Option<ChildTargetDef<Prof>>>>>)> {
+        let mut actions = Vec::new();
+        let mut action_bytes = 0usize;
+        let mut input_indexes = Vec::with_capacity(inputs.len());
+        let mut action_counts = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            input_indexes.push(input.input_idx);
+            action_counts.push(input.actions.len());
+            action_bytes = action_bytes.saturating_add(input.action_bytes);
+            actions.extend(input.actions);
+        }
+
+        match self
+            .apply_chunk(context, capabilities, actions, action_bytes)
+            .await
+        {
+            Ok(None) => input_indexes
+                .into_iter()
+                .map(|input_idx| (input_idx, Ok(None)))
+                .collect(),
+            Ok(Some(handlers)) => {
+                let mut handlers = handlers.into_iter();
+                std::iter::zip(input_indexes, action_counts)
+                    .map(|(input_idx, count)| {
+                        (input_idx, Ok(Some(handlers.by_ref().take(count).collect())))
+                    })
+                    .collect()
+            }
+            Err(err) => {
+                let mut replicas = input_indexes
+                    .iter()
+                    .skip(1)
+                    .map(|input_idx| (*input_idx, Err(err.replica())))
+                    .collect::<Vec<_>>();
+                let mut outputs = Vec::with_capacity(input_indexes.len());
+                outputs.push((input_indexes[0], Err(err)));
+                outputs.append(&mut replicas);
+                outputs
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl<Prof: EngineProfile> Runner for TargetActionRunner<Prof> {
     type Input = TargetActionRunnerInput<Prof>;
-    type Output = Option<Vec<Option<ChildTargetDef<Prof>>>>;
+    type Output = Result<Option<Vec<Option<ChildTargetDef<Prof>>>>>;
+
+    fn input_size_bytes(&self, input: &Self::Input) -> usize {
+        input
+            .actions
+            .iter()
+            .fold(0usize, |total, action| {
+                total.saturating_add(Prof::target_action_size_bytes(action))
+            })
+            .max(1)
+    }
 
     async fn run(
         &self,
@@ -184,10 +547,23 @@ impl<Prof: EngineProfile> Runner for TargetActionRunner<Prof> {
             return Ok(Vec::new().into_iter());
         }
 
-        let mut groups =
-            HashMap::<TargetActionRunnerContext<Prof>, Vec<(usize, Vec<Prof::TargetAction>)>>::new(
-            );
+        let capabilities = self.sink.capabilities();
+        capabilities.validate()?;
+        let (max_actions, max_bytes) = capabilities.packing_limits();
+        let mut groups = HashMap::<
+            TargetActionRunnerContext<Prof>,
+            Vec<PreparedTargetActionRunnerInput<Prof>>,
+        >::new();
         for (input_idx, input) in inputs.into_iter().enumerate() {
+            let action_bytes = input
+                .actions
+                .iter()
+                .map(|action| Prof::target_action_size_bytes(action).max(1))
+                .fold(0usize, usize::saturating_add);
+            // Every queued input is an indivisible component action set or one
+            // segment already chosen by the keeper. Enforce only connector-
+            // declared hard limits, and never split one again while batching.
+            capabilities.validate_declared_batch_limits(input.actions.len(), action_bytes)?;
             let context = TargetActionRunnerContext {
                 host_runtime_ctx: input.host_runtime_ctx,
                 host_ctx: input.host_ctx,
@@ -195,46 +571,64 @@ impl<Prof: EngineProfile> Runner for TargetActionRunner<Prof> {
             groups
                 .entry(context)
                 .or_default()
-                .push((input_idx, input.actions));
+                .push(PreparedTargetActionRunnerInput {
+                    input_idx,
+                    actions: input.actions,
+                    action_bytes,
+                });
         }
 
-        let mut outputs: Vec<Option<Vec<Option<ChildTargetDef<Prof>>>>> =
+        let mut outputs: Vec<Option<Result<Option<Vec<Option<ChildTargetDef<Prof>>>>>>> =
             std::iter::repeat_with(|| None).take(num_inputs).collect();
         for (context, inputs) in groups {
-            let mut actions = Vec::new();
-            let mut action_counts = Vec::with_capacity(inputs.len());
-            let mut input_indexes = Vec::with_capacity(inputs.len());
+            let mut packed_inputs = Vec::new();
+            let mut packed_actions = 0usize;
+            let mut packed_bytes = 0usize;
 
-            // Each input is one component's reconciled actions; the sink wants
-            // one flat action list per compatible host context.
-            for (input_idx, mut input_actions) in inputs {
-                input_indexes.push(input_idx);
-                action_counts.push(input_actions.len());
-                actions.append(&mut input_actions);
+            for input in inputs {
+                if !packed_inputs.is_empty()
+                    && (packed_actions.saturating_add(input.actions.len()) > max_actions
+                        || packed_bytes.saturating_add(input.action_bytes) > max_bytes)
+                {
+                    for (input_idx, output) in self
+                        .apply_packed_inputs(
+                            &context,
+                            capabilities,
+                            std::mem::take(&mut packed_inputs),
+                        )
+                        .await
+                    {
+                        outputs[input_idx] = Some(output);
+                    }
+                    packed_actions = 0;
+                    packed_bytes = 0;
+                }
+                packed_actions = packed_actions.saturating_add(input.actions.len());
+                packed_bytes = packed_bytes.saturating_add(input.action_bytes);
+                packed_inputs.push(input);
             }
 
-            let actions_len = actions.len();
-            let Some(handlers) = self
-                .sink
-                .apply(&context.host_runtime_ctx, context.host_ctx, actions)
-                .await?
-            else {
-                continue;
-            };
-            if handlers.len() != actions_len {
-                client_bail!(
-                    "expect child providers returned by Sink to be the same length as the actions ({}), got {}",
-                    actions_len,
-                    handlers.len(),
-                );
-            }
-            let mut handlers = handlers.into_iter();
-            for (input_idx, count) in std::iter::zip(input_indexes, action_counts) {
-                outputs[input_idx] = Some(handlers.by_ref().take(count).collect());
+            if !packed_inputs.is_empty() {
+                for (input_idx, output) in self
+                    .apply_packed_inputs(&context, capabilities, packed_inputs)
+                    .await
+                {
+                    outputs[input_idx] = Some(output);
+                }
             }
         }
 
-        Ok(outputs.into_iter())
+        Ok(outputs
+            .into_iter()
+            .map(|output| {
+                output.unwrap_or_else(|| {
+                    Err(Error::internal_msg(
+                        "target action runner did not produce an output",
+                    ))
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter())
     }
 }
 

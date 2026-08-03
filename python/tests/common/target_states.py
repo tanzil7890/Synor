@@ -77,9 +77,7 @@ class DictTargetStateStore:
     data: dict[str, DictDataWithPrev]
     metrics: Metrics
     _lock: threading.Lock
-    _action_sink: syn.TargetActionSink[
-        tuple[str, DictDataWithPrev | syn.AbsentType]
-    ]
+    _action_sink: syn.TargetActionSink[tuple[str, DictDataWithPrev | syn.AbsentType]]
     sink_exception: bool = False
 
     def __init__(self, use_async: bool = False) -> None:
@@ -125,9 +123,7 @@ class DictTargetStateStore:
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
     ) -> (
-        syn.TargetReconcileOutput[
-            tuple[str, DictDataWithPrev | syn.AbsentType], Any
-        ]
+        syn.TargetReconcileOutput[tuple[str, DictDataWithPrev | syn.AbsentType], Any]
         | None
     ):
         assert isinstance(key, str)

@@ -144,9 +144,7 @@ def test_component_memo_invalidated_on_logic_change() -> None:
     @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.spawn(
-            syn.unit_path("A"), mod.declare_entry_memo, "A", "value1"
-        )
+        await syn.spawn(syn.unit_path("A"), mod.declare_entry_memo, "A", "value1")
 
     app = syn.App(
         syn.AppConfig(
@@ -276,9 +274,7 @@ def test_transitive_component_calls_bar_memo() -> None:
     @syn.task
     async def app_main() -> None:
         mod = current_module[0]
-        await syn.spawn(
-            syn.unit_path("A"), mod.foo_comp_calls_bar_memo, "A", "value1"
-        )
+        await syn.spawn(syn.unit_path("A"), mod.foo_comp_calls_bar_memo, "A", "value1")
 
     app = syn.App(
         syn.AppConfig(
@@ -441,9 +437,7 @@ def test_memo_parent_invalidated_when_mounted_child_changes() -> None:
 
     @syn.task
     async def app_main() -> None:
-        await syn.spawn(
-            syn.unit_path("A"), _memo_parent_mounts_child, "A", "value1"
-        )
+        await syn.spawn(syn.unit_path("A"), _memo_parent_mounts_child, "A", "value1")
 
     app = syn.App(
         syn.AppConfig(
@@ -759,9 +753,7 @@ def test_none_mode_still_detects_change_on_context_key_deps() -> None:
     def process(name: str, content: str) -> None:
         val = syn.use_context(_CHANGE_DETECTED_KEY_J3)
         metrics.increment("process")
-        syn.ensure_target_state(
-            GlobalDictTarget.target_state(name, f"{val}:{content}")
-        )
+        syn.ensure_target_state(GlobalDictTarget.target_state(name, f"{val}:{content}"))
 
     @syn.task
     async def app_main() -> None:

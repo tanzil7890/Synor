@@ -11,23 +11,23 @@ For a quick overview of failure isolation and the two-phase model, see [What hap
 
 ## The guiding principle
 
-**Whether a Synor call raises on failure depends on what's on the critical path for the call to finish and return.** Things on that path that fail surface as exceptions; things off that path don't.
+**Scheduling background work is non-blocking; observing its readiness is truthful.** Starting a component returns a handle immediately. Waiting for that handle, or for the enclosing app operation, never turns failed work into success.
 
 | API | What it takes to return | Raises on failure? |
 |---|---|---|
 | `syn.spawn`, `syn.spawn_each`, `LiveComponentOperator.update`/`.delete` | the work is *scheduled* (returns a handle) | **No** — execution runs in the background |
-| `await handle.ready()` (any of the above) | reaches *ready state* | **No by default** — logged at `ERROR`; opt into propagation by installing a handler that raises |
-| `await LiveComponentOperator.update_full()` | reaches *ready state* of the full cycle | **No by default** — same shape as `handle.ready()` |
+| `await handle.ready()` (any of the above) | reaches *ready state* | **Yes** — only durable success resolves normally |
+| `await LiveComponentOperator.update_full()` | reaches *ready state* of the full cycle | **Yes** — same shape as `handle.ready()` |
 | `await syn.call(...)` | the inner component's *value* is produced | **Yes** — component success is on the critical path |
 | `await app.drop()` (and `synor drop`) | GC succeeds at *every* level | **Yes**, at any depth — leaking target state would otherwise go silent |
 
-**Why `ready`/`update_full` tolerate errors by default:** `handle.ready()` is usually not awaited (callers spawn many mounts in a loop and rely on the parent's `wait_for_children`), so raising into nobody would silently disappear. Logging the failure gives operators a signal regardless. The same applies to `update_full` — a periodic refresh that died on the first cycle failure would be worse than one that logs and retries on the next tick.
+The parent aggregates descendant readiness, so a failed background child also fails the enclosing app update even when user code never awaits that child's handle. Sibling components continue independently, allowing all useful work and error reporting to finish before the operation returns its terminal result.
 
-**Why `app.drop` raises at every level:** clearing tracking records is only safe if every component's delete actually ran its sink calls. If a descendant delete silently fails, `await app.drop()` would return Ok while target state is still live in your database — a leak. So failures at any depth surface as an exception.
+`syn.auto_refresh` is an explicit retry policy: its first cycle must succeed before readiness, while a later cycle reports and raises internally, then the wrapper catches that terminal result and proceeds to the next scheduled cycle.
 
-## How to opt into propagation
+## Reporting versus propagation
 
-Install an exception handler (described below). A handler that **returns normally** swallows; a handler that **raises** propagates through `handle.ready()` (or `update_full()`) up to your awaiting code. For `app.drop`, propagation is built in — you don't need to install anything.
+Exception handlers report failures to logs, metrics, alerting, or incident systems. They do not decide whether work succeeded. Returning normally marks the failure as reported; raising delegates reporting to the next outer handler. In both cases, `handle.ready()`, `update_full()`, and the enclosing app operation retain the original terminal failure.
 
 [Live components](./live_component) follow the same principle: their `update`/`delete`/`update_full` calls route failures through this chain with `mount_kind="process_live"`. The operator also exposes [`report_exception(exc)`](./live_component#report_exception) for surfacing errors raised in `process_live`'s body that aren't already routed by `update`/`delete`/`update_full`.
 
@@ -100,7 +100,7 @@ def lifespan(builder: syn.EnvironmentBuilder):
     yield
 ```
 
-This replaces the default "log error" behavior for all background mounts in the environment.
+This replaces the default error log with your reporting behavior for all background mounts in the environment. It does not suppress readiness propagation.
 
 ### Scoped exception handler
 
@@ -165,7 +165,7 @@ Handlers are stacked: the most specific (innermost) handler runs first.
 
 If the innermost handler raises an exception, the next outer handler is called with that new exception. In this case `ctx.source` is `"handler"` and `ctx.original_exception` holds the original component error.
 
-This continues up the stack. If all handlers raise (or no handler is registered), Synor falls back to the built-in behavior: logging the error at `ERROR` level, with no crash.
+This continues up the stack. If all handlers raise, Synor logs the reporting failure separately. If no handler is registered, Synor logs the component failure at `ERROR`. Either way, the original component failure remains the readiness result.
 
 ```python
 @syn.lifespan
@@ -193,4 +193,4 @@ async def _root() -> None:
         await syn.spawn(syn.unit_path("child"), _child)
 ```
 
-Users who never register handlers see identical behavior to the default — exceptions from background mounts are logged at `ERROR` level and siblings continue unaffected.
+Users who never register handlers get the default `ERROR` log. Siblings continue independently, while the failed handle and enclosing operation still raise.

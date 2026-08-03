@@ -1,1 +1,4 @@
-pub use crate::error::{FromPyResult, IntoPyResult};
+pub use crate::error::{
+    FromPyResult, IntoDetachedPyResult, IntoPublicDetachedPyResult, IntoPublicPyResult,
+    IntoPyResult,
+};

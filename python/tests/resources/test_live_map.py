@@ -142,12 +142,8 @@ def test_multiple_producers_one_map() -> None:
     @syn.task
     async def app_main() -> None:
         lm: LiveMap[str, Val] = await LiveMap.create()
-        h1 = await syn.spawn(
-            syn.unit_path("p1"), produce, lm, {"a": "1", "b": "2"}
-        )
-        h2 = await syn.spawn(
-            syn.unit_path("p2"), produce, lm, {"c": "3", "d": "4"}
-        )
+        h1 = await syn.spawn(syn.unit_path("p1"), produce, lm, {"a": "1", "b": "2"})
+        h2 = await syn.spawn(syn.unit_path("p2"), produce, lm, {"c": "3", "d": "4"})
         await h1.ready()
         await h2.ready()
         await syn.spawn_each(process_entry, lm)
@@ -164,12 +160,8 @@ def test_multiple_livemaps_isolated() -> None:
     async def app_main() -> None:
         lm1: LiveMap[str, Val] = await LiveMap.create()
         lm2: LiveMap[str, Val] = await LiveMap.create()
-        h1 = await syn.spawn(
-            syn.unit_path("p1"), produce, lm1, {"a": "1", "b": "2"}
-        )
-        h2 = await syn.spawn(
-            syn.unit_path("p2"), produce, lm2, {"c": "3", "d": "4"}
-        )
+        h1 = await syn.spawn(syn.unit_path("p1"), produce, lm1, {"a": "1", "b": "2"})
+        h2 = await syn.spawn(syn.unit_path("p2"), produce, lm2, {"c": "3", "d": "4"})
         await h1.ready()
         await h2.ready()
         await syn.spawn_each(syn.unit_path("c1"), process_entry, lm1)

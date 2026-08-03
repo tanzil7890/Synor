@@ -21,6 +21,8 @@ use crate::profile::{Action, BoxedProcessor, RustProfile, Value};
 use crate::stats::{ComponentStats, RunStats, UpdateStats, UpdateStatus};
 use crate::typemap::TypeMap;
 
+const DEFAULT_MAX_INFLIGHT_COMPONENTS: usize = 1024;
+
 // ---------------------------------------------------------------------------
 // Environment — the home for provided resources + LMDB settings
 // ---------------------------------------------------------------------------
@@ -114,7 +116,7 @@ impl EnvironmentBuilder {
             db_path: None,
             lmdb_max_dbs: 1024,
             lmdb_map_size: 0x1_0000_0000,
-            max_inflight_components: None,
+            max_inflight_components: Some(DEFAULT_MAX_INFLIGHT_COMPONENTS),
             state: TypeMap::new(),
             context: ContextStore::default(),
         }
@@ -138,8 +140,16 @@ impl EnvironmentBuilder {
         self
     }
 
-    /// Limit the number of concurrently processing components (per app).
+    /// Limit the number of concurrently processing leaf components (per app).
+    ///
+    /// A parent cooperatively releases its slot while mounting a child, so
+    /// nested pipelines cannot deadlock when this is set to one.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `value` is zero.
     pub fn max_inflight_components(mut self, value: usize) -> Self {
+        assert!(value > 0, "max_inflight_components must be at least 1");
         self.max_inflight_components = Some(value);
         self
     }
@@ -277,7 +287,7 @@ impl AppBuilder {
 }
 
 #[cfg(test)]
-mod tests {
+mod component_admission_tests {
     use super::*;
 
     #[test]
@@ -888,5 +898,24 @@ impl StatsGroupHandle {
             .await
             .map_err(|e| Error::engine(format!("{e}")))?;
         Ok(Progress::from_version(*self.version_rx.borrow()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn environment_builder_has_bounded_component_admission_by_default() {
+        assert_eq!(
+            EnvironmentBuilder::new().max_inflight_components,
+            Some(DEFAULT_MAX_INFLIGHT_COMPONENTS)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "max_inflight_components must be at least 1")]
+    fn environment_builder_rejects_zero_component_admission() {
+        let _ = EnvironmentBuilder::new().max_inflight_components(0);
     }
 }

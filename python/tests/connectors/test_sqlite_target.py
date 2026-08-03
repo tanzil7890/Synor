@@ -5,18 +5,23 @@ from __future__ import annotations
 import sqlite3
 import struct
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Iterator, cast
+from typing import Annotated, Any, Literal, cast
 
 import numpy as np
 import pytest
-from numpy.typing import NDArray
-
 import synor as syn
+from numpy.typing import NDArray
 from synor._internal.context_keys import ContextProvider
 from synor.connectorkits import target
+from synor.connectorkits.target_sink_testing import (
+    TargetSinkCertificationScenario,
+    certify_target_sink,
+)
 from synor.connectors import sqlite
+from synor.connectors.sqlite import _target as sqlite_target
 from synor.resources.schema import VectorSchema
 
 from tests import common
@@ -29,7 +34,7 @@ SQLITE_DB = syn.ContextKey[sqlite.ManagedConnection]("sqlite_test_db")
 # =============================================================================
 
 try:
-    import sqlite_vec  # type: ignore[import-not-found]
+    import sqlite_vec  # type: ignore[import-not-found]  # noqa: F401
 
     HAS_SQLITE_VEC = True
 except ImportError:
@@ -159,6 +164,130 @@ async def declare_table_and_rows() -> None:
 # =============================================================================
 # Non-vector test cases
 # =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_sqlite_row_sink_passes_common_failure_injection_certification(
+    sqlite_db: tuple[sqlite.ManagedConnection, Path],
+) -> None:
+    managed_conn, _ = sqlite_db
+    schema = await sqlite.TableSchema.from_class(SimpleRow, primary_key=["id"])
+    with managed_conn.transaction() as conn:
+        conn.execute(
+            'CREATE TABLE "certified_rows" ('
+            '"id" TEXT NOT NULL, "name" TEXT NOT NULL, "value" INTEGER NOT NULL, '
+            'PRIMARY KEY ("id"))'
+        )
+
+    handler = sqlite_target._RowHandler(
+        managed_conn=managed_conn,
+        table_name="certified_rows",
+        table_schema=schema,
+    )
+    context_provider = ContextProvider()
+    actions = (
+        sqlite_target._RowAction(key=("stale",), value=None),
+        sqlite_target._RowAction(
+            key=("1",), value={"id": "1", "name": "Alice", "value": 10}
+        ),
+        sqlite_target._RowAction(
+            key=("2",), value={"id": "2", "name": "Bob", "value": 20}
+        ),
+    )
+
+    async def reset() -> None:
+        with managed_conn.transaction() as conn:
+            conn.execute('DELETE FROM "certified_rows"')
+            conn.execute(
+                'INSERT INTO "certified_rows" ("id", "name", "value") VALUES (?, ?, ?)',
+                ("stale", "Remove me", -1),
+            )
+
+    async def apply(
+        batch: tuple[sqlite_target._RowAction, ...],
+    ) -> None:
+        handler._apply_actions(context_provider, batch)
+
+    async def apply_with_failure_after(
+        batch: tuple[sqlite_target._RowAction, ...], completed_actions: int
+    ) -> None:
+        assert completed_actions == 1
+        malformed_delete = sqlite_target._RowAction(key=(), value=None)
+        handler._apply_actions(context_provider, (batch[0], malformed_delete))
+
+    async def apply_segmented_with_failure_after(
+        batch: tuple[sqlite_target._RowAction, ...], completed_segments: int
+    ) -> None:
+        assert completed_segments == 1
+        handler._apply_actions(context_provider, batch[:2])
+        with managed_conn.readonly() as conn:
+            durable_prefix = conn.execute(
+                'SELECT "id", "name", "value" FROM "certified_rows" ORDER BY "id"'
+            ).fetchall()
+        assert durable_prefix == [("1", "Alice", 10)]
+
+        malformed_delete = sqlite_target._RowAction(key=(), value=None)
+        handler._apply_actions(
+            context_provider,
+            (batch[2], malformed_delete),
+        )
+
+    async def snapshot() -> tuple[tuple[str, str, int], ...]:
+        with managed_conn.readonly() as conn:
+            rows = conn.execute(
+                'SELECT "id", "name", "value" FROM "certified_rows" ORDER BY "id"'
+            ).fetchall()
+        return tuple(cast(tuple[str, str, int], row) for row in rows)
+
+    async def completion_evidence() -> Literal["acknowledged"]:
+        return "acknowledged"
+
+    report = await certify_target_sink(
+        TargetSinkCertificationScenario[
+            sqlite_target._RowAction, tuple[tuple[str, str, int], ...]
+        ](
+            name="sqlite-row-sink",
+            capabilities=handler._sink.capabilities,
+            actions=actions,
+            reset=reset,
+            apply=apply,
+            snapshot=snapshot,
+            expected_final_snapshot=(
+                ("1", "Alice", 10),
+                ("2", "Bob", 20),
+            ),
+            apply_with_failure_after=apply_with_failure_after,
+            apply_segmented_with_failure_after=apply_segmented_with_failure_after,
+            completion_evidence=completion_evidence,
+        )
+    )
+
+    assert report.checks == (
+        "success",
+        "idempotent_replay",
+        "failure_atomicity",
+        "segmented_replay",
+        "completion_verification",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_virtual_row_sink_keeps_uncertified_guarantees_conservative() -> (
+    None
+):
+    schema = await sqlite.TableSchema.from_class(SimpleRow, primary_key=["id"])
+    managed_conn = sqlite.ManagedConnection(sqlite3.connect(":memory:"))
+    try:
+        handler = sqlite_target._VirtualRowHandler(
+            managed_conn=managed_conn,
+            table_name="uncertified_virtual_rows",
+            table_schema=schema,
+        )
+        assert handler._sink.capabilities == syn.TargetSinkCapabilities(
+            apply_ordering="unordered"
+        )
+    finally:
+        managed_conn.close()
 
 
 def test_create_table_and_insert_rows(
@@ -1005,7 +1134,7 @@ def test_vec0_schema_change_forces_recreate(
             NDArray[np.float32], VectorSchema(dtype=np.dtype(np.float32), size=2)
         ]
 
-    row_schema: type[Vec0RowV1] | type[Vec0RowV2] = Vec0RowV1
+    row_schema: type[Vec0RowV1 | Vec0RowV2] = Vec0RowV1
     rows: list[Vec0RowV1 | Vec0RowV2] = []
 
     test_env = make_test_env(managed_conn, "test_vec0_schema_change_forces_recreate")

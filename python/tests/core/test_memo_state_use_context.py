@@ -40,9 +40,7 @@ class ContextAwareEntry:
         # component context, which may not be set when the engine evaluates
         # memo state for mount() arguments.
         _ctx_val = syn.use_context(_TEST_CTX_KEY)
-        memo_valid = (
-            not syn.is_absent(prev_state) and self.state_value == prev_state
-        )
+        memo_valid = not syn.is_absent(prev_state) and self.state_value == prev_state
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
 

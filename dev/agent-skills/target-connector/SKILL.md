@@ -212,8 +212,45 @@ def _apply_actions(
         conn = context_provider.get(action.key.db_key, ConnType)
         ...
 
-_shared_sink = syn.TargetActionSink.from_fn(_apply_actions)
+_shared_sink = syn.TargetActionSink.from_fn(
+    _apply_actions,
+    capabilities=syn.TargetSinkCapabilities(
+        batch_atomicity="none",
+        apply_ordering="unordered",
+    ),
+)
 ```
+
+### Operational capability contract
+
+Every built-in sink construction must pass an explicit
+`TargetSinkCapabilities`. Leave a field as `"unknown"` until a test establishes
+it. Conservative values such as `batch_atomicity="none"`,
+`apply_ordering="unordered"`, and `completion_verification="unverified"` are
+useful when the implementation demonstrably provides no stronger boundary.
+
+Positive claims require failure-injection evidence. Use
+`synor.connectorkits.target_sink_testing.certify_target_sink` to exercise the
+claimed transaction boundary, idempotent replay, input ordering, cancellation
+recovery, replay after a completed segment, effective action/byte limits, and
+provider acknowledgement or query verification. For built-in connectors, add
+the named test and certified fields
+to `dev/target-sink-certification.json`; CI rejects positive claims without a
+matching manifest entry.
+
+Synor uses 4,096 actions and approximately 8 MiB as internal packing thresholds
+when coalescing independently submitted work. Those thresholds do not reject or
+split a legacy connector's indivisible component action set. Connector-declared
+`max_batch_actions` and `max_batch_bytes` values are hard per-call limits and
+are preflighted before external side effects. Limits alone do not authorize
+segmentation: legacy/unknown sinks receive one `apply` call.
+
+Only set `segmented_replay_safe="supported"` together with
+`idempotent_replay="supported"` after failure injection proves that replaying a
+successfully applied prefix is safe. Opting in lets the engine use multiple
+bounded `apply` calls for one component. That weakens external all-at-once
+visibility; Synor's internal component commit still occurs only after every
+segment succeeds.
 
 ### Input Safety
 

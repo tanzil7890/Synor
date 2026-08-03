@@ -460,7 +460,13 @@ class _SharedRecordApplier:
 
     def __init__(self, conn: AsyncSurreal) -> None:
         self._conn = conn
-        self.sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self.sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_RecordAction]
@@ -567,7 +573,13 @@ class _VectorIndexHandler:
     def __init__(self, conn: AsyncSurreal, table_name: str) -> None:
         self._conn = conn
         self._table_name = table_name
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                idempotent_replay="unsupported",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_VectorIndexAction]
@@ -840,7 +852,13 @@ class _TableHandler(
     _sink: syn.TargetActionSink[_TableAction, _RecordHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     def reconcile(
         self,
@@ -856,9 +874,7 @@ class _TableHandler(
         key = _TableKey(*_TABLE_KEY_CHECKER.check(key))
 
         if syn.is_absent(desired_state):
-            tracking_record: _TableTrackingRecord | syn.AbsentType = (
-                syn.ABSENT
-            )
+            tracking_record: _TableTrackingRecord | syn.AbsentType = syn.ABSENT
             is_relation = False
         else:
             tracking_record = statediff.MutualTrackingRecord(

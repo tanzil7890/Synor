@@ -14,7 +14,7 @@ use tokio::sync::watch;
 
 use crate::{
     component::PyComponentProcessor, deadline::PyDeadlineContext, environment::PyEnvironment,
-    value::PyStoredValue,
+    runtime::PyHostOperationLease, value::PyStoredValue,
 };
 
 fn snapshot_to_py<'py>(
@@ -40,6 +40,7 @@ type PyPreviewCollector = Arc<std::sync::Mutex<Vec<Py<PyAny>>>>;
 #[pyclass(name = "UpdateHandle")]
 pub struct PyUpdateHandle {
     handle: Mutex<Option<AppOpHandle<PyStoredValue>>>,
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
     stats: ProcessingStats,
     /// Persistent receiver shared across `changed()` calls via Arc<tokio::Mutex>.
     /// Using tokio::Mutex so it can be held across .await points.
@@ -49,10 +50,12 @@ pub struct PyUpdateHandle {
 
 impl PyUpdateHandle {
     fn new(handle: AppOpHandle<PyStoredValue>) -> Self {
+        let cancellation_token = handle.cancellation_token();
         let stats = handle.stats().clone();
         let version_rx = Arc::new(tokio::sync::Mutex::new(stats.subscribe()));
         Self {
             handle: Mutex::new(Some(handle)),
+            cancellation_token,
             stats,
             version_rx,
             preview_collector: None,
@@ -89,6 +92,17 @@ impl PyUpdateHandle {
         })
     }
 
+    /// Cooperatively cancel this update's operation tree.
+    ///
+    /// The Python wrapper calls this when its awaiting task is cancelled, then
+    /// keeps awaiting `result()` under a shield until the engine's descendant
+    /// and host-callback drain barriers have completed.
+    pub fn request_cancel(&self) {
+        if let Some(token) = &self.cancellation_token {
+            token.cancel();
+        }
+    }
+
     /// Awaits the task completion and returns the result. Consumes the handle.
     pub fn result<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let handle = self
@@ -98,7 +112,7 @@ impl PyUpdateHandle {
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("result already consumed"))?;
         future_into_py(py, async move {
-            let ret = handle.result().await.into_py_result()?;
+            let ret = handle.result().await.into_public_py_result()?;
             Ok(ret)
         })
     }
@@ -173,7 +187,7 @@ impl PyDropHandle {
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("result already consumed"))?;
         future_into_py(py, async move {
-            handle.result().await.into_py_result()?;
+            handle.result().await.into_public_py_result()?;
             Ok(())
         })
     }
@@ -249,7 +263,7 @@ impl PyApp {
         Ok(Self(Arc::new(app)))
     }
 
-    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, live=false, preview=false, strict_effects=false, *, deadline))]
+    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, live=false, preview=false, strict_effects=false, *, deadline, operation_lease))]
     pub fn update_async(
         &self,
         root_processor: PyComponentProcessor,
@@ -259,6 +273,7 @@ impl PyApp {
         preview: bool,
         strict_effects: bool,
         deadline: PyDeadlineContext,
+        mut operation_lease: PyRefMut<'_, PyHostOperationLease>,
     ) -> PyResult<PyUpdateHandle> {
         let app = self.0.clone();
         let options = AppUpdateOptions {
@@ -277,13 +292,16 @@ impl PyApp {
         } else {
             None
         };
+        let host_operation_lease: Box<dyn Send + Sync> =
+            Box::new(operation_lease.take().into_py_result()?);
         let (handle, preview_collector) = app
-            .update_controlled(
+            .update_controlled_with_host_operation(
                 root_processor,
                 options,
                 host_ctx,
                 preview_collector,
                 effect_mode,
+                host_operation_lease,
             )
             .context("failed to start app update")
             .into_py_result()?;
@@ -292,7 +310,7 @@ impl PyApp {
         Ok(uh)
     }
 
-    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, report_to_stdout=false, refresh_interval_secs=None, live=false, preview=false, strict_effects=false, *, deadline))]
+    #[pyo3(signature = (root_processor, full_reprocess, host_ctx, report_to_stdout=false, refresh_interval_secs=None, live=false, preview=false, strict_effects=false, *, deadline, operation_lease))]
     pub fn update(
         &self,
         py: Python<'_>,
@@ -305,6 +323,7 @@ impl PyApp {
         preview: bool,
         strict_effects: bool,
         deadline: PyDeadlineContext,
+        mut operation_lease: PyRefMut<'_, PyHostOperationLease>,
     ) -> PyResult<Py<PyAny>> {
         let app = self.0.clone();
         let options = AppUpdateOptions {
@@ -323,20 +342,23 @@ impl PyApp {
         } else {
             None
         };
+        let host_operation_lease: Box<dyn Send + Sync> =
+            Box::new(operation_lease.take().into_py_result()?);
         py.detach(|| {
             get_runtime().block_on(async move {
                 let (handle, preview_collector) = app
-                    .update_controlled(
+                    .update_controlled_with_host_operation(
                         root_processor,
                         options,
                         host_ctx,
                         preview_collector,
                         effect_mode,
+                        host_operation_lease,
                     )
                     .context("failed to start app update")
                     .into_py_result()?;
                 if preview {
-                    handle.result().await.into_py_result()?;
+                    handle.result().await.into_public_py_result()?;
                     let actions = preview_collector
                         .map(|c| std::mem::take(&mut *c.lock().unwrap()))
                         .unwrap_or_default();
@@ -351,40 +373,50 @@ impl PyApp {
                         ProgressDisplayOptions::from_refresh_secs(refresh_interval_secs),
                     )
                     .await
-                    .into_py_result()?;
+                    .into_public_py_result()?;
                     Python::attach(|py| Ok(Py::new(py, ret)?.into_any()))
                 } else {
-                    let ret: PyStoredValue = handle.result().await.into_py_result()?;
+                    let ret: PyStoredValue = handle.result().await.into_public_py_result()?;
                     Python::attach(|py| Ok(Py::new(py, ret)?.into_any()))
                 }
             })
         })
     }
 
-    pub fn drop_async(&self, host_ctx: Py<PyAny>) -> PyResult<PyDropHandle> {
+    #[pyo3(signature = (host_ctx, *, operation_lease))]
+    pub fn drop_async(
+        &self,
+        host_ctx: Py<PyAny>,
+        mut operation_lease: PyRefMut<'_, PyHostOperationLease>,
+    ) -> PyResult<PyDropHandle> {
         let app = self.0.clone();
         let host_ctx = Arc::new(host_ctx);
+        let host_operation_lease: Box<dyn Send + Sync> =
+            Box::new(operation_lease.take().into_py_result()?);
         let handle = app
-            .drop_app(host_ctx)
+            .drop_app_with_host_operation(host_ctx, host_operation_lease)
             .context("failed to start app drop")
             .into_py_result()?;
         Ok(PyDropHandle::new(handle))
     }
 
-    #[pyo3(signature = (host_ctx, report_to_stdout=false, refresh_interval_secs=None))]
+    #[pyo3(signature = (host_ctx, report_to_stdout=false, refresh_interval_secs=None, *, operation_lease))]
     pub fn drop(
         &self,
         py: Python<'_>,
         host_ctx: Py<PyAny>,
         report_to_stdout: bool,
         refresh_interval_secs: Option<f64>,
+        mut operation_lease: PyRefMut<'_, PyHostOperationLease>,
     ) -> PyResult<()> {
         let app = self.0.clone();
         let host_ctx = Arc::new(host_ctx);
+        let host_operation_lease: Box<dyn Send + Sync> =
+            Box::new(operation_lease.take().into_py_result()?);
         py.detach(|| {
             get_runtime().block_on(async move {
                 let handle = app
-                    .drop_app(host_ctx)
+                    .drop_app_with_host_operation(host_ctx, host_operation_lease)
                     .context("failed to start app drop")
                     .into_py_result()?;
                 if report_to_stdout {
@@ -393,9 +425,9 @@ impl PyApp {
                         ProgressDisplayOptions::from_refresh_secs(refresh_interval_secs),
                     )
                     .await
-                    .into_py_result()
+                    .into_public_py_result()
                 } else {
-                    handle.result().await.into_py_result()
+                    handle.result().await.into_public_py_result()
                 }
             })
         })
@@ -423,7 +455,7 @@ pub fn show_progress<'py>(
             ProgressDisplayOptions::from_refresh_secs(refresh_interval_secs),
         )
         .await
-        .into_py_result()?;
+        .into_public_py_result()?;
         Ok(ret)
     })
 }

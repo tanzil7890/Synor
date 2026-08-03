@@ -11,7 +11,7 @@ Most documents already live in object storage, not on your laptop. This pipeline
 
 ## How it works
 
-The chunk → embed → store half is identical to Semantic Search 101; the part that differs is the source. The OCI SDK is synchronous and you create the client yourself, so the example builds one from a config-file profile, hands it to the context, and lists objects with `oci_object_storage.list_objects` — the OCI analogue of `localfs.walk_dir`. Live mode is opt-in: when the four `OCI_STREAMING_*` env vars are set, it builds a Kafka-protocol `AIOConsumer` against OCI Streaming and passes it through as a `LiveStream[bytes]`. Read it in [`main.py`](main.py):
+The chunk → embed → store half is identical to Semantic Search 101; the part that differs is the source. The OCI SDK is synchronous and you create the client yourself, so the example builds one from a config-file profile, hands it to the context, and lists objects with `oci_object_storage.list_objects` — the OCI analogue of `localfs.walk_dir`. Live mode is opt-in: when the four `OCI_STREAMING_*` env vars are set, it uses `kafka.create_consumer()` to build a Kafka-protocol consumer against OCI Streaming and passes it through as a `LiveStream[bytes]`. That transfer makes the stream responsible for draining, unsubscribing, and closing the helper-created consumer. Read it in [`main.py`](main.py):
 
 ```python
 @syn.task

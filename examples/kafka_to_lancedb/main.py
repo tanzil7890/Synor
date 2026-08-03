@@ -14,10 +14,8 @@ import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
-from confluent_kafka import Message
-from confluent_kafka.aio import AIOConsumer
-
 import synor as syn
+from confluent_kafka import Message
 from synor.connectors import kafka, lancedb
 
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "synor-csv-rows")
@@ -96,7 +94,6 @@ async def app_main() -> None:
     config: dict[str, str] = {
         "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
         "group.id": KAFKA_GROUP_ID,
-        "enable.auto.commit": "false",
         "auto.offset.reset": "earliest",
     }
     if KAFKA_SASL_USERNAME:
@@ -109,7 +106,9 @@ async def app_main() -> None:
             }
         )
 
-    consumer = AIOConsumer(config)
+    consumer = kafka.create_consumer(config)
+    # topic_as_map takes ownership and closes this helper-created consumer
+    # after the live stream stops, fails, or is cancelled.
     items = kafka.topic_as_map(consumer, [KAFKA_TOPIC])
     await syn.spawn_each(process_message, items, products_table, employees_table)
 

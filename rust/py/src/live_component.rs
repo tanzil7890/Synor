@@ -23,7 +23,7 @@ impl PyLiveComponentController {
         handler_callback: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let ctrl = self.0.clone();
-        let host_runtime_ctx = ctrl.component().app_ctx().env().host_runtime_ctx().clone();
+        let host_runtime_ctx = ctrl.component().app_ctx().host_callback_ctx().clone();
         let on_error = build_on_error(host_runtime_ctx, handler_callback);
         future_into_py(py, async move {
             ctrl.update_full(processor, on_error)
@@ -41,7 +41,7 @@ impl PyLiveComponentController {
         handler_callback: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let ctrl = self.0.clone();
-        let host_runtime_ctx = ctrl.component().app_ctx().env().host_runtime_ctx().clone();
+        let host_runtime_ctx = ctrl.component().app_ctx().host_callback_ctx().clone();
         let on_error = build_on_error(host_runtime_ctx, handler_callback);
         future_into_py(py, async move {
             let handle = ctrl
@@ -59,7 +59,7 @@ impl PyLiveComponentController {
         handler_callback: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let ctrl = self.0.clone();
-        let host_runtime_ctx = ctrl.component().app_ctx().env().host_runtime_ctx().clone();
+        let host_runtime_ctx = ctrl.component().app_ctx().host_callback_ctx().clone();
         let on_error = build_on_error(host_runtime_ctx, handler_callback);
         future_into_py(py, async move {
             let handle = ctrl
@@ -80,8 +80,14 @@ impl PyLiveComponentController {
 
     pub fn start(&self, py: Python<'_>, process_live_fut: Py<PyAny>) -> PyResult<()> {
         // Convert the Python coroutine into a Rust future using from_py_future.
-        let host_runtime_ctx = self.0.component().app_ctx().env().host_runtime_ctx();
-        let fut = from_py_future(py, &host_runtime_ctx.0, process_live_fut.into_bound(py))?;
+        let host_runtime_ctx = self.0.component().app_ctx().host_callback_ctx();
+        let callback_lease = host_runtime_ctx.acquire_callback().into_py_result()?;
+        let fut = from_py_future(
+            py,
+            &host_runtime_ctx.0,
+            process_live_fut.into_bound(py),
+            callback_lease,
+        )?;
         // Wrap to convert PyResult<Py<PyAny>> → Result<()>
         let rust_fut = async move {
             fut.await.from_py_result()?;

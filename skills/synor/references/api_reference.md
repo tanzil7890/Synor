@@ -54,6 +54,10 @@ handle = await syn.spawn(processor_fn, *args, **kwargs)
 handle = await syn.spawn(syn.unit_path("name"), processor_fn, *args, **kwargs)
 
 await handle.ready()  # Optional: wait until component finishes
+
+# Inspect terminal state without raising for component failure/cancellation:
+outcome = await handle.outcome()
+# Succeeded | Failed(error) | Cancelled | Superseded
 ```
 
 **Parameters:**
@@ -61,7 +65,8 @@ await handle.ready()  # Optional: wait until component finishes
 - `processor_fn` -- Function (or LiveComponent class) to run.
 - `*args, **kwargs` -- Arguments passed to the function.
 
-**Returns:** `SpawnHandle`
+**Returns:** `SpawnHandle`. `ready()` preserves the success-or-raise API;
+`outcome()` returns a repeatable typed terminal result.
 
 ### `syn.call()`
 
@@ -126,6 +131,36 @@ results = await syn.map(process_chunk, chunks, *extra_args)
 - `*args, **kwargs` -- Additional arguments passed to `fn` after the item.
 
 **Returns:** `list[T]`
+
+### `syn.map_bounded()`
+
+Run a function with bounded task and iterator admission while preserving input
+order. Use this for large inputs whose item coroutines do not need a full-group
+barrier.
+
+```python
+results = await syn.map_bounded(process_chunk, chunks, 32, *extra_args)
+```
+
+`max_in_flight` is the third positional argument and must be a positive integer.
+After an item failure, no new inputs are pulled and the already-admitted window
+is drained. The returned result list remains O(n).
+
+### `syn.map_stream()`
+
+Stream bounded results without retaining an O(n) list. The iterator yields in
+completion order and retains at most `max_in_flight` pulled-but-not-yielded
+items, including both running tasks and completed results.
+
+```python
+async for result in syn.map_stream(process_chunk, chunks, 32, *extra_args):
+    await consume(result)
+```
+
+Worker and input-iterator failures stop admission, cancel the admitted window,
+and raise from the consumer's current or next pull. Caller cancellation does
+the same. Fully consume the iterator when possible; when breaking early, wrap
+it in `contextlib.aclosing(...)` so admitted work is cancelled promptly.
 
 ### `syn.unit_path()`
 
@@ -304,6 +339,7 @@ async for snapshot in handle.watch():
 
 Sources that support live mode:
 - `localfs.walk_dir(..., live=True)` -- File watching
+- `kafka.create_consumer(config)` -- Kafka consumer construction with both automatic offset mechanisms forced off
 - `kafka.topic_as_map(consumer, topics)` -- Kafka topic consumption
 
 ---

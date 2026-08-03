@@ -21,6 +21,7 @@
 //! ```
 
 use std::future::Future;
+use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -34,16 +35,63 @@ use crate::error::{Error, Result};
 
 type BatchFuture<Out> = Pin<Box<dyn Future<Output = synor_utils::error::Result<Vec<Out>>> + Send>>;
 type BatchFn<In, Out> = Box<dyn Fn(Vec<In>) -> BatchFuture<Out> + Send + Sync>;
+type InputSizeFn<In> = Box<dyn Fn(&In) -> usize + Send + Sync>;
 
 /// Adapts a user closure `Vec<In> -> Result<Vec<Out>>` to the core batcher's `Runner`.
 struct FnRunner<In, Out> {
     f: BatchFn<In, Out>,
+    input_size: Option<InputSizeFn<In>>,
+}
+
+/// Counts serialized bytes without retaining a second copy of the input.
+///
+/// `rmp_serde::to_vec` is convenient but briefly doubles large payloads before
+/// the batcher's byte semaphore can account for them. This writer gives the
+/// serializer the same byte-counting signal with constant additional memory.
+#[derive(Default)]
+struct CountingWriter {
+    bytes_written: usize,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.bytes_written = self.bytes_written.saturating_add(buf.len());
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_size_bytes<T: Serialize>(value: &T) -> Option<usize> {
+    let mut writer = CountingWriter::default();
+    value
+        .serialize(&mut rmp_serde::Serializer::new(&mut writer))
+        .ok()?;
+    Some(writer.bytes_written)
 }
 
 #[async_trait]
-impl<In: Send + 'static, Out: Send + 'static> Runner for FnRunner<In, Out> {
+impl<In: Serialize + Send + 'static, Out: Send + 'static> Runner for FnRunner<In, Out> {
     type Input = In;
     type Output = Out;
+
+    fn input_size_bytes(&self, input: &Self::Input) -> usize {
+        // `In` is intentionally generic, so its serialized representation is
+        // the most reliable available proxy for owned heap content (String,
+        // Vec, nested structs, and similar values). Include the inline value
+        // itself and fail conservatively to the prior shallow estimate if a
+        // custom serializer rejects this particular value.
+        let encoded_estimate = std::mem::size_of_val(input)
+            .saturating_add(serialized_size_bytes(input).unwrap_or_default());
+        self.input_size
+            .as_ref()
+            .map(|estimate| estimate(input))
+            .unwrap_or_default()
+            .max(encoded_estimate)
+            .max(1)
+    }
 
     async fn run(
         &self,
@@ -54,10 +102,40 @@ impl<In: Send + 'static, Out: Send + 'static> Runner for FnRunner<In, Out> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use synor_utils::batching::Runner;
+
+    use super::{FnRunner, serialized_size_bytes};
+
+    #[test]
+    fn counting_serializer_matches_messagepack_output_length() {
+        let value = vec!["a substantial payload".repeat(128), "tail".to_owned()];
+        assert_eq!(
+            serialized_size_bytes(&value),
+            Some(rmp_serde::to_vec(&value).unwrap().len())
+        );
+    }
+
+    #[test]
+    fn explicit_estimator_accounts_for_retained_spare_capacity() {
+        let runner: FnRunner<String, ()> = FnRunner {
+            f: Box::new(|_| {
+                Box::pin(async { Ok::<Vec<()>, synor_utils::error::Error>(Vec::new()) })
+            }),
+            input_size: Some(Box::new(|input| input.capacity())),
+        };
+        let mut input = String::with_capacity(16 * 1024);
+        input.push('x');
+
+        assert!(runner.input_size_bytes(&input) >= 16 * 1024);
+    }
+}
+
 /// A batched, memoized function. See the [module docs](self).
 pub struct Batched<In, Out>
 where
-    In: Send + 'static,
+    In: Serialize + Send + 'static,
     Out: Send + 'static,
 {
     batcher: Arc<Batcher<FnRunner<In, Out>>>,
@@ -80,7 +158,28 @@ where
         F: Fn(Vec<In>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<Out>>> + Send + 'static,
     {
-        Self::with_options(f, code_hash, BatchingOptions::default())
+        Self::with_options(f, code_hash, BatchingOptions::default(), None)
+    }
+
+    /// Build a `Batched` with an explicit retained-memory estimator for inputs.
+    ///
+    /// Serialization provides a safe, allocation-free estimate of logical
+    /// payload bytes, but it cannot observe spare `Vec`/`String` capacity,
+    /// shared backing allocations, or memory hidden by a custom serializer.
+    /// The callback should return total retained bytes for one input. Synor
+    /// uses the larger of that value and its encoded estimate for admission.
+    pub fn with_input_size_estimator<F, Fut, S>(f: F, code_hash: u64, input_size: S) -> Self
+    where
+        F: Fn(Vec<In>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Out>>> + Send + 'static,
+        S: Fn(&In) -> usize + Send + Sync + 'static,
+    {
+        Self::with_options(
+            f,
+            code_hash,
+            BatchingOptions::default(),
+            Some(Box::new(input_size)),
+        )
     }
 
     /// Like [`Batched::new`], but caps how many items are processed per batch.
@@ -94,11 +193,18 @@ where
             code_hash,
             BatchingOptions {
                 max_batch_size: Some(max_batch_size),
+                ..BatchingOptions::default()
             },
+            None,
         )
     }
 
-    fn with_options<F, Fut>(f: F, code_hash: u64, options: BatchingOptions) -> Self
+    fn with_options<F, Fut>(
+        f: F,
+        code_hash: u64,
+        options: BatchingOptions,
+        input_size: Option<InputSizeFn<In>>,
+    ) -> Self
     where
         F: Fn(Vec<In>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<Out>>> + Send + 'static,
@@ -107,7 +213,10 @@ where
             let fut = f(inputs);
             Box::pin(async move { fut.await.map_err(Error::into_core) })
         });
-        let runner = FnRunner { f: wrapped };
+        let runner = FnRunner {
+            f: wrapped,
+            input_size,
+        };
         let queue = Arc::new(BatchQueue::new());
         let batcher = Arc::new(Batcher::new(runner, queue, options));
         Self { batcher, code_hash }

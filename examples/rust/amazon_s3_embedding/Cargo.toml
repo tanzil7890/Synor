@@ -4,6 +4,7 @@
 name = "amazon_s3_embedding"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 
 [dependencies]
 # Amazon S3 source + Postgres/pgvector target both live in the SDK. The `text`

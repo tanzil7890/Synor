@@ -1,5 +1,6 @@
 use crate::engine::runtime::get_runtime;
 use crate::prelude::*;
+use futures::FutureExt;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Weak;
@@ -26,22 +27,13 @@ use synor_utils::fingerprint::Fingerprint;
 /// Async on-error callback for background-style component execution.
 ///
 /// Invoked by `run_in_background` / `delete` when the spawned task fails
-/// (other than via cancellation, which is filtered). The callback can
-/// either:
-///
-/// - Return `Ok(())` to swallow the failure (mount-style; the spawned
-///   task returns Ok and `handle.ready()` resolves Ok). This is what
-///   the Python-side exception handler chain does when at least one
-///   handler returns normally.
-/// - Return `Err(err)` to propagate the failure (the spawned task
-///   returns Err and `handle.ready()` raises). This is what the chain
-///   does when every handler re-raises, and what `app.drop()`'s
-///   built-in raising handler does to surface root-delete failures.
+/// (other than via cancellation, which is filtered). The callback is an
+/// observer: returning normally means the failure was reported successfully;
+/// returning an error means reporting itself failed. Neither result changes
+/// the component's terminal failure or makes `handle.ready()` succeed.
 ///
 /// Cancellation is never delivered to the handler — it's filtered
-/// before this is invoked. The "no chain registered" case logs at
-/// ERROR and swallows; only an explicitly-installed handler causes
-/// propagation.
+/// before this is invoked. The "no chain registered" case logs at ERROR.
 pub type OnError = Arc<
     dyn Fn(Error) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>
         + Send
@@ -194,18 +186,143 @@ impl ComponentBgChildReadinessState {
     }
 }
 
+/// Terminal readiness state for every background component operation.
+///
+/// Kept explicit rather than encoding state as `Result<()>`: cancellation and
+/// coalescing are control-flow outcomes, not component failures, and callers at
+/// the live-operation boundary need to preserve that distinction internally.
+#[derive(Debug, Default, Clone)]
+pub(crate) enum ComponentTerminalOutcome {
+    #[default]
+    Succeeded,
+    Failed(SharedError),
+    Cancelled,
+    Superseded,
+}
+
+impl ComponentTerminalOutcome {
+    fn into_ready_result(self) -> Result<()> {
+        match self {
+            Self::Succeeded | Self::Superseded => Ok(()),
+            Self::Failed(error) => Err(Err::<(), _>(error)
+                .into_result()
+                .expect_err("failed terminal outcome must remain an error")),
+            Self::Cancelled => Err(Error::cancelled()),
+        }
+    }
+
+    fn into_readiness_outcome(self) -> ReadinessOutcome {
+        match self {
+            Self::Succeeded => ReadinessOutcome::Succeeded,
+            Self::Failed(error) => ReadinessOutcome::Failed(
+                Err::<(), _>(error)
+                    .into_result()
+                    .expect_err("failed terminal outcome must remain an error"),
+            ),
+            Self::Cancelled => ReadinessOutcome::Cancelled,
+            Self::Superseded => ReadinessOutcome::Superseded,
+        }
+    }
+}
+
+/// Typed terminal result returned by a component readiness handle.
+///
+/// [`ComponentExecutionHandle::ready`] retains the compatibility behavior:
+/// succeeded and superseded work return `Ok(())`, while failed and cancelled
+/// work return an error. Use [`ComponentExecutionHandle::outcome`] when the
+/// caller needs to distinguish all four terminal states explicitly.
+#[derive(Debug)]
+pub enum ReadinessOutcome {
+    /// The component and its durable downstream reconciliation completed.
+    Succeeded,
+    /// The component failed. The original structured error is preserved when
+    /// possible; later observers receive a faithful replica.
+    Failed(Error),
+    /// The operation was cancelled before reaching durable success.
+    Cancelled,
+    /// A newer operation for the same live-component path displaced this one.
+    Superseded,
+}
+
+impl ReadinessOutcome {
+    /// Convert the typed outcome to the historical success-or-error contract.
+    pub fn into_result(self) -> Result<()> {
+        match self {
+            Self::Succeeded | Self::Superseded => Ok(()),
+            Self::Failed(error) => Err(error),
+            Self::Cancelled => Err(Error::cancelled()),
+        }
+    }
+
+    /// Return the failure when this is [`ReadinessOutcome::Failed`].
+    pub fn error(&self) -> Option<&Error> {
+        match self {
+            Self::Failed(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct ComponentRunOutcome {
-    has_exception: bool,
+    terminal: ComponentTerminalOutcome,
     logic_deps: HashSet<Fingerprint>,
+    /// A foreground child failure is returned directly to its awaiting caller,
+    /// which may deliberately catch it.  It must therefore not become a second
+    /// terminal failure in the parent's background-readiness aggregate.  It
+    /// still blocks memo finalization so a caught failure is retried on the next
+    /// run instead of being cached as a successful parent execution.
+    invalidates_memo: bool,
 }
 
 impl ComponentRunOutcome {
-    fn exception() -> Self {
+    pub(crate) fn cancelled() -> Self {
         Self {
-            has_exception: true,
+            terminal: ComponentTerminalOutcome::Cancelled,
+            invalidates_memo: true,
             ..Default::default()
         }
+    }
+
+    pub(crate) fn failed(error: SharedError) -> Self {
+        Self {
+            terminal: ComponentTerminalOutcome::Failed(error),
+            invalidates_memo: true,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn superseded() -> Self {
+        Self {
+            terminal: ComponentTerminalOutcome::Superseded,
+            ..Default::default()
+        }
+    }
+
+    fn terminal(&self) -> ComponentTerminalOutcome {
+        self.terminal.clone()
+    }
+
+    fn has_exception(&self) -> bool {
+        self.invalidates_memo
+            || matches!(
+                self.terminal,
+                ComponentTerminalOutcome::Failed(_) | ComponentTerminalOutcome::Cancelled
+            )
+    }
+
+    /// Convert a foreground child's outcome into dependency evidence for its
+    /// parent.  The original terminal result still goes to `use_mount`/`call`;
+    /// only the independent parent-readiness channel is made non-terminal.
+    fn into_foreground_dependency(mut self) -> Self {
+        if matches!(
+            self.terminal,
+            ComponentTerminalOutcome::Failed(_) | ComponentTerminalOutcome::Cancelled
+        ) {
+            self.terminal = ComponentTerminalOutcome::Succeeded;
+            self.invalidates_memo = true;
+        }
+        self
     }
 
     /// Outcome for a component that hit its memo cache: no exception, but it
@@ -213,13 +330,28 @@ impl ComponentRunOutcome {
     /// memo depends on this subtree.
     fn reused(logic_deps: Vec<Fingerprint>) -> Self {
         Self {
-            has_exception: false,
+            terminal: ComponentTerminalOutcome::Succeeded,
             logic_deps: logic_deps.into_iter().collect(),
+            invalidates_memo: false,
         }
     }
 
     fn merge(&mut self, other: Self) {
-        self.has_exception |= other.has_exception;
+        self.invalidates_memo |= other.invalidates_memo;
+        // Aggregate precedence: a real failure wins; cancellation wins over
+        // successful/no-op members; superseded is a neutral no-op at the
+        // enclosing subtree level.
+        match (&self.terminal, other.terminal) {
+            (ComponentTerminalOutcome::Failed(_), _) => {}
+            (_, ComponentTerminalOutcome::Failed(error)) => {
+                self.terminal = ComponentTerminalOutcome::Failed(error);
+            }
+            (ComponentTerminalOutcome::Cancelled, _) => {}
+            (_, ComponentTerminalOutcome::Cancelled) => {
+                self.terminal = ComponentTerminalOutcome::Cancelled;
+            }
+            _ => {}
+        }
         self.logic_deps.extend(other.logic_deps);
     }
 }
@@ -237,6 +369,7 @@ pub struct ComponentBgChildReadiness {
 pub struct ComponentBgChildReadinessChildGuard {
     readiness: ComponentBgChildReadiness,
     resolved: bool,
+    foreground: bool,
 }
 
 impl Drop for ComponentBgChildReadinessChildGuard {
@@ -246,19 +379,36 @@ impl Drop for ComponentBgChildReadinessChildGuard {
         }
         let mut state = self.readiness.state().lock().unwrap();
         state.remaining_count -= 1;
-        // state.maybe_set_readiness(None, self.readiness.readiness());
-        state.maybe_set_readiness(
-            Some(Err(SharedError::new(internal_error!(
-                "Child component build cancelled"
-            )))),
-            self.readiness.readiness(),
-        );
+        let outcome = ComponentRunOutcome::cancelled();
+        let outcome = if self.foreground {
+            outcome.into_foreground_dependency()
+        } else {
+            outcome
+        };
+        state.maybe_set_readiness(Some(Ok(outcome)), self.readiness.readiness());
     }
 }
 
 impl ComponentBgChildReadinessChildGuard {
     pub(crate) fn resolve(self, outcome: ComponentRunOutcome) {
         self.resolve_result(Ok(outcome));
+    }
+
+    pub(crate) fn resolve_terminal(self, terminal: ComponentTerminalOutcome) {
+        let outcome = match terminal {
+            ComponentTerminalOutcome::Succeeded => ComponentRunOutcome::default(),
+            ComponentTerminalOutcome::Failed(error) => ComponentRunOutcome::failed(error),
+            ComponentTerminalOutcome::Cancelled => ComponentRunOutcome::cancelled(),
+            ComponentTerminalOutcome::Superseded => ComponentRunOutcome::superseded(),
+        };
+        self.resolve(outcome);
+    }
+
+    /// Resolve a foreground child at the parent's dependency boundary.
+    /// Foreground errors are owned by the awaiting caller and may be caught;
+    /// they invalidate memoization without independently failing the parent.
+    fn resolve_foreground(self, outcome: ComponentRunOutcome) {
+        self.resolve(outcome.into_foreground_dependency());
     }
 
     /// Like `resolve`, but propagates a full `SharedResult`: `Ok` merges the
@@ -300,10 +450,19 @@ impl ComponentBgChildReadiness {
     }
 
     pub fn add_child(self) -> ComponentBgChildReadinessChildGuard {
+        self.add_child_with_kind(false)
+    }
+
+    fn add_foreground_child(self) -> ComponentBgChildReadinessChildGuard {
+        self.add_child_with_kind(true)
+    }
+
+    fn add_child_with_kind(self, foreground: bool) -> ComponentBgChildReadinessChildGuard {
         self.state().lock().unwrap().remaining_count += 1;
         ComponentBgChildReadinessChildGuard {
             readiness: self,
             resolved: false,
+            foreground,
         }
     }
 
@@ -371,6 +530,41 @@ impl<Prof: EngineProfile> StatsGroup<Prof> {
 }
 
 impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
+    /// Open an unlabelled readiness group for a bulk mount operation.
+    ///
+    /// Every member still reports into the enclosing stats scope, but member
+    /// readiness is reduced into one counter/outcome. This lets host bindings
+    /// discard each per-component handle immediately instead of retaining an
+    /// O(items) handle vector until `spawn_each().ready()` is called.
+    pub fn begin_mount_group(&self) -> (ComponentProcessorContext<Prof>, ComponentExecutionHandle) {
+        let readiness = ComponentBgChildReadiness::default();
+        let derived = self.with_components_readiness(readiness.clone());
+        let parent_guard = self.components_readiness().clone().add_child();
+        let join_handle = get_runtime().spawn(async move {
+            let outcome = readiness.readiness().wait().await.clone();
+            let terminal = match &outcome {
+                Ok(outcome) => outcome.terminal(),
+                Err(error) => ComponentTerminalOutcome::Failed(error.clone()),
+            };
+            parent_guard.resolve_result(outcome);
+            terminal
+        });
+        let handle = ComponentExecutionHandle::from_terminal(async move {
+            match join_handle.await {
+                Ok(terminal) => terminal,
+                Err(error) => ComponentTerminalOutcome::Failed(SharedError::new(internal_error!(
+                    "bulk mount readiness task panicked: {error}"
+                ))),
+            }
+        });
+        (derived, handle)
+    }
+
+    /// Close a bulk mount group after its members have been registered.
+    pub fn end_mount_group(&self) {
+        self.components_readiness().set_build_done();
+    }
+
     /// Open a stats group rooted at this context. Returns a derived context view
     /// (whose mounts report into the group and register liveness with it) and
     /// the group's `ProcessingStats` (for the Python handle / watch).
@@ -485,17 +679,46 @@ impl<Prof: EngineProfile> ComponentMountRunHandle<Prof> {
     }
 }
 
+#[derive(Clone)]
 pub struct ComponentExecutionHandle {
-    fut: Pin<Box<dyn Future<Output = SharedResult<()>> + Send + Sync>>,
+    fut: futures::future::Shared<
+        Pin<Box<dyn Future<Output = ComponentTerminalOutcome> + Send + Sync>>,
+    >,
 }
 
 impl ComponentExecutionHandle {
     pub fn new(fut: impl Future<Output = SharedResult<()>> + Send + Sync + 'static) -> Self {
-        Self { fut: Box::pin(fut) }
+        Self::from_terminal(async move {
+            match fut.await {
+                Ok(()) => ComponentTerminalOutcome::Succeeded,
+                Err(error) => ComponentTerminalOutcome::Failed(error),
+            }
+        })
     }
 
-    pub async fn ready(self) -> Result<()> {
-        self.fut.await.into_result()
+    pub(crate) fn from_terminal(
+        fut: impl Future<Output = ComponentTerminalOutcome> + Send + Sync + 'static,
+    ) -> Self {
+        let fut: Pin<Box<dyn Future<Output = ComponentTerminalOutcome> + Send + Sync>> =
+            Box::pin(fut);
+        Self { fut: fut.shared() }
+    }
+
+    pub(crate) async fn terminal(&self) -> ComponentTerminalOutcome {
+        self.fut.clone().await
+    }
+
+    /// Wait for the component and return its explicit terminal state.
+    ///
+    /// Handles are repeatable: `outcome()` and `ready()` may be called in any
+    /// order, including by concurrent observers.
+    pub async fn outcome(&self) -> ReadinessOutcome {
+        self.terminal().await.into_readiness_outcome()
+    }
+
+    /// Wait for readiness using the compatibility success-or-error contract.
+    pub async fn ready(&self) -> Result<()> {
+        self.terminal().await.into_ready_result()
     }
 }
 
@@ -553,11 +776,6 @@ impl<Prof: EngineProfile> Component<Prof> {
             parent_ctx.live(), // use_mount inherits live from parent
             parent_ctx.preview_collector().cloned(),
             parent_ctx.host_ctx().clone(),
-            // No build-mode on_error: use_mount is foreground; failures
-            // propagate as `Err` to the awaiting parent via `.result()`.
-            // Orphan-delete failures during this child's commit fall
-            // through to the framework's default `error!` log.
-            None,
             parent_ctx.effect_mode(),
         )?;
         self.run(processor, child_ctx, deadline, deadline).await
@@ -572,10 +790,6 @@ impl<Prof: EngineProfile> Component<Prof> {
         on_error: Option<OnError>,
         pre_execute_check: Option<Box<dyn FnOnce() -> bool + Send>>,
     ) -> Result<ComponentExecutionHandle> {
-        // Store `on_error` on the child's build context too, so the
-        // commit-phase GC sweep can cascade it to orphan deletes. The
-        // same handler is also passed to `run_in_background` for the
-        // child's own task failure — one handler, two surfaces.
         let child_ctx = self.new_processor_context_for_build(
             Some(parent_ctx),
             parent_ctx.processing_stats().clone(),
@@ -583,7 +797,6 @@ impl<Prof: EngineProfile> Component<Prof> {
             parent_ctx.live(), // mount inherits live from parent
             parent_ctx.preview_collector().cloned(),
             parent_ctx.host_ctx().clone(),
-            on_error.clone(),
             parent_ctx.effect_mode(),
         )?;
         self.run_in_background(processor, child_ctx, on_error, pre_execute_check)
@@ -708,7 +921,7 @@ impl<Prof: EngineProfile> Component<Prof> {
         let relative_path = self.relative_path()?;
         let child_readiness_guard = context
             .parent_context()
-            .map(|c| c.components_readiness().clone().add_child());
+            .map(|c| c.components_readiness().clone().add_foreground_child());
         let span = info_span!("component.run", component_path = %relative_path);
         let cancel_token = self.app_ctx().cancellation_token();
         let join_handle = get_runtime().spawn(
@@ -718,17 +931,31 @@ impl<Prof: EngineProfile> Component<Prof> {
                 // → CancelOnDropPy and cancels the underlying Python task.
                 let result = tokio::select! {
                     r = self.execute_once(&context, Some(&processor), deadline) => r,
-                    _ = cancel_token.cancelled() => Err(internal_error!("operation cancelled")),
+                    _ = cancel_token.cancelled() => Err(Error::cancelled()),
                 };
                 let (outcome, output) = match result {
-                    Ok((outcome, output)) => (outcome, Ok(output)),
-                    Err(err) => (ComponentRunOutcome::exception(), Err(err)),
+                    Ok((outcome, output)) => {
+                        let output = outcome.terminal().into_ready_result().map(|()| output);
+                        (outcome, output)
+                    }
+                    Err(err) => {
+                        if err.is_cancelled() {
+                            (ComponentRunOutcome::cancelled(), Err(err))
+                        } else {
+                            let failure = SharedError::new(err);
+                            let outcome = ComponentRunOutcome::failed(failure.clone());
+                            let output = Err(Err::<(), _>(failure)
+                                .into_result()
+                                .expect_err("component failure must remain an error"));
+                            (outcome, output)
+                        }
+                    }
                 };
                 context.release_inflight_permit();
                 drop(processor);
                 drop(context);
                 drop(self);
-                child_readiness_guard.map(|guard| guard.resolve(outcome));
+                child_readiness_guard.map(|guard| guard.resolve_foreground(outcome));
                 output?
                     .ok_or_else(|| internal_error!("component deletion can only run in background"))
             }
@@ -772,15 +999,16 @@ impl<Prof: EngineProfile> Component<Prof> {
             // Check if this task has been superseded before executing.
             if let Some(check) = pre_execute_check {
                 if !check() {
-                    // Superseded — skip execution, resolve as success.
+                    // Superseded — skip execution and preserve that distinct
+                    // internal terminal state (public ready remains a no-op).
                     context.release_inflight_permit();
                     drop(processor);
                     drop(context);
                     drop(self);
                     if let Some(guard) = child_readiness_guard {
-                        guard.resolve(ComponentRunOutcome::default());
+                        guard.resolve(ComponentRunOutcome::superseded());
                     }
-                    return Ok(());
+                    return ComponentTerminalOutcome::Superseded;
                 }
             }
             // Race the work against app-level cancellation. On cancel, the
@@ -789,36 +1017,51 @@ impl<Prof: EngineProfile> Component<Prof> {
             let result = tokio::select! {
                 // Background components are deadline-isolated by design.
                 r = self.execute_once(&context, Some(&processor), DeadlineContext::NONE) => r,
-                _ = cancel_token.cancelled() => Err(internal_error!("operation cancelled")),
+                _ = cancel_token.cancelled() => Err(Error::cancelled()),
             };
             // Background-style error handling:
-            // - Cancellation is always swallowed (no handler call, no
-            //   propagation) — Ctrl+C / shutdown / re-mount shouldn't
-            //   surface as a user-visible error.
-            // - With a handler registered: invoke it. The handler's
-            //   Result decides propagation — Ok = swallow (mount-style),
-            //   Err = propagate via task_result. This lets the Python
-            //   exception handler chain control propagation: handlers
-            //   that return normally → swallow; chain exhausted via
-            //   raises → propagate.
-            // - No handler: log at ERROR, swallow. Matches the existing
-            //   "no chain registered → not propagated" contract.
+            // - Cancellation is filtered (no handler call) — Ctrl+C /
+            //   shutdown / re-mount has its own operation-level signal.
+            // - A direct failure is reported once through `on_error`, but the
+            //   observer cannot rewrite the terminal result. The same shared
+            //   failure reaches both `handle.ready()` and the parent's
+            //   aggregate readiness.
+            // - A descendant failure is already reported at its origin. It is
+            //   propagated without invoking this component's handler again.
             let (outcome, task_result) = match result {
-                Ok((outcome, _)) => (outcome, Ok(())),
+                Ok((outcome, _)) => {
+                    let task_result = outcome.terminal();
+                    (outcome, task_result)
+                }
                 Err(err) => {
-                    let task_result = if cancel_token.is_cancelled() || err.is_cancelled() {
+                    if cancel_token.is_cancelled() || err.is_cancelled() {
                         trace!("component build cancelled");
-                        Ok(())
-                    } else if let Some(handler) = &on_error {
-                        match handler(err).await {
-                            Ok(()) => Ok(()),
-                            Err(propagated) => Err(SharedError::from(propagated)),
-                        }
+                        (
+                            ComponentRunOutcome::cancelled(),
+                            ComponentTerminalOutcome::Cancelled,
+                        )
                     } else {
-                        error!("component build failed:\n{err:?}");
-                        Ok(())
-                    };
-                    (ComponentRunOutcome::exception(), task_result)
+                        let already_reported = err.is_reported();
+                        let failure = SharedError::new(err.reported());
+                        if !already_reported {
+                            if let Some(handler) = &on_error {
+                                let report_error = Err::<(), _>(failure.clone())
+                                    .into_result()
+                                    .expect_err("component failure must remain an error");
+                                if let Err(handler_error) = handler(report_error).await {
+                                    error!(
+                                        "component exception handler failed while reporting a terminal failure:\n{handler_error:?}"
+                                    );
+                                }
+                            } else {
+                                error!("component build failed:\n{failure:?}");
+                            }
+                        }
+                        (
+                            ComponentRunOutcome::failed(failure.clone()),
+                            ComponentTerminalOutcome::Failed(failure),
+                        )
+                    }
                 }
             };
             context.release_inflight_permit();
@@ -830,10 +1073,13 @@ impl<Prof: EngineProfile> Component<Prof> {
             }
             task_result
         });
-        Ok(ComponentExecutionHandle::new(async move {
-            join_handle
-                .await
-                .map_err(|e| SharedError::new(internal_error!("task panicked: {e}")))?
+        Ok(ComponentExecutionHandle::from_terminal(async move {
+            match join_handle.await {
+                Ok(terminal) => terminal,
+                Err(error) => ComponentTerminalOutcome::Failed(SharedError::new(internal_error!(
+                    "task panicked: {error}"
+                ))),
+            }
         }))
     }
 
@@ -845,20 +1091,20 @@ impl<Prof: EngineProfile> Component<Prof> {
         let child_readiness_guard = context
             .parent_context()
             .map(|c| c.components_readiness().clone().add_child());
-        // Pull on_error out of the delete context so the spawned task
-        // can invoke it. The context still carries the same handler for
-        // descendant GC sweeps to read and cascade.
+        // Pull reporting policy out of the delete context before moving it
+        // into the spawned task.
         let on_error = context.delete_action_on_error();
-        let join_handle: tokio::task::JoinHandle<SharedResult<()>> =
+        let defer_failure_reporting = context.defer_delete_failure_reporting();
+        let join_handle: tokio::task::JoinHandle<ComponentTerminalOutcome> =
             get_runtime().spawn(async move {
                 if let Some(check) = pre_execute_check {
                     if !check() {
                         drop(context);
                         drop(self);
                         if let Some(guard) = child_readiness_guard {
-                            guard.resolve(ComponentRunOutcome::default());
+                            guard.resolve(ComponentRunOutcome::superseded());
                         }
-                        return Ok(());
+                        return ComponentTerminalOutcome::Superseded;
                     }
                 }
                 trace!("deleting component at {}", self.stable_path());
@@ -866,26 +1112,48 @@ impl<Prof: EngineProfile> Component<Prof> {
                 let result = self
                     .execute_once(&context, None, DeadlineContext::NONE)
                     .await;
-                // Same error model as `run_in_background`: cancellation
-                // filtered; with-handler delegates propagation to the
-                // handler's Result (Ok = swallow, Err = propagate);
-                // without-handler logs + swallow.
+                // Same error model as `run_in_background`: cancellation is
+                // filtered; handlers observe but cannot swallow terminal
+                // failures; descendant failures propagate without duplicate
+                // handler calls.
                 let (outcome, task_result) = match result {
-                    Ok((outcome, _)) => (outcome, Ok(())),
+                    Ok((outcome, _)) => {
+                        let task_result = outcome.terminal();
+                        (outcome, task_result)
+                    }
                     Err(err) => {
-                        let task_result = if err.is_cancelled() {
+                        if err.is_cancelled() {
                             trace!("component delete cancelled");
-                            Ok(())
-                        } else if let Some(handler) = &on_error {
-                            match handler(err).await {
-                                Ok(()) => Ok(()),
-                                Err(propagated) => Err(SharedError::from(propagated)),
-                            }
+                            (
+                                ComponentRunOutcome::cancelled(),
+                                ComponentTerminalOutcome::Cancelled,
+                            )
                         } else {
-                            error!("component delete failed:\n{err:?}");
-                            Ok(())
-                        };
-                        (ComponentRunOutcome::exception(), task_result)
+                            let already_reported = err.is_reported();
+                            let failure = if defer_failure_reporting {
+                                SharedError::new(err)
+                            } else {
+                                SharedError::new(err.reported())
+                            };
+                            if !defer_failure_reporting && !already_reported {
+                                if let Some(handler) = &on_error {
+                                    let report_error = Err::<(), _>(failure.clone())
+                                        .into_result()
+                                        .expect_err("component failure must remain an error");
+                                    if let Err(handler_error) = handler(report_error).await {
+                                        error!(
+                                            "component exception handler failed while reporting a terminal failure:\n{handler_error:?}"
+                                        );
+                                    }
+                                } else {
+                                    error!("component delete failed:\n{failure:?}");
+                                }
+                            }
+                            (
+                                ComponentRunOutcome::failed(failure.clone()),
+                                ComponentTerminalOutcome::Failed(failure),
+                            )
+                        }
                     }
                 };
                 // Drop profile-specific objects BEFORE resolving child readiness.
@@ -897,10 +1165,13 @@ impl<Prof: EngineProfile> Component<Prof> {
                 }
                 task_result
             });
-        Ok(ComponentExecutionHandle::new(async move {
-            join_handle
-                .await
-                .map_err(|e| SharedError::new(internal_error!("task panicked: {e}")))?
+        Ok(ComponentExecutionHandle::from_terminal(async move {
+            match join_handle.await {
+                Ok(terminal) => terminal,
+                Err(error) => ComponentTerminalOutcome::Failed(SharedError::new(internal_error!(
+                    "task panicked: {error}"
+                ))),
+            }
         }))
     }
 
@@ -931,7 +1202,7 @@ impl<Prof: EngineProfile> Component<Prof> {
                     // If processor has state handler and there are stored states, validate them.
                     if processor.has_memo_state_handler() && !memo_states.is_empty() {
                         let fut = processor.handle_memo_states(
-                            processor_context.app_ctx().env().host_runtime_ctx(),
+                            processor_context.app_ctx().host_callback_ctx(),
                             processor_context,
                             Some(memo_states),
                         )?;
@@ -1032,7 +1303,7 @@ impl<Prof: EngineProfile> Component<Prof> {
                     let ret: Result<Option<Prof::FunctionData>> = match &processor {
                         Some(processor) => processor
                             .process(
-                                processor_context.app_ctx().env().host_runtime_ctx(),
+                                processor_context.app_ctx().host_callback_ctx(),
                                 &processor_context,
                             )?
                             .await
@@ -1073,7 +1344,7 @@ impl<Prof: EngineProfile> Component<Prof> {
                 }?;
                 let build_output = match ret {
                     Some(ret) => {
-                        if !children_outcome.has_exception {
+                        if !children_outcome.has_exception() {
                             // Collect initial memo states on cache miss if processor has a state handler.
                             let memo_states: MemoStatesPayload<Prof> = if let Some(processor) =
                                 processor
@@ -1085,7 +1356,7 @@ impl<Prof: EngineProfile> Component<Prof> {
                                 } else {
                                     // Cache miss — collect initial states
                                     let fut = processor.handle_memo_states(
-                                        processor_context.app_ctx().env().host_runtime_ctx(),
+                                        processor_context.app_ctx().host_callback_ctx(),
                                         processor_context,
                                         None,
                                     )?;
@@ -1138,14 +1409,10 @@ impl<Prof: EngineProfile> Component<Prof> {
                         // — that preserves the tombstone for the next
                         // reconcile to retry.
                         //
-                        // We do NOT propagate via `Err` from here.
-                        // Descendant-failure propagation to awaiting
-                        // callers (notably `App.drop()`) happens via
-                        // the cascading `on_error` plumbed through the
-                        // GC sweep — see `execution.rs::launch_child_component_gc`.
-                        // That's the single, unified error-handling
-                        // channel; this branch just preserves metadata.
-                        if !children_outcome.has_exception {
+                        // The typed child outcome propagates to the awaiting
+                        // caller; this branch only decides whether cleanup
+                        // metadata is safe to remove.
+                        if !children_outcome.has_exception() {
                             cleanup_tombstone(&processor_context).await?;
                         }
                         None
@@ -1205,7 +1472,6 @@ impl<Prof: EngineProfile> Component<Prof> {
         live: bool,
         preview_collector: Option<PreviewActionCollector<Prof>>,
         host_ctx: Arc<Prof::HostCtx>,
-        on_error: Option<OnError>,
         effect_mode: crate::engine::target_state::EffectMode,
     ) -> Result<ComponentProcessorContext<Prof>> {
         let providers = if let Some(parent_ctx) = parent_ctx {
@@ -1241,7 +1507,6 @@ impl<Prof: EngineProfile> Component<Prof> {
                 providers,
                 full_reprocess,
                 live,
-                on_error,
                 preview_collector,
                 effect_mode,
             ),
@@ -1255,6 +1520,7 @@ impl<Prof: EngineProfile> Component<Prof> {
         processing_stats: ProcessingStats,
         host_ctx: Arc<Prof::HostCtx>,
         on_error: Option<OnError>,
+        defer_failure_reporting: bool,
         effect_mode: crate::engine::target_state::EffectMode,
         provider_missing_is_error: bool,
         tombstone_generation: Option<u64>,
@@ -1267,6 +1533,7 @@ impl<Prof: EngineProfile> Component<Prof> {
             ComponentProcessingAction::Delete(ComponentDeleteContext {
                 providers,
                 on_error,
+                defer_failure_reporting,
                 effect_mode,
                 provider_missing_is_error,
                 tombstone_generation,
@@ -1277,7 +1544,11 @@ impl<Prof: EngineProfile> Component<Prof> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComponentProcessor, ComponentProcessorInfo, any_active};
+    use super::{
+        ComponentBgChildReadiness, ComponentExecutionHandle, ComponentProcessor,
+        ComponentProcessorInfo, ComponentRunOutcome, ComponentTerminalOutcome, ReadinessOutcome,
+        any_active,
+    };
     use crate::engine::app::{App, AppUpdateOptions};
     use crate::engine::context::{ComponentProcessorContext, MemoStatesPayload};
     use crate::engine::deadline::{
@@ -1297,7 +1568,174 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex, Weak};
     use std::time::Duration;
+    use synor_utils::error::{Error, SharedError};
     use synor_utils::fingerprint::Fingerprint;
+
+    #[tokio::test]
+    async fn readiness_terminal_succeeded_maps_to_ok() {
+        let handle =
+            ComponentExecutionHandle::from_terminal(async { ComponentTerminalOutcome::Succeeded });
+        handle.ready().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn readiness_terminal_failed_preserves_error() {
+        let handle = ComponentExecutionHandle::from_terminal(async {
+            ComponentTerminalOutcome::Failed(SharedError::new(Error::internal_msg(
+                "terminal failure",
+            )))
+        });
+        let error = handle.ready().await.unwrap_err();
+        assert!(error.to_string().contains("terminal failure"));
+    }
+
+    #[tokio::test]
+    async fn readiness_terminal_cancelled_preserves_cancellation() {
+        let handle =
+            ComponentExecutionHandle::from_terminal(async { ComponentTerminalOutcome::Cancelled });
+        assert!(handle.ready().await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn readiness_terminal_superseded_maps_to_compatible_success() {
+        let handle =
+            ComponentExecutionHandle::from_terminal(async { ComponentTerminalOutcome::Superseded });
+        handle.ready().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn readiness_outcome_preserves_all_terminal_variants() {
+        let succeeded =
+            ComponentExecutionHandle::from_terminal(async { ComponentTerminalOutcome::Succeeded });
+        assert!(matches!(
+            succeeded.outcome().await,
+            ReadinessOutcome::Succeeded
+        ));
+
+        let failed = ComponentExecutionHandle::from_terminal(async {
+            ComponentTerminalOutcome::Failed(SharedError::new(Error::internal_msg(
+                "typed terminal failure",
+            )))
+        });
+        let ReadinessOutcome::Failed(error) = failed.outcome().await else {
+            panic!("expected failed readiness outcome");
+        };
+        assert!(error.to_string().contains("typed terminal failure"));
+
+        let cancelled =
+            ComponentExecutionHandle::from_terminal(async { ComponentTerminalOutcome::Cancelled });
+        assert!(matches!(
+            cancelled.outcome().await,
+            ReadinessOutcome::Cancelled
+        ));
+
+        let superseded =
+            ComponentExecutionHandle::from_terminal(async { ComponentTerminalOutcome::Superseded });
+        assert!(matches!(
+            superseded.outcome().await,
+            ReadinessOutcome::Superseded
+        ));
+    }
+
+    #[tokio::test]
+    async fn readiness_handle_can_be_observed_repeatedly() {
+        let handle = ComponentExecutionHandle::from_terminal(async {
+            ComponentTerminalOutcome::Failed(SharedError::new(Error::internal_msg(
+                "repeatable terminal failure",
+            )))
+        });
+
+        let first = handle.ready().await.unwrap_err();
+        let second = handle.ready().await.unwrap_err();
+        let ReadinessOutcome::Failed(third) = handle.outcome().await else {
+            panic!("expected failed readiness outcome");
+        };
+
+        assert!(first.to_string().contains("repeatable terminal failure"));
+        assert!(second.to_string().contains("repeatable terminal failure"));
+        assert!(third.to_string().contains("repeatable terminal failure"));
+    }
+
+    #[test]
+    fn aggregate_terminal_precedence_is_failure_then_cancellation_then_success() {
+        let mut success_then_cancelled = ComponentRunOutcome::default();
+        success_then_cancelled.merge(ComponentRunOutcome::cancelled());
+        assert!(matches!(
+            success_then_cancelled.terminal,
+            ComponentTerminalOutcome::Cancelled
+        ));
+
+        let mut superseded_then_cancelled = ComponentRunOutcome::superseded();
+        superseded_then_cancelled.merge(ComponentRunOutcome::cancelled());
+        assert!(matches!(
+            superseded_then_cancelled.terminal,
+            ComponentTerminalOutcome::Cancelled
+        ));
+
+        let mut cancelled_then_success = ComponentRunOutcome::cancelled();
+        cancelled_then_success.merge(ComponentRunOutcome::default());
+        assert!(matches!(
+            cancelled_then_success.terminal,
+            ComponentTerminalOutcome::Cancelled
+        ));
+
+        let failure = SharedError::new(Error::internal_msg("aggregate failure"));
+        let mut cancelled_then_failed = ComponentRunOutcome::cancelled();
+        cancelled_then_failed.merge(ComponentRunOutcome::failed(failure));
+        assert!(matches!(
+            cancelled_then_failed.terminal,
+            ComponentTerminalOutcome::Failed(_)
+        ));
+
+        let failure = SharedError::new(Error::internal_msg("aggregate failure"));
+        let mut failed_then_cancelled = ComponentRunOutcome::failed(failure);
+        failed_then_cancelled.merge(ComponentRunOutcome::cancelled());
+        assert!(matches!(
+            failed_then_cancelled.terminal,
+            ComponentTerminalOutcome::Failed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropped_child_guard_aggregates_as_typed_cancellation() {
+        let readiness = ComponentBgChildReadiness::default();
+        let guard = readiness.clone().add_child();
+        readiness.set_build_done();
+        drop(guard);
+
+        let outcome = readiness.readiness().wait().await.clone().unwrap();
+        assert!(matches!(
+            outcome.terminal,
+            ComponentTerminalOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn foreground_failure_is_nonterminal_parent_evidence_that_invalidates_memo() {
+        let failure = SharedError::new(Error::internal_msg("caught foreground failure"));
+        let outcome = ComponentRunOutcome::failed(failure).into_foreground_dependency();
+
+        assert!(matches!(
+            outcome.terminal,
+            ComponentTerminalOutcome::Succeeded
+        ));
+        assert!(outcome.has_exception());
+    }
+
+    #[tokio::test]
+    async fn dropped_foreground_guard_does_not_independently_cancel_parent() {
+        let readiness = ComponentBgChildReadiness::default();
+        let guard = readiness.clone().add_foreground_child();
+        readiness.set_build_done();
+        drop(guard);
+
+        let outcome = readiness.readiness().wait().await.clone().unwrap();
+        assert!(matches!(
+            outcome.terminal,
+            ComponentTerminalOutcome::Succeeded
+        ));
+        assert!(outcome.has_exception());
+    }
 
     #[test]
     fn test_any_active_pop_prune() {

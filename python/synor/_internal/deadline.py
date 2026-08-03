@@ -38,13 +38,15 @@ def timeout(duration: timedelta) -> Iterator[None]:
     if not isinstance(duration, timedelta):
         raise TypeError("timeout() requires a datetime.timedelta")
 
-    token = _current_deadline.set(
-        _current_deadline.get().with_timeout(duration.total_seconds())
-    )
+    previous = _current_deadline.get()
+    _current_deadline.set(previous.with_timeout(duration.total_seconds()))
     try:
         yield
     finally:
-        _current_deadline.reset(token)
+        # Rust/Python future cancellation can resume generator cleanup in a
+        # copied Context. A Token is bound to the Context where it was created
+        # and raises there; restoring the captured value is context-safe.
+        _current_deadline.set(previous)
 
 
 def check_cancellation() -> None:
@@ -71,11 +73,12 @@ def deadline_for_engine() -> DeadlineContext:
 @contextlib.contextmanager
 def restore(deadline: DeadlineContext) -> Iterator[None]:
     """Temporarily restore a previously captured deadline context."""
-    token = _current_deadline.set(deadline)
+    previous = _current_deadline.get()
+    _current_deadline.set(deadline)
     try:
         yield
     finally:
-        _current_deadline.reset(token)
+        _current_deadline.set(previous)
 
 
 @contextlib.contextmanager

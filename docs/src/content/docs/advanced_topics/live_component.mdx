@@ -52,7 +52,7 @@ The `operator` passed to `process_live()` provides five methods:
 
 Triggers a full processing cycle: calls `process()`, submits target states, waits for all children to be ready, and garbage-collects children that are no longer mounted. This is the same mechanism as a traditional component's update cycle.
 
-Exceptions raised inside `process()` (or its descendants) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) — same as background `syn.spawn()` failures — and **do not propagate** to the caller. This lets long-running `process_live` loops (such as periodic refreshers) keep going across transient cycle failures while still surfacing the failure to operators.
+Exceptions raised inside `process()` (or its descendants) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers), then propagate from `update_full()`. Reporting cannot convert a failed cycle into success. Retry-oriented wrappers such as `syn.auto_refresh` explicitly catch post-readiness cycle failures after reporting them; their initial cycle must still succeed.
 
 ### `update()` and `delete()`
 
@@ -60,7 +60,7 @@ Mount or delete individual child components without a full scan. These are concu
 
 When multiple operations target the same subpath, only the latest one (by invocation order) takes effect.
 
-Failures in the mounted child (or in the delete itself) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) with `mount_kind="process_live"` and `stable_path` set to the *child's* path — same shape as background `syn.spawn` failures, never propagated to `handle.ready()`. The live loop is unaffected by child failures.
+Failures in the mounted child (or in the delete itself) are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) with `mount_kind="process_live"` and `stable_path` set to the *child's* path. The returned handle then raises from `ready()`. A live loop that wants to continue must catch that result explicitly.
 
 ### `mark_ready()`
 
@@ -195,7 +195,7 @@ Behavior:
 - The first cycle runs immediately, then `mark_ready` is signaled to the parent.
 - In live mode, the loop continues: `sleep(interval) → run process_fn → ...` with a **fixed delay** between cycles (cycles never overlap; a slow cycle just stretches the gap).
 - In catch-up mode, the first cycle runs and `auto_refresh` terminates — observationally identical to mounting `process_fn` directly. The interval is ignored.
-- Cycle failures are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers) (see `update_full()` above); the loop keeps going.
+- The first cycle must succeed before readiness. Later cycle failures are routed through the parent's [exception handler chain](./exception_handlers#exception-handlers), then explicitly caught by the auto-refresh wrapper so the next cycle can run.
 - **Each cycle reconciles target states against the previous cycle.** If `process_fn` no longer declares some target state (e.g. a row that vanished from your source table), Synor automatically deletes the corresponding target — same garbage-collection model as a regular `syn.spawn` re-run. You write the function as if processing from scratch each time; the framework handles the diff. See [Target State](../programming_guide/target_state) for the underlying model.
 
 The returned class's `__init__` accepts the same positional and keyword arguments as `process_fn` — anything you'd pass to `syn.spawn(process_fn, ...)` you can pass to `syn.spawn(syn.auto_refresh(process_fn, interval=...), ...)`.
@@ -279,9 +279,15 @@ class LiveStream(Protocol[M]):
 class LiveStreamSubscriber(Protocol[M]):
     async def send(self, message: M) -> ReadyAwaitable: ...
     async def mark_ready(self) -> None: ...
+
+class ReadyAwaitable(Protocol):
+    async def ready(self) -> None: ...
+    async def outcome(self) -> ReadinessOutcome: ...
 ```
 
-`send()` is awaited by the producer to obtain a `ReadyAwaitable` handle; the handle's `ready()` is then awaited later (often by an internal offset/commit tracker) to signal that the message has been fully processed. The stream awaits each `send()` inline, so a slow subscriber naturally throttles the producer — at most one message is in flight per stream, bounding adapter memory regardless of producer rate.
+`send()` is awaited by the producer to obtain a `ReadyAwaitable` handle. Durable source connectors await its typed `outcome()` and acknowledge external progress only for `Succeeded`; `Failed`, `Cancelled`, and `Superseded` are not acknowledgements. `ready()` remains available for ordinary callers that prefer raising semantics, but a handle with only `ready()` is not sufficient for broker acknowledgement.
+
+Awaiting `send()` bounds only the call that creates the handle, not the work represented by that handle. A transport must therefore impose its own readiness-admission window and retain each slot until the corresponding message crosses the transport's contiguous acknowledgement frontier. Kafka and Iggy use a private 256-message window: Kafka pauses assigned partitions while full but continues short heartbeat polls, while Iggy stops pulling from its async iterator. This bounds both pending handles and later-completed messages blocked behind an earlier slow offset.
 
 `mark_ready()` must return promptly — it is awaited inline in the producer's loop. Subscribers that need to wait on additional preconditions (e.g. a pending scan) should spawn a background task and return.
 

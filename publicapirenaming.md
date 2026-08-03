@@ -19,4 +19,3 @@ localfs.declare_dir_target	localfs.ensure_dir_target
 .declare_table_target	.ensure_table_target (9 connectors)
 @syn.task(memo=True)	@syn.task(cache=True)
 Deliberately kept: TargetState* family (your call), mount_kind + its "mount"/"mount_each" values (your call), all core.* Rust names, memo_key/memo_fingerprint/MemoStateOutcome, and Tier B generics (App, Environment, ContextKey, map).
-

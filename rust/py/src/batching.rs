@@ -7,6 +7,7 @@
 //! that batch carries the batcher's runner function.
 
 use crate::prelude::*;
+use crate::profile::python_retained_size_bytes;
 use crate::runtime::{PyAsyncContext, PyCallback};
 
 use async_trait::async_trait;
@@ -34,6 +35,7 @@ impl From<PyBatchingOptions> for BatchingOptions {
     fn from(opts: PyBatchingOptions) -> Self {
         BatchingOptions {
             max_batch_size: opts.max_batch_size,
+            ..BatchingOptions::default()
         }
     }
 }
@@ -48,6 +50,10 @@ pub struct PyRunner {
 impl Runner for PyRunner {
     type Input = Py<PyAny>;
     type Output = Py<PyAny>;
+
+    fn input_size_bytes(&self, input: &Self::Input) -> usize {
+        Python::attach(|py| python_retained_size_bytes(input.bind(py)))
+    }
 
     async fn run(
         &self,

@@ -1,6 +1,8 @@
 # Native effect retention and downgrade runbook
 
-This runbook covers the native effect keyspace introduced by schema version 3.
+This runbook covers the native effect keyspace introduced by schema version 3
+and the transactionally maintained obligation summary added in schema version
+4. Version 4 is the current on-disk schema.
 It applies to Synor app databases that may contain metadata-only revocation
 effects. It does not replace the backup, retention, or incident procedures for
 the Phase 2 control-plane `StateStore`.
@@ -35,8 +37,7 @@ synor native-effects compact \
   --confirm-compaction
 ```
 
-Prepare a separate database copy for a binary that predates native schema
-version 3:
+Prepare a separate database copy for a binary that predates native effects:
 
 ```bash
 synor native-effects prepare-downgrade \
@@ -105,9 +106,19 @@ archive is a separate operator decision and is not performed by Synor.
 
 ## Downgrade procedure
 
-A native schema v3 database is a one-way boundary for the original database.
-Never point a pre-native binary at that database. The downgrade command creates
-a new copy and leaves the source untouched.
+A native schema v3 or v4 database is a one-way boundary for the original
+database. Never point a pre-native binary at that database. A v3-aware binary
+must also refuse v4 as a future schema. The downgrade command creates a new
+copy and leaves the source untouched.
+
+Opening an existing v1-v3 app with the current binary upgrades it to v4 in one
+LMDB write transaction. The transaction validates or rebuilds lineage cursors,
+scans retained native effects and query-verified tombstones once, writes the
+`0x58` obligation summary, and advances the `0x38` marker. A crash exposes
+either the complete older schema or the complete v4 summary, never a partially
+authoritative counter. Routine strict-run completion then reads the summary in
+constant time; operator validation and destructive operations still scan and
+cross-check retained records.
 
 Before preparing the copy:
 

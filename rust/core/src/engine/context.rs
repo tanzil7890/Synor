@@ -32,6 +32,10 @@ use crate::engine::profile::Persist;
 
 struct AppContextInner<Prof: EngineProfile> {
     env: Environment<Prof>,
+    /// Host callback context scoped to this app. Callback registrations in a
+    /// host binding may also participate in the environment-wide shutdown
+    /// tracker, but app completion drains only this scope.
+    host_callback_ctx: Prof::HostRuntimeCtx,
     app_store: AppStore,
     app_reg: AppRegistration<Prof>,
     id_sequencer_manager: IdSequencerManager,
@@ -54,7 +58,7 @@ struct AppContextInner<Prof: EngineProfile> {
         Vec<std::sync::Weak<crate::engine::live_component::LiveComponentState<Prof>>>,
     >,
     /// Terminal errors reported by live tasks after their readiness guard has
-    /// already resolved. Strict App completion drains this latch after all
+    /// already resolved. App completion drains this latch after all
     /// live descendants quiesce, so post-ready failures cannot be reduced to
     /// log-only success.
     live_terminal_errors: parking_lot::Mutex<HashMap<u64, Vec<synor_utils::error::SharedError>>>,
@@ -74,9 +78,11 @@ impl<Prof: EngineProfile> AppContext<Prof> {
     ) -> Self {
         let inflight_semaphore =
             max_inflight_components.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+        let host_callback_ctx = Prof::derive_host_callback_context(env.host_runtime_ctx());
         Self {
             inner: Arc::new(AppContextInner {
                 env,
+                host_callback_ctx,
                 app_store,
                 app_reg,
                 id_sequencer_manager: IdSequencerManager::new(),
@@ -161,6 +167,10 @@ impl<Prof: EngineProfile> AppContext<Prof> {
         &self.inner.env
     }
 
+    pub fn host_callback_ctx(&self) -> &Prof::HostRuntimeCtx {
+        &self.inner.host_callback_ctx
+    }
+
     pub fn app_store(&self) -> &AppStore {
         &self.inner.app_store
     }
@@ -176,9 +186,21 @@ impl<Prof: EngineProfile> AppContext<Prof> {
     /// Returns a clone of the current app-level cancellation token.
     ///
     /// The clone stays valid even if the slot is later refreshed via
-    /// `reset_cancellation_token_if_cancelled`.
+    /// `begin_update_cancellation_token`.
     pub fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
         self.inner.cancellation_token.lock().unwrap().clone()
+    }
+
+    /// Install and return a fresh cancellation token for one admitted update.
+    ///
+    /// The app-operation lease must already be held, so no previous update can
+    /// still be running. Always replacing the token prevents a completed
+    /// handle whose Python result delivery is delayed from cancelling a later
+    /// update through a stale clone.
+    pub fn begin_update_cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        let token = crate::engine::runtime::global_cancellation_token().child_token();
+        *self.inner.cancellation_token.lock().unwrap() = token.clone();
+        token
     }
 
     /// Replace the app-level cancellation token with a fresh child of the global
@@ -213,9 +235,51 @@ pub(crate) struct DeclaredTargetState<Prof: EngineProfile> {
     pub child_provider: Option<TargetStateProvider<Prof>>,
 }
 
+// A component is the atomic reconciliation/ownership boundary. Keeping a hard
+// ceiling here prevents a single accidental loop from exhausting the process;
+// larger workloads should shard declarations across stable child components,
+// which also gives the scheduler natural backpressure points.
+const MAX_DECLARED_TARGET_STATES_PER_COMPONENT: usize = 1_048_576;
+const MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT: usize = 512 * 1024 * 1024;
+
+fn reserve_declaration_capacity(
+    current_items: usize,
+    current_bytes: usize,
+    estimated_bytes: usize,
+) -> Result<usize> {
+    if current_items >= MAX_DECLARED_TARGET_STATES_PER_COMPONENT {
+        client_bail!(
+            "one component may declare at most {MAX_DECLARED_TARGET_STATES_PER_COMPONENT} target states; shard this workload across stable child components"
+        );
+    }
+    // An unmeasurable host-owned value is represented conservatively by a very
+    // large estimate. Overflow therefore means "over the working-set limit",
+    // not an internal engine invariant violation.
+    let next_bytes = current_bytes.saturating_add(estimated_bytes);
+    if next_bytes > MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT {
+        client_bail!(
+            "one component's declared target states exceed the approximate {} byte working-set limit; shard this workload across stable child components",
+            MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT
+        );
+    }
+    Ok(next_bytes)
+}
+
 pub(crate) struct ComponentTargetStatesContext<Prof: EngineProfile> {
     pub declared_target_states: BTreeMap<TargetStatePath, DeclaredTargetState<Prof>>,
+    declared_target_state_bytes: usize,
     pub provider_registry: TargetStateProviderRegistry<Prof>,
+}
+
+impl<Prof: EngineProfile> ComponentTargetStatesContext<Prof> {
+    pub(crate) fn reserve_declaration(&mut self, estimated_bytes: usize) -> Result<()> {
+        self.declared_target_state_bytes = reserve_declaration_capacity(
+            self.declared_target_states.len(),
+            self.declared_target_state_bytes,
+            estimated_bytes,
+        )?;
+        Ok(())
+    }
 }
 
 pub struct FnCallMemo<Prof: EngineProfile> {
@@ -650,25 +714,20 @@ pub(crate) struct ComponentBuildContext<Prof: EngineProfile> {
     pub state: Mutex<Option<ComponentBuildingState<Prof>>>,
     pub full_reprocess: bool,
     pub live: bool,
-    /// default (e.g. root `App.update`, `use_mount`'s foreground path,
-    /// `mount_inner_live`'s self-built parent context).
-    pub on_error: Option<crate::engine::component::OnError>,
     pub preview_collector: Option<PreviewActionCollector<Prof>>,
     pub effect_mode: EffectMode,
 }
 
 pub(crate) struct ComponentDeleteContext<Prof: EngineProfile> {
     pub providers: rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
-    /// Error handler that cascades through descendant deletes triggered
-    /// by this delete's GC sweep. `App.drop()` installs a raising handler
-    /// at the root; it propagates down so any descendant failure surfaces
-    /// back through `handle.ready()` to the awaiting caller. `None`
-    /// preserves the "log + swallow" default for callers that don't need
-    /// propagation (e.g. `operator.delete` without a user-installed
-    /// raising handler).
-    ///
-    /// See `specs/core/error_handling.md` for the unified principle.
+    /// Error-reporting observer for this delete operation. Terminal failure
+    /// propagation is independent of whether it is present or returns
+    /// successfully.
     pub on_error: Option<crate::engine::component::OnError>,
+    /// Leave this delete's failure unreported so an enclosing component that
+    /// awaits it can attribute and report the failure once. Recursive/orphan
+    /// GC uses this mode; standalone and operator deletes do not.
+    pub defer_failure_reporting: bool,
     pub effect_mode: EffectMode,
     /// Explicit root App.drop must fail if cleanup loses its provider, even
     /// in compatibility mode. Ordinary compatibility orphan GC preserves its
@@ -695,7 +754,6 @@ impl<Prof: EngineProfile> ComponentProcessingAction<Prof> {
         providers: rpds::HashTrieMapSync<TargetStatePath, TargetStateProvider<Prof>>,
         full_reprocess: bool,
         live: bool,
-        on_error: Option<crate::engine::component::OnError>,
         preview_collector: Option<PreviewActionCollector<Prof>>,
         effect_mode: EffectMode,
     ) -> Self {
@@ -703,6 +761,7 @@ impl<Prof: EngineProfile> ComponentProcessingAction<Prof> {
             state: Mutex::new(Some(ComponentBuildingState {
                 target_states: ComponentTargetStatesContext {
                     declared_target_states: Default::default(),
+                    declared_target_state_bytes: 0,
                     provider_registry: TargetStateProviderRegistry::new(providers),
                 },
                 child_path_set: Default::default(),
@@ -711,7 +770,6 @@ impl<Prof: EngineProfile> ComponentProcessingAction<Prof> {
             })),
             full_reprocess,
             live,
-            on_error,
             preview_collector,
             effect_mode,
         })
@@ -834,6 +892,17 @@ impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
             processing_stats: group.stats().clone(),
             components_readiness: group.readiness().clone(),
             stats_groups: Arc::new(stats_groups),
+        }
+    }
+
+    /// Derive a sibling view whose child mounts report into `readiness` while
+    /// retaining this view's stats and liveness-group membership.
+    pub(crate) fn with_components_readiness(&self, readiness: ComponentBgChildReadiness) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            processing_stats: self.processing_stats.clone(),
+            components_readiness: readiness,
+            stats_groups: self.stats_groups.clone(),
         }
     }
 
@@ -985,43 +1054,21 @@ impl<Prof: EngineProfile> ComponentProcessorContext<Prof> {
         }
     }
 
-    /// Clone of the `on_error` handler installed at the context's creation,
-    /// available for both Build- and Delete-mode contexts.
-    ///
-    /// Read by:
-    /// - `Component::delete`'s spawned task (Delete only — invoke on this
-    ///   component's own failure).
-    /// - The commit-phase GC sweep (both modes — cascade to descendant
-    ///   deletes triggered by this component's submit/commit).
-    ///
-    /// For Delete-mode (`App.drop`'s root), the raising handler installed
-    /// at root cascades down through every recursive delete. For Build-mode
-    /// (a `syn.mount` child whose `process()` no longer declares a
-    /// previously-existing grandchild), the child's user-installed
-    /// exception handler chain — wired through `Component::mount`'s
-    /// `on_error` parameter — sees orphan-delete failures from the
-    /// commit-phase GC sweep.
-    ///
-    /// Returns `None` when no handler was installed (e.g. root `App.update`,
-    /// `use_mount`'s foreground path, `operator.delete` without a
-    /// user-installed raising handler).
-    pub(crate) fn processing_action_on_error(&self) -> Option<crate::engine::component::OnError> {
-        match &self.inner.processing_action {
-            ComponentProcessingAction::Build(b) => b.on_error.clone(),
-            ComponentProcessingAction::Delete(d) => d.on_error.clone(),
-        }
-    }
-
     /// Delete-mode-only on_error accessor. Used by `Component::delete`'s
     /// spawned task to invoke the handler on this component's own
-    /// execution failure (a *Build*-context's on_error is meant for
-    /// orphan-delete cascades, not for invoking on the build's own
-    /// failure — that flows through the `on_error` argument to
-    /// `run_in_background` directly).
+    /// execution failure. Build failures flow through the `on_error`
+    /// argument to `run_in_background` directly.
     pub(crate) fn delete_action_on_error(&self) -> Option<crate::engine::component::OnError> {
         match &self.inner.processing_action {
             ComponentProcessingAction::Delete(d) => d.on_error.clone(),
             ComponentProcessingAction::Build(_) => None,
+        }
+    }
+
+    pub(crate) fn defer_delete_failure_reporting(&self) -> bool {
+        match &self.inner.processing_action {
+            ComponentProcessingAction::Delete(d) => d.defer_failure_reporting,
+            ComponentProcessingAction::Build(_) => false,
         }
     }
 
@@ -1207,7 +1254,10 @@ impl FnCallContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{UserStateCache, UserStateEntry};
+    use super::{
+        MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT, MAX_DECLARED_TARGET_STATES_PER_COMPONENT,
+        UserStateCache, UserStateEntry, reserve_declaration_capacity,
+    };
     use crate::engine::profile::Persist;
     use crate::state::db_schema::StateKind;
     use crate::state::stable_path::{StableKey, StablePath};
@@ -1243,6 +1293,37 @@ mod tests {
     /// Wrap a string as `TestData` for `use_state` / `update_declared` inputs.
     fn td(s: &str) -> TestData {
         TestData(s.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn target_declaration_capacity_enforces_item_and_byte_boundaries() {
+        assert_eq!(
+            reserve_declaration_capacity(
+                MAX_DECLARED_TARGET_STATES_PER_COMPONENT - 1,
+                MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT - 1,
+                1,
+            )
+            .unwrap(),
+            MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT
+        );
+        assert!(
+            reserve_declaration_capacity(MAX_DECLARED_TARGET_STATES_PER_COMPONENT, 0, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("stable child components")
+        );
+        assert!(
+            reserve_declaration_capacity(0, MAX_DECLARED_TARGET_STATE_BYTES_PER_COMPONENT, 1,)
+                .unwrap_err()
+                .to_string()
+                .contains("working-set limit")
+        );
+        assert!(
+            reserve_declaration_capacity(0, 1, usize::MAX)
+                .unwrap_err()
+                .to_string()
+                .contains("working-set limit")
+        );
     }
 
     fn comp_path(name: &str) -> StablePath {

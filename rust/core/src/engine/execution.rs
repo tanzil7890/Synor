@@ -2,7 +2,7 @@ use crate::engine::component::ComponentProcessor;
 use crate::prelude::*;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use crate::engine::context::{
     ComponentProcessingAction, ComponentProcessingMode, ComponentProcessorContext,
@@ -266,6 +266,27 @@ fn borrow_context_memo_states<'a>(
         .collect()
 }
 
+fn estimated_declaration_bytes<Prof: EngineProfile>(
+    path: &TargetStatePath,
+    key: &StableKey,
+    value: &Prof::TargetStateValue,
+    has_child_provider: bool,
+) -> usize {
+    // Includes the map key/value, the cloned path retained by the enclosing
+    // function-memo record, heap-backed key data, and a conservative allowance
+    // for a B-tree node. Provider internals are shared Arcs; a lazy child owns
+    // additional registry state, so account an extra fixed allowance for it.
+    let fixed = std::mem::size_of::<TargetStatePath>()
+        .saturating_mul(2)
+        .saturating_add(std::mem::size_of::<DeclaredTargetState<Prof>>())
+        .saturating_add(64)
+        .saturating_add(if has_child_provider { 256 } else { 0 });
+    fixed
+        .saturating_add(std::mem::size_of_val(path.as_slice()))
+        .saturating_add(key.retained_heap_size_bytes())
+        .saturating_add(Prof::target_state_value_size_bytes(value))
+}
+
 pub fn declare_target_state<Prof: EngineProfile>(
     comp_ctx: &ComponentProcessorContext<Prof>,
     fn_ctx: &FnCallContext,
@@ -274,6 +295,8 @@ pub fn declare_target_state<Prof: EngineProfile>(
     value: Prof::TargetStateValue,
 ) -> Result<()> {
     let target_state_path = provider.target_state_path().concat(&key);
+    let estimated_bytes =
+        estimated_declaration_bytes::<Prof>(&target_state_path, &key, &value, false);
     let declared_target_state = DeclaredTargetState {
         provider,
         item_key: key,
@@ -281,21 +304,23 @@ pub fn declare_target_state<Prof: EngineProfile>(
         child_provider: None,
     };
     comp_ctx.update_building_state(|building_state| {
-        match building_state
+        if let Some(existing) = building_state
             .target_states
             .declared_target_states
-            .entry(target_state_path.clone())
+            .get(&target_state_path)
         {
-            btree_map::Entry::Occupied(entry) => {
-                client_bail!(
-                    "Target state already declared with key: {:?}",
-                    entry.get().item_key
-                );
-            }
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert(declared_target_state);
-            }
+            client_bail!(
+                "Target state already declared with key: {:?}",
+                existing.item_key
+            );
         }
+        building_state
+            .target_states
+            .reserve_declaration(estimated_bytes)?;
+        building_state
+            .target_states
+            .declared_target_states
+            .insert(target_state_path.clone(), declared_target_state);
         Ok(())
     })?;
     fn_ctx.update(|inner| inner.target_state_paths.push(target_state_path));
@@ -322,7 +347,39 @@ pub fn declare_target_state_with_child<Prof: EngineProfile>(
     key: StableKey,
     value: Prof::TargetStateValue,
 ) -> Result<TargetStateProvider<Prof>> {
+    let target_state_path = provider.target_state_path().concat(&key);
+    let estimated_bytes =
+        estimated_declaration_bytes::<Prof>(&target_state_path, &key, &value, true);
     let child_provider = comp_ctx.update_building_state(|building_state| {
+        if let Some(existing) = building_state
+            .target_states
+            .declared_target_states
+            .get(&target_state_path)
+        {
+            client_bail!(
+                "Target state already declared with key: {:?}",
+                existing.item_key
+            );
+        }
+        if building_state
+            .target_states
+            .provider_registry
+            .providers
+            .contains_key(&target_state_path)
+        {
+            client_bail!(
+                "Target state provider already registered for path: {:?}",
+                target_state_path
+            );
+        }
+
+        // Capacity errors are recoverable client errors and may be caught by
+        // user code. Perform every fallible preflight before registering the
+        // lazy provider so a caught error cannot poison a later declaration of
+        // the same path.
+        building_state
+            .target_states
+            .reserve_declaration(estimated_bytes)?;
         let child_provider = building_state
             .target_states
             .provider_registry
@@ -333,21 +390,10 @@ pub fn declare_target_state_with_child<Prof: EngineProfile>(
             value,
             child_provider: Some(child_provider.clone()),
         };
-        match building_state
+        building_state
             .target_states
             .declared_target_states
-            .entry(child_provider.target_state_path().clone())
-        {
-            btree_map::Entry::Occupied(entry) => {
-                client_bail!(
-                    "Target state already declared with key: {:?}",
-                    entry.get().item_key
-                );
-            }
-            btree_map::Entry::Vacant(entry) => {
-                entry.insert(declared_target_state);
-            }
-        }
+            .insert(target_state_path, declared_target_state);
         Ok(child_provider)
     })?;
     fn_ctx.update(|inner| {
@@ -583,24 +629,9 @@ impl<Prof: EngineProfile> Committer<Prof> {
     }
 
     async fn launch_child_component_gc(&self) -> Result<()> {
-        // Cascade the parent's on_error to descendant orphan deletes.
-        //
-        // - Delete-mode parent (recursive cascade from `App.drop()`'s
-        //   root delete): the raising on_error propagates so any
-        //   descendant failure surfaces back through `handle.ready()`.
-        // - Build-mode parent (orphan deletes during a normal update,
-        //   triggered by the parent's `process()` no longer declaring a
-        //   previously-existing child): the on_error installed on the
-        //   parent's build context — same handler `Component::mount`
-        //   wires for the child's own task failure — sees orphan-delete
-        //   failures too.
-        // - No installed handler (root `App.update`, `use_mount`,
-        //   `operator.delete` without a chain): `None` preserves the
-        //   "log + swallow" default.
-        //
-        // The `Arc` makes cloning cheap regardless of how many
-        // descendants we spawn.
-        let cascaded_on_error = self.component_ctx.processing_action_on_error();
+        // Cleanup handles are awaited below. Defer reporting at each recursive
+        // delete boundary so the failure reaches the original enclosing
+        // component's observer once, with no leaf/ancestor duplication.
         // Standalone snapshot read — `list_tombstones` opens its own
         // fresh `RoTxn` internally.
         let tombstones = self.app_store.list_tombstones(&self.component_path).await?;
@@ -622,25 +653,13 @@ impl<Prof: EngineProfile> Committer<Prof> {
                 } else {
                     self.component_ctx.effect_mode()
                 };
-            // Strict cleanup must fail the enclosing operation even when a
-            // foreground context has no handler or a user handler swallows
-            // the error. A legacy sink can reject before a native intent
-            // exists, so the final unresolved-count scan cannot recover this
-            // propagation signal on its own.
-            let cleanup_on_error = if effect_mode == EffectMode::Strict {
-                Some(Arc::new(|err| {
-                    Box::pin(async move { Err(err) })
-                        as futures::future::BoxFuture<'static, Result<()>>
-                }) as crate::engine::component::OnError)
-            } else {
-                cascaded_on_error.clone()
-            };
             let delete_ctx = component.new_processor_context_for_delete(
                 self.target_states_providers.clone(),
                 Some(&self.component_ctx),
                 self.component_ctx.processing_stats().clone(),
                 self.component_ctx.host_ctx().clone(),
-                cleanup_on_error,
+                None,
+                true,
                 effect_mode,
                 false,
                 tombstone.generation,
@@ -651,16 +670,9 @@ impl<Prof: EngineProfile> Committer<Prof> {
                 tombstone.generation,
             ));
         }
-        // Await each handle so descendant failures (when on_error
-        // propagates) reach our own task_result, which the parent
-        // delete's spawned task surfaces via `handle.ready()` —
-        // eventually back to `app.drop()`. Short-circuits on first Err;
-        // remaining children continue running (orphan tasks), but their
-        // tombstones survive for the next reconcile to retry. With
-        // `on_error = None`, every handle resolves Ok regardless of
-        // child failures, so this is a no-op cost in that case. Await every
-        // launched cleanup so one early error cannot hide later tombstone
-        // failure metadata.
+        // Await every launched cleanup so one early error cannot hide later
+        // tombstone failure metadata. The first terminal error is returned to
+        // the enclosing component, whose observer reports it once.
         let mut first_error = None;
         for (handle, relative_path, generation) in handles {
             if let Err(error) = handle.ready().await {
@@ -2098,7 +2110,7 @@ pub(crate) async fn submit<Prof: EngineProfile>(
     // Sink apply. On failure we clear the stage marker so a
     // subsequent precommit doesn't see a stale token from this
     // attempt.
-    let host_runtime_ctx = comp_ctx.app_ctx().env().host_runtime_ctx();
+    let host_runtime_ctx = comp_ctx.app_ctx().host_callback_ctx();
     let mut native_effect_ids_to_finalize = Vec::new();
     let mut blocked_native_effect_ids_to_resolve = Vec::new();
     for (sink, input) in actions_by_sinks {

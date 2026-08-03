@@ -631,7 +631,13 @@ class _DocHandler(syn.TargetHandler[_DocValue, bytes]):
     def __init__(self, db_key: str, collection_name: str) -> None:
         self._db_key = db_key
         self._collection_name = collection_name
-        self._sink = syn.TargetActionSink[_DocAction, None].from_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink[_DocAction, None].from_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_DocAction]
@@ -798,7 +804,11 @@ def _apply_collection_actions(
 
 
 _collection_action_sink = syn.TargetActionSink[_CollectionAction, _DocHandler].from_fn(
-    _apply_collection_actions
+    _apply_collection_actions,
+    capabilities=syn.TargetSinkCapabilities(
+        batch_atomicity="none",
+        apply_ordering="unordered",
+    ),
 )
 
 

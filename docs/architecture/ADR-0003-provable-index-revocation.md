@@ -172,14 +172,17 @@ administrator.
 Each existing per-app LMDB database can now contain:
 
 - one `DbEntryKey::NativeSchemaVersion` singleton at top-level tag `0x38`,
-  whose current value is schema version 3;
+  whose current value is schema version 4;
 - a `DbEntryKey::NativeEffect` evidence keyspace under top-level tag `0x40`,
   keyed by a domain-separated fingerprint of an engine-owned evidence ID;
 - a `DbEntryKey::NativeEffectObligation` allocation-cursor keyspace under
   top-level tag `0x48`, keyed by opaque tracking locator and source
   generation; and
 - a `DbEntryKey::NativeEffectLineage` cursor keyspace under top-level tag
-  `0x50`, keyed by opaque tracking locator.
+  `0x50`, keyed by opaque tracking locator; and
+- one `DbEntryKey::NativeObligationSummary` singleton at top-level tag `0x58`,
+  containing transactionally maintained unresolved-effect status totals and
+  the count of query-verified cleanup tombstones.
 
 Native effect record version 2 stores the safe descriptor, engine evidence ID,
 opaque tracking fingerprint, verification policy, controlled cause and error
@@ -199,9 +202,14 @@ evidence field and decode conservatively with their descriptor action ID as
 the legacy evidence ID.
 
 The first native effect write to an untouched database installs schema version
-3 in the same transaction. Existing schema-v1 and schema-v2 databases remain
+4 in the same transaction. Existing schema-v1 and schema-v2 databases remain
 readable; their next native write performs one bounded evidence scan, creates
-ordinary per-locator lineage cursors, and installs the v3 marker atomically.
+ordinary per-locator lineage cursors, builds the obligation summary, and
+installs the v4 marker atomically. Existing schema-v3 databases validate their
+cursors, scan retained evidence and tombstones once, and install the summary
+and v4 marker atomically. A crash exposes either the complete old schema or the
+complete v4 summary. Successful strict-run completion thereafter checks the
+transactional summary instead of scanning all retained evidence.
 A missing marker is the pre-feature compatibility state only when the effect,
 obligation, and lineage keyspaces are all empty. Native reads/writes, strict
 completion checks, inspection, and protected drop refuse a future schema or
@@ -373,7 +381,8 @@ This feature is not:
 - evidence that the one-million-action correlation benchmark or compatibility
   overhead benchmark has passed;
 - a mechanism by which a binary released before native schema version 3 can
-  discover and refuse that future schema.
+  discover and refuse that future schema. Schema-v3-aware binaries do reject
+  current schema v4 as a future version.
 
 Direct vector-client queries that bypass the supported retrieval guard are
 outside the query-denial guarantee.
@@ -408,7 +417,7 @@ tombstones in place for inspection and retry. Keep suppression active until a
 version-aware recovery operation verifies a newer authorization.
 
 Do not open an app database whose native keyspace has been activated or
-upgraded to schema version 3 with an older binary that predates that schema.
+upgraded to schema version 3 or 4 with a binary that predates that schema.
 No automatic downgrade/export tool is implemented in this milestone. Rollback
 must never delete native evidence or suppression state to make the older
 release start.

@@ -614,13 +614,11 @@ content = await amazon_s3.read(client, "s3://my-bucket/path/to/file.json")
 ### As Source (Live)
 
 ```python
-from confluent_kafka.aio import AIOConsumer
 from synor.connectors import kafka
 
-consumer = AIOConsumer({
+consumer = kafka.create_consumer({
     "bootstrap.servers": "localhost:9092",
     "group.id": "my-group",
-    "enable.auto.commit": "false",
     "auto.offset.reset": "earliest",
 })
 
@@ -628,6 +626,7 @@ items = kafka.topic_as_map(consumer, ["my-topic"])
 await syn.spawn_each(process_message, items, target_table)
 ```
 
+`create_consumer()` forces automatic commit and automatic offset storage off.
 `topic_as_map()` returns a `LiveMapFeed`, which `spawn_each()` auto-detects for live mode.
 
 ### As Target

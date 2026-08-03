@@ -21,25 +21,24 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from dotenv import load_dotenv
-from typing import Annotated, AsyncIterator
+from typing import Annotated
 
 import asyncpg
 import oci  # type: ignore[import-not-found]
+import synor as syn
 from confluent_kafka.aio import AIOConsumer  # type: ignore[import-not-found]
+from dotenv import load_dotenv
 from numpy.typing import NDArray
 from oci.object_storage import ObjectStorageClient  # type: ignore[import-not-found]
 from pgvector.asyncpg import register_vector
-
-import synor as syn
 from synor.connectors import kafka, oci_object_storage, postgres
 from synor.ops.sentence_transformers import SentenceTransformerEmbedder
 from synor.ops.text import RecursiveSplitter
 from synor.resources.chunk import Chunk
 from synor.resources.file import PatternFilePathMatcher
 from synor.resources.id import IdGenerator
-
 
 DATABASE_URL = os.getenv("POSTGRES_URL", "postgres://synor:synor@localhost/synor")
 TABLE_NAME = "oci_object_storage_doc_embeddings"
@@ -85,7 +84,8 @@ def _build_oci_client() -> ObjectStorageClient:
 
 def _build_streaming_consumer() -> AIOConsumer | None:
     """If OCI Streaming env vars are set, build an unsubscribed AIOConsumer
-    pointed at the OCI Streaming endpoint. Returns None for catch-up-only mode.
+    pointed at the OCI Streaming endpoint. The stream takes ownership and closes
+    it after watching. Returns None for catch-up-only mode.
     """
     if not (
         OCI_STREAMING_BOOTSTRAP_SERVERS
@@ -95,7 +95,7 @@ def _build_streaming_consumer() -> AIOConsumer | None:
     ):
         return None
 
-    return AIOConsumer(
+    return kafka.create_consumer(
         {
             "bootstrap.servers": OCI_STREAMING_BOOTSTRAP_SERVERS,
             "security.protocol": "SASL_SSL",
@@ -104,7 +104,6 @@ def _build_streaming_consumer() -> AIOConsumer | None:
             "sasl.password": OCI_STREAMING_AUTH_TOKEN,
             "group.id": OCI_STREAMING_GROUP_ID,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": False,
         }
     )
 

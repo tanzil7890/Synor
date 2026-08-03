@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import weakref
+from dataclasses import dataclass
 from typing import (
     Any,
     Collection,
@@ -11,6 +12,7 @@ from typing import (
     Protocol,
     Sequence,
     TypeAlias,
+    cast,
     overload,
 )
 
@@ -32,6 +34,24 @@ ActionT = TypeVar("ActionT")
 ActionT_co = TypeVar("ActionT_co", covariant=True)
 ActionT_contra = TypeVar("ActionT_contra", contravariant=True)
 _NativeEffectDescriptorTuple: TypeAlias = tuple[str, str, str, int, str]
+_SinkCapabilitiesTuple: TypeAlias = tuple[
+    int,
+    str,
+    str,
+    str,
+    str,
+    str,
+    str,
+    int | None,
+    int | None,
+]
+_SinkQueueStatsTuple: TypeAlias = tuple[int, int, int, int, int, int]
+_SinkBatchAtomicity: TypeAlias = Literal["unknown", "none", "per_action", "per_apply"]
+_SinkCapabilitySupport: TypeAlias = Literal["unknown", "unsupported", "supported"]
+_SinkApplyOrdering: TypeAlias = Literal["unknown", "unordered", "input_order"]
+_SinkCompletionVerification: TypeAlias = Literal[
+    "unknown", "unverified", "acknowledged", "query_verified"
+]
 
 ValueT = TypeVar("ValueT", default=Any)
 ValueT_contra = TypeVar("ValueT_contra", contravariant=True, default=Any)
@@ -145,6 +165,103 @@ class AsyncTargetActionSinkFn(Protocol[ActionT_contra, OptChildHandlerT_co]):
     ) -> Sequence[ChildTargetDef[Any] | None] | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class TargetSinkCapabilities:
+    """Machine-readable operational guarantees for one target sink.
+
+    Defaults are deliberately conservative. ``unknown`` means the connector
+    has not certified the behavior; it is not treated as support.
+    """
+
+    schema_version: int = 1
+    batch_atomicity: _SinkBatchAtomicity = "unknown"
+    idempotent_replay: _SinkCapabilitySupport = "unknown"
+    segmented_replay_safe: _SinkCapabilitySupport = "unknown"
+    apply_ordering: _SinkApplyOrdering = "unknown"
+    cancellation_safe: _SinkCapabilitySupport = "unknown"
+    completion_verification: _SinkCompletionVerification = "unknown"
+    max_batch_actions: int | None = None
+    max_batch_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("unsupported target sink capability schema_version")
+        if self.batch_atomicity not in {
+            "unknown",
+            "none",
+            "per_action",
+            "per_apply",
+        }:
+            raise ValueError("invalid target sink batch_atomicity")
+        for name in (
+            "idempotent_replay",
+            "segmented_replay_safe",
+            "cancellation_safe",
+        ):
+            if getattr(self, name) not in {"unknown", "unsupported", "supported"}:
+                raise ValueError(f"invalid target sink {name}")
+        if (
+            self.segmented_replay_safe == "supported"
+            and self.idempotent_replay != "supported"
+        ):
+            raise ValueError(
+                "segmented_replay_safe requires idempotent_replay='supported'"
+            )
+        if self.apply_ordering not in {"unknown", "unordered", "input_order"}:
+            raise ValueError("invalid target sink apply_ordering")
+        if self.completion_verification not in {
+            "unknown",
+            "unverified",
+            "acknowledged",
+            "query_verified",
+        }:
+            raise ValueError("invalid target sink completion_verification")
+        for name in ("max_batch_actions", "max_batch_bytes"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 1
+            ):
+                raise ValueError(f"{name} must be a positive integer or None")
+
+    def _core_tuple(self) -> _SinkCapabilitiesTuple:
+        return (
+            self.schema_version,
+            self.batch_atomicity,
+            self.idempotent_replay,
+            self.segmented_replay_safe,
+            self.apply_ordering,
+            self.cancellation_safe,
+            self.completion_verification,
+            self.max_batch_actions,
+            self.max_batch_bytes,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "batch_atomicity": self.batch_atomicity,
+            "idempotent_replay": self.idempotent_replay,
+            "segmented_replay_safe": self.segmented_replay_safe,
+            "apply_ordering": self.apply_ordering,
+            "cancellation_safe": self.cancellation_safe,
+            "completion_verification": self.completion_verification,
+            "max_batch_actions": self.max_batch_actions,
+            "max_batch_bytes": self.max_batch_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TargetSinkQueueStats:
+    """Point-in-time target sink queue pressure metrics."""
+
+    ongoing_batches: int
+    queued_batches: int
+    queued_inputs: int
+    in_flight_inputs: int
+    in_flight_bytes: int
+    capacity_waiters: int
+
+
 class TargetActionSink(Generic[ActionT_contra, OptChildHandlerT_co]):
     __slots__ = ("_core",)
     _core: core.TargetActionSink
@@ -155,16 +272,28 @@ class TargetActionSink(Generic[ActionT_contra, OptChildHandlerT_co]):
     @staticmethod
     def from_fn(
         fn: TargetActionSinkFn[ActionT_contra, OptChildHandlerT_co],
+        *,
+        capabilities: TargetSinkCapabilities | None = None,
     ) -> "TargetActionSink[ActionT_contra, OptChildHandlerT_co]":
         canonical = _SYNC_FN_DEDUPER.get_canonical(fn)
-        return TargetActionSink(core.TargetActionSink.new_sync(canonical))
+        return TargetActionSink(
+            core.TargetActionSink.new_sync(
+                canonical, None if capabilities is None else capabilities._core_tuple()
+            )
+        )
 
     @staticmethod
     def from_async_fn(
         fn: AsyncTargetActionSinkFn[ActionT_contra, OptChildHandlerT_co],
+        *,
+        capabilities: TargetSinkCapabilities | None = None,
     ) -> "TargetActionSink[ActionT_contra, OptChildHandlerT_co]":
         canonical = _ASYNC_FN_DEDUPER.get_canonical(fn)
-        return TargetActionSink(core.TargetActionSink.new_async(canonical))
+        return TargetActionSink(
+            core.TargetActionSink.new_async(
+                canonical, None if capabilities is None else capabilities._core_tuple()
+            )
+        )
 
     @staticmethod
     def _from_verified_wrapper(
@@ -172,6 +301,38 @@ class TargetActionSink(Generic[ActionT_contra, OptChildHandlerT_co]):
     ) -> "TargetActionSink[ActionT_contra, OptChildHandlerT_co]":
         canonical = _ASYNC_FN_DEDUPER.get_canonical(fn)
         return TargetActionSink(core.TargetActionSink._new_verified_wrapper(canonical))
+
+    @property
+    def capabilities(self) -> TargetSinkCapabilities:
+        (
+            schema_version,
+            batch_atomicity,
+            idempotent_replay,
+            segmented_replay_safe,
+            apply_ordering,
+            cancellation_safe,
+            completion_verification,
+            max_batch_actions,
+            max_batch_bytes,
+        ) = self._core.capabilities()
+        return TargetSinkCapabilities(
+            schema_version=schema_version,
+            batch_atomicity=cast(_SinkBatchAtomicity, batch_atomicity),
+            idempotent_replay=cast(_SinkCapabilitySupport, idempotent_replay),
+            segmented_replay_safe=cast(_SinkCapabilitySupport, segmented_replay_safe),
+            apply_ordering=cast(_SinkApplyOrdering, apply_ordering),
+            cancellation_safe=cast(_SinkCapabilitySupport, cancellation_safe),
+            completion_verification=cast(
+                _SinkCompletionVerification, completion_verification
+            ),
+            max_batch_actions=max_batch_actions,
+            max_batch_bytes=max_batch_bytes,
+        )
+
+    @property
+    def queue_stats(self) -> TargetSinkQueueStats:
+        stats: _SinkQueueStatsTuple = self._core.queue_stats()
+        return TargetSinkQueueStats(*stats)
 
 
 class _ObjectDeduper:

@@ -39,12 +39,35 @@ The LMDB database has two tunable settings, grouped under `syn.LmdbSettings` and
 | Setting | Default | Env Variable | Description |
 |---------|---------|-------------|-------------|
 | `max_dbs` | `1024` | `SYNOR_LMDB_MAX_DBS` | Maximum number of named LMDB databases. Must be &ge; 1. |
-| `map_size` | `4294967296` (4 GiB) | `SYNOR_LMDB_MAP_SIZE` | Maximum size of the LMDB memory map in bytes. Must be &gt; 0; rounded up to the nearest multiple of the system page size. |
+| `map_size` | `4294967296` (4 GiB) | `SYNOR_LMDB_MAP_SIZE` | Initial LMDB memory-map size. Must be &gt; 0 and is rounded up to the nearest OS page. |
 
 ### When to adjust
 
-- **Increase `map_size`** if you encounter LMDB "map full" errors. This happens when the accumulated internal state (target states + memoization cache) exceeds 4 GiB. On 64-bit systems, `map_size` is a virtual address space reservation — setting it larger than needed is safe and does not consume physical memory.
+- **Set a larger initial `map_size`** when you know a bulk load will immediately exceed 4 GiB. Synor automatically adopts map growth published by another process and doubles the map after `MDB_MAP_FULL`; a durable resize lock serializes competing processes. Starting larger avoids resize retries but is not required for correctness. On 64-bit systems this is a virtual-address reservation, not immediate physical-memory allocation.
 - **Increase `max_dbs`** if you have an unusually large number of apps sharing a single database directory.
+
+All Synor read and write transaction entry points participate in the same
+process-wide transaction coordinator. Resizing waits for local transactions to
+drain, takes the cross-process resize lock, adopts any size another process has
+already published, and only then grows when necessary. Do not open independent
+LMDB write transactions around Synor's database files.
+
+### Native-effect schema upgrades
+
+Native-effect metadata currently uses schema version 4. Opening an app written
+with versions 1–3 performs a one-time, atomic migration that validates existing
+lineage cursors and builds transactionally maintained unresolved-effect and
+query-verified-tombstone totals. A crash exposes either the complete older
+schema or the complete v4 summary. Strict no-op completion is then constant
+time with respect to retained effect history, while inspection, compaction, and
+drop continue to scan and cross-check the underlying evidence before any
+destructive action.
+
+This is a one-way in-place upgrade. Take a consistent backup first, upgrade all
+processes that share the environment together, and do not reopen a v4 database
+with a v3 or older binary. Use the copy-only
+`synor native-effects prepare-downgrade` workflow when an older binary is
+required; it leaves the source database unchanged.
 
 ### Configuration
 

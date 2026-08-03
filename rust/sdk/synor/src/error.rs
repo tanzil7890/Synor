@@ -20,6 +20,15 @@ pub enum Error {
     #[error("{0}")]
     Engine(String),
 
+    /// A structured core-engine error crossing an internal SDK boundary.
+    ///
+    /// This keeps cancellation, reporting, and host-error metadata intact
+    /// while a nested live component propagates through user-facing SDK
+    /// futures. It is not constructed directly by SDK users.
+    #[doc(hidden)]
+    #[error("{0}")]
+    Core(synor_utils::error::Error),
+
     /// The active Synor deadline has expired.
     #[error("Synor timeout deadline exceeded")]
     DeadlineExceeded,
@@ -47,12 +56,17 @@ impl Error {
     }
 
     pub fn is_deadline_exceeded(&self) -> bool {
-        matches!(self, Error::DeadlineExceeded)
+        match self {
+            Error::DeadlineExceeded => true,
+            Error::Core(error) => error.is_deadline_exceeded(),
+            _ => false,
+        }
     }
 
     pub(crate) fn into_core(self) -> synor_utils::error::Error {
         match self {
             Error::DeadlineExceeded => synor_utils::error::Error::deadline_exceeded(),
+            Error::Core(error) => error,
             other => synor_utils::error::Error::internal_msg(other.to_string()),
         }
     }
@@ -61,9 +75,9 @@ impl Error {
 /// Convert from synor_utils::error::Error (used by core).
 impl From<synor_utils::error::Error> for Error {
     fn from(e: synor_utils::error::Error) -> Self {
-        if e.is_deadline_exceeded() {
+        if e.is_deadline_exceeded() && !e.is_reported() {
             return Error::DeadlineExceeded;
         }
-        Error::Engine(format!("{e}"))
+        Error::Core(e)
     }
 }

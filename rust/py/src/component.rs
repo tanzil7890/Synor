@@ -15,7 +15,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use synor_core::engine::{
     component::{
         ComponentExecutionHandle, ComponentMountRunHandle, ComponentProcessor,
-        ComponentProcessorInfo,
+        ComponentProcessorInfo, ReadinessOutcome,
     },
     context::{ComponentProcessorContext, MemoStatesPayload},
     runtime::get_runtime,
@@ -222,7 +222,7 @@ pub fn mount_async<'py>(
     // run starts, so the group's liveness tracking can't miss it.
     comp_ctx.0.push_active_member(&child);
 
-    let host_runtime_ctx = comp_ctx.0.app_ctx().env().host_runtime_ctx().clone();
+    let host_runtime_ctx = comp_ctx.0.app_ctx().host_callback_ctx().clone();
     let on_error = build_on_error(host_runtime_ctx, handler_callback);
 
     future_into_py(py, async move {
@@ -230,7 +230,7 @@ pub fn mount_async<'py>(
             .mount(&comp_ctx.0, processor, on_error, None)
             .await
             .into_py_result()?;
-        Ok(PyComponentMountHandle(Some(handle)))
+        Ok(PyComponentMountHandle::from_handle(handle))
     })
 }
 
@@ -272,29 +272,52 @@ impl PyComponentMountRunHandle {
 }
 
 #[pyclass(name = "ComponentMountHandle")]
-pub struct PyComponentMountHandle(Option<ComponentExecutionHandle>);
+pub struct PyComponentMountHandle(ComponentExecutionHandle);
 
 impl PyComponentMountHandle {
     pub fn from_handle(handle: ComponentExecutionHandle) -> Self {
-        Self(Some(handle))
-    }
-
-    fn take_handle(&mut self) -> PyResult<ComponentExecutionHandle> {
-        self.0.take().ok_or_else(|| {
-            pyo3::exceptions::PyRuntimeError::new_err("Handle has already been consumed")
-        })
+        Self(handle)
     }
 }
 
 #[pymethods]
 impl PyComponentMountHandle {
-    pub fn ready_async<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let handle = self.take_handle()?;
-        future_into_py(py, async move { handle.ready().await.into_py_result() })
+    pub fn ready_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.0.clone();
+        future_into_py(
+            py,
+            async move { handle.ready().await.into_detached_py_result() },
+        )
     }
 
-    pub fn wait_until_ready<'py>(&mut self, py: Python<'py>) -> PyResult<()> {
-        let handle = self.take_handle()?;
-        py.detach(|| get_runtime().block_on(async move { handle.ready().await.into_py_result() }))
+    pub fn outcome_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let handle = self.0.clone();
+        future_into_py(py, async move {
+            let (kind, error) = match handle.outcome().await {
+                ReadinessOutcome::Succeeded => ("succeeded", None),
+                ReadinessOutcome::Failed(error) => {
+                    let error = Err::<(), _>(error)
+                        // This is an internal bridge to SpawnHandle, not the
+                        // public outcome boundary. Preserve the one-crossing
+                        // reporting marker so Python can cache it before it
+                        // releases the native handle; SpawnHandle removes the
+                        // marker before exposing the exception to user code.
+                        .into_detached_py_result()
+                        .expect_err("failed readiness outcome must remain an error");
+                    let error = Python::attach(|py| error.into_value(py).into_any());
+                    ("failed", Some(error))
+                }
+                ReadinessOutcome::Cancelled => ("cancelled", None),
+                ReadinessOutcome::Superseded => ("superseded", None),
+            };
+            Ok((kind, error))
+        })
+    }
+
+    pub fn wait_until_ready<'py>(&self, py: Python<'py>) -> PyResult<()> {
+        let handle = self.0.clone();
+        py.detach(|| {
+            get_runtime().block_on(async move { handle.ready().await.into_detached_py_result() })
+        })
     }
 }

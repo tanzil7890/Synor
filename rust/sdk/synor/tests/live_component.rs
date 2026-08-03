@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use synor::{
     App, Ctx, Error, LiveComponent, LiveComponentOperator, LiveMapFeed, LiveMapSubscriber,
-    LiveMapView, MountKind, Result, StableKey, TargetAction, TargetActionSink, TargetHandler,
-    TargetReconcileOutput, UpdateOptions, async_trait, declare_target_state,
+    LiveMapView, MountKind, ReadinessOutcome, Result, StableKey, TargetAction, TargetActionSink,
+    TargetHandler, TargetReconcileOutput, UpdateOptions, async_trait, declare_target_state,
     register_root_target_states_provider,
 };
 use tokio::sync::Notify;
@@ -170,6 +170,26 @@ async fn mount_live_catch_up_runs_process_once() {
 
     // Default process_live → one full pass, then mark_ready (terminates in
     // catch-up mode).
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn mount_live_outcome_exposes_typed_success() {
+    let (app, _dir) = temp_app("live_typed_success").await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_update = calls.clone();
+
+    app.update(move |ctx| {
+        let calls = calls_for_update.clone();
+        async move {
+            let outcome = ctx.mount_live_outcome(&"comp", Counter { calls }).await;
+            assert!(matches!(outcome, ReadinessOutcome::Succeeded));
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
@@ -333,24 +353,27 @@ impl LiveComponent for Failing {
 }
 
 #[tokio::test]
-async fn mount_live_exception_handler_swallows_failure() {
-    let (app, _dir) = temp_app("live_handler_swallow").await;
+async fn mount_live_exception_handler_reports_but_does_not_swallow_failure() {
+    let (app, _dir) = temp_app("live_handler_observe").await;
     let seen: Arc<Mutex<Vec<MountKind>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_for_update = seen.clone();
 
-    // Handler returns Ok → swallows → mount succeeds.
-    app.update(move |ctx| {
-        let seen = seen_for_update.clone();
-        async move {
-            ctx.mount_live_with_handler(&"comp", Failing, move |_err, exc| {
-                seen.lock().unwrap().push(exc.mount_kind);
-                Ok(())
-            })
-            .await
-        }
-    })
-    .await
-    .expect("swallowing handler should make the mount succeed");
+    // Handler returns Ok after reporting, but the mount remains failed.
+    let result = app
+        .update(move |ctx| {
+            let seen = seen_for_update.clone();
+            async move {
+                ctx.mount_live_with_handler(&"comp", Failing, move |_err, exc| {
+                    seen.lock().unwrap().push(exc.mount_kind);
+                    Ok(())
+                })
+                .await
+            }
+        })
+        .await;
+
+    let error = result.expect_err("a reporting handler cannot make the mount succeed");
+    assert!(error.to_string().contains("process boom"));
 
     let seen = seen.lock().unwrap();
     assert_eq!(*seen, vec![MountKind::UpdateFull]);
@@ -376,21 +399,28 @@ async fn exception_handler_chain_inherited_by_nested_components() {
     let seen_for_update = seen.clone();
 
     // Only the PARENT installs a handler. The nested child's failure should
-    // still reach it through the inherited handler chain (and be swallowed).
-    app.update(move |ctx| {
-        let seen = seen_for_update.clone();
-        async move {
-            ctx.mount_live_with_handler(&"parent", ParentMountingFailingChild, move |err, exc| {
-                seen.lock()
-                    .unwrap()
-                    .push(format!("{}|{err}", exc.stable_path));
-                Ok(())
-            })
-            .await
-        }
-    })
-    .await
-    .expect("parent handler should swallow the nested child's failure");
+    // still reach it through the inherited handler chain and remain terminal.
+    let result = app
+        .update(move |ctx| {
+            let seen = seen_for_update.clone();
+            async move {
+                ctx.mount_live_with_handler(
+                    &"parent",
+                    ParentMountingFailingChild,
+                    move |err, exc| {
+                        seen.lock()
+                            .unwrap()
+                            .push(format!("{}|{err}", exc.stable_path));
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        })
+        .await;
+
+    let error = result.expect_err("an ancestor reporting handler cannot swallow failure");
+    assert!(error.to_string().contains("process boom"));
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "parent handler should fire exactly once");
@@ -432,7 +462,7 @@ impl LiveComponent for AutoRefreshFailingCycle {
 }
 
 #[tokio::test]
-async fn auto_refresh_cycle_failure_uses_inherited_handler_and_continues() {
+async fn auto_refresh_cycle_failure_uses_inherited_handler_and_retries() {
     let (app, _dir) = temp_app("auto_refresh_handler_chain").await;
     let calls = Arc::new(AtomicUsize::new(0));
     let third_call = Arc::new(Notify::new());
@@ -484,25 +514,62 @@ async fn auto_refresh_cycle_failure_uses_inherited_handler_and_continues() {
     let _ = tokio::time::timeout(Duration::from_secs(5), handle.result()).await;
 }
 
+struct PanicsAfterReady;
+
+#[async_trait]
+impl LiveComponent for PanicsAfterReady {
+    async fn process(&self, _ctx: Ctx) -> Result<()> {
+        Ok(())
+    }
+
+    async fn process_live(&self, operator: LiveComponentOperator) -> Result<()> {
+        operator.update_full().await?;
+        operator.mark_ready().await;
+        panic!("post-ready panic");
+    }
+}
+
 #[tokio::test]
-async fn mount_live_exception_handler_propagates_failure() {
+async fn process_live_panic_after_readiness_is_terminal() {
+    let (app, _dir) = temp_app("live_post_ready_panic").await;
+    let handle = app
+        .start_update_with_options(
+            UpdateOptions {
+                live: true,
+                ..UpdateOptions::default()
+            },
+            move |ctx| async move { ctx.mount_live(&"panic", PanicsAfterReady).await },
+        )
+        .unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), handle.result())
+        .await
+        .expect("live app did not terminate after process_live panic");
+    let error = result.expect_err("post-ready process_live panic must fail the app");
+    assert!(error.to_string().contains("post-ready panic"));
+
+    let _ = app.drop_state().await;
+}
+
+#[tokio::test]
+async fn mount_live_reporting_error_does_not_replace_component_failure() {
     let (app, _dir) = temp_app("live_handler_propagate").await;
 
-    // Handler returns Err → propagates → mount fails.
+    // Handler returns Err because reporting failed; the original mount failure
+    // remains the terminal error.
     let result = app
         .update(move |ctx| async move {
             ctx.mount_live_with_handler(&"comp", Failing, move |err, _exc| {
-                // Re-raise: propagate the failure.
+                // Return a distinct reporting error.
                 Err(Error::engine(format!("handled: {err}")))
             })
             .await
         })
         .await;
 
-    assert!(
-        result.is_err(),
-        "propagating handler should surface the failure"
-    );
+    let error = result.expect_err("the component failure must remain terminal");
+    assert!(error.to_string().contains("process boom"));
+    assert!(!error.to_string().contains("handled:"));
 }
 
 // ---------------------------------------------------------------------------

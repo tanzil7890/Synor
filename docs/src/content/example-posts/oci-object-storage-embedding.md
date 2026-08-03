@@ -89,7 +89,7 @@ async def app_main() -> None:
 
 ## Live mode via OCI Streaming
 
-OCI Streaming is Kafka-protocol-compatible, so live updates ride the Kafka connector. When the four `OCI_STREAMING_*` env vars are set, we build a `confluent_kafka.aio.AIOConsumer` with `SASL_SSL` + `PLAIN` auth, wrap it with `kafka.topic_as_stream(...).payloads()` to get a `LiveStream[bytes]`, and pass it to `list_objects`. The connector snapshots a cutoff before the scan, runs the scan and stream concurrently, and for each post-cutoff event re-reads the object to apply an authoritative update or delete — see the OCI Object Storage connector docs for the details.
+OCI Streaming is Kafka-protocol-compatible, so live updates ride the Kafka connector. When the four `OCI_STREAMING_*` env vars are set, we build a consumer through `kafka.create_consumer()` with `SASL_SSL` + `PLAIN` auth, wrap it with `kafka.topic_as_stream(...).payloads()` to get a `LiveStream[bytes]`, and pass it to `list_objects`. The helper forces both automatic offset mechanisms off so offsets remain coupled to acknowledged downstream completion; binding it transfers ownership to the stream, which drains, unsubscribes, and closes it on every exit path. The connector snapshots a cutoff before the scan, runs the scan and stream concurrently, and for each post-cutoff event re-reads the object to apply an authoritative update or delete — see the OCI Object Storage connector docs for the details.
 
 ```python title="main.py"
 def _build_streaming_consumer() -> AIOConsumer | None:
@@ -98,7 +98,7 @@ def _build_streaming_consumer() -> AIOConsumer | None:
         and OCI_STREAMING_USERNAME and OCI_STREAMING_AUTH_TOKEN
     ):
         return None
-    return AIOConsumer({
+    return kafka.create_consumer({
         "bootstrap.servers": OCI_STREAMING_BOOTSTRAP_SERVERS,
         "security.protocol": "SASL_SSL",
         "sasl.mechanism": "PLAIN",
@@ -106,7 +106,6 @@ def _build_streaming_consumer() -> AIOConsumer | None:
         "sasl.password": OCI_STREAMING_AUTH_TOKEN,
         "group.id": OCI_STREAMING_GROUP_ID,
         "auto.offset.reset": "earliest",
-        "enable.auto.commit": False,
     })
 ```
 

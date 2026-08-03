@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import math
 import random
 from collections.abc import Callable, Collection
@@ -156,6 +157,21 @@ def test_timeout_nested_uses_min_and_restores_exactly(
         assert _deadline.remaining_seconds() == 5
 
     assert _deadline.remaining_seconds() is None
+
+
+def test_deadline_scope_can_finish_in_a_copied_context() -> None:
+    """Cancellation bridges may resume context-manager cleanup elsewhere."""
+    entered_context = contextvars.Context()
+    cleanup_context = contextvars.Context()
+    scope = _deadline.restore(core.deadline_none().with_timeout(10))
+
+    entered_context.run(scope.__enter__)
+    assert entered_context.run(_deadline.has_deadline)
+
+    # Token-based ContextVar.reset() raises here because the cleanup context is
+    # not the context that entered the scope. Value restoration must not.
+    cleanup_context.run(scope.__exit__, None, None, None)
+    assert not cleanup_context.run(_deadline.has_deadline)
 
 
 def test_check_cancellation_raises_only_after_deadline(fake_clock: _FakeClock) -> None:

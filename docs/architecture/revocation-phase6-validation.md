@@ -1,13 +1,20 @@
 # Provable Index Revocation Phase 6 validation record
 
+> **Schema-v4 amendment (2026-08-02):** The current binary upgrades native
+> schema v1-v3 apps to v4 by installing a transactionally maintained `0x58`
+> obligation summary. Strict no-op completion now reads that summary in
+> constant time. The v3 million-effect timings later in this document are the
+> preserved pre-summary baseline, not current-schema performance results.
+
 - Date: 2026-07-30
 - Scope: locally certifiable native milestone
 - Platform: arm64, macOS 26.5.1, CPython 3.11.15
 - Rust toolchain: rustc/cargo 1.89.0
 - Public reconcile tuple change: none
 - Public `App.update()` strictness option: none
-- Native schema: v3 (`0x38` marker, `0x40` evidence, `0x48` obligation
-  cursors, `0x50` lineage cursors)
+- Native schema at the time of the recorded run: v3 (`0x38` marker, `0x40`
+  evidence, `0x48` obligation cursors, `0x50` lineage cursors); current: v4,
+  adding the `0x58` obligation summary
 - Native effect record: v2
 
 This record accompanies
@@ -124,8 +131,10 @@ The fixtures were generated from pre-native revision
 | 16 KiB page `data.mdb` | `2153128f58e1b5ce2c667c8da86d963373cd8a2216c049c8d8ca281d21a25048` |
 
 Rust opens each copied fixture, runs the compatibility lifecycle, lazily
-activates native schema v3, and continues through drop and update. Python runs
-the public compatibility lifecycle against the host-compatible copy.
+activates the current native schema, and continues through drop and update.
+Python runs the public compatibility lifecycle against the host-compatible
+copy. Separate migration coverage starts from a populated v3 app and verifies
+the atomic v4 summary rebuild.
 
 `synor native-effects prepare-downgrade`:
 
@@ -205,9 +214,27 @@ cargo test -p synor_core \
   -- --ignored --nocapture
 ```
 
-It persisted, verified, finalized, rescanned, and recomputed correlations for
-1,000,000 schema-v3 effects in 100 batches of 10,000. The final-source rerun
+The preserved schema-v3 baseline persisted, verified, finalized, rescanned,
+and recomputed correlations for 1,000,000 effects in 100 batches of 10,000. It
 passed in 254.868 seconds and produced a 995,803,136-byte LMDB data file.
+
+The schema-v4 implementation was rerun explicitly on 2026-08-02. This run
+also completed all one million durable effect lifecycles and the exact
+full-history correlation audit:
+
+| Schema-v4 measurement | Result |
+|---|---:|
+| Complete lifecycle plus certification | 329.454 seconds |
+| Strict no-op completion checks | 1,000 in 0.011830 seconds |
+| Mean strict completion check | 0.000011830 seconds |
+| Deliberate full retained-evidence scan | 64.687483 seconds |
+| Completed summary count | 1,000,000 |
+| LMDB data file | 994,721,792 bytes |
+
+The strict path reads two fixed-size summary records, so its measured time is
+independent of retained evidence count. Lifecycle construction, schema
+migration, administrative evidence enumeration, and the deliberate audit
+remain linear in the number of records; this result does not claim otherwise.
 
 ## Compatibility performance
 

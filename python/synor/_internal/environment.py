@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-from inspect import isasyncgenfunction
+import concurrent.futures
 import threading
 import warnings
 import weakref
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, contextmanager
+from contextvars import ContextVar, Token
+from inspect import isasyncgenfunction
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -24,12 +26,12 @@ from typing import (
     overload,
 )
 
-from . import core
-from . import setting
+from . import core, setting
 from .context_keys import ContextKey, ContextProvider
 
 if TYPE_CHECKING:
     from synor._internal.app import App
+
     from .component_ctx import ExceptionHandler
 
 T = TypeVar("T")
@@ -172,6 +174,21 @@ class EnvironmentInfo:
         return env.name if env else None
 
 
+_environment_callback_owners: ContextVar[tuple[int, ...]] = ContextVar(
+    "synor_environment_callback_owners", default=()
+)
+
+
+def _enter_environment_callback(owner: int) -> Token[tuple[int, ...]]:
+    return _environment_callback_owners.set(
+        (*_environment_callback_owners.get(), owner)
+    )
+
+
+def _exit_environment_callback(token: Token[tuple[int, ...]]) -> None:
+    _environment_callback_owners.reset(token)
+
+
 def get_registered_environment_infos() -> list[EnvironmentInfo]:
     """Get all registered environment infos (that haven't been garbage collected)."""
     with _environment_info_lock:
@@ -195,6 +212,7 @@ class Environment:
         "_loop_runner",
         "_async_context",
         "_exception_handler",
+        "_generation",
         "_info",
         "__weakref__",
     )
@@ -206,6 +224,7 @@ class Environment:
     _loop_runner: _LoopRunner
     _async_context: core.AsyncContext
     _exception_handler: ExceptionHandler | None
+    _generation: int
     _info: EnvironmentInfo
 
     def __init__(
@@ -217,6 +236,7 @@ class Environment:
         event_loop: asyncio.AbstractEventLoop | None = None,
         exception_handler: ExceptionHandler | None = None,
         info: EnvironmentInfo | None = None,
+        _generation: int = 0,
     ):
         if not settings.db_path:
             raise ValueError("Settings.db_path must be provided")
@@ -235,13 +255,14 @@ class Environment:
             runner.ensure_running()
             self._loop_runner = runner
 
-        self._async_context = core.AsyncContext(self._loop_runner.loop)
+        self._info = info or EnvironmentInfo(self)
+        self._async_context = core.AsyncContext(self._loop_runner.loop, id(self._info))
         self._core_env = core.Environment(
             settings._to_engine_dict(), self._async_context
         )
         self._context_provider.set_core_env(self._core_env)
         self._exception_handler = exception_handler
-        self._info = info or EnvironmentInfo(self)
+        self._generation = _generation
 
     @property
     def name(self) -> str:
@@ -283,18 +304,30 @@ class Environment:
         return self
 
 
+_lifecycle_callback_transitions: ContextVar[
+    tuple[tuple[LazyEnvironment, concurrent.futures.Future[None]], ...]
+] = ContextVar("synor_lifecycle_callback_transitions", default=())
+
+
 class LazyEnvironment:
     """
     Lazy-initialized environment. To be initialized using lifespan function.
+
+    Each successfully started ``Environment`` receives a monotonic generation
+    number scoped to this lazy environment. Shutdown is a full barrier: the next
+    generation is not published until the previous lifespan has finished cleanup.
     """
 
     __slots__ = (
         "_name",
         "_lifespan_fn_lock",
         "_lifespan_fn",
-        "_start_stop_lock",
+        "_lifecycle_lock",
+        "_lifecycle_loop",
+        "_transition",
         "_exit_stack",
         "_env",
+        "_generation",
         "_info",
         "__weakref__",
     )
@@ -302,25 +335,132 @@ class LazyEnvironment:
     _name: str
     _lifespan_fn_lock: threading.Lock
     _lifespan_fn: LifespanFn | None
-    _start_stop_lock: asyncio.Lock | None
+    _lifecycle_lock: threading.Lock
+    _lifecycle_loop: asyncio.AbstractEventLoop | None
+    _transition: concurrent.futures.Future[None] | None
     _exit_stack: AsyncExitStack | None
     _env: Environment | None
+    _generation: int
     _info: EnvironmentInfo
 
     def __init__(self, name: str = "default") -> None:
         self._name = name
         self._lifespan_fn_lock = threading.Lock()
-        self._start_stop_lock = None  # Created lazily when needed
+        self._lifecycle_lock = threading.Lock()
+        self._lifecycle_loop = None
+        self._transition = None
         self._lifespan_fn = None
         self._exit_stack = None
         self._env = None
+        self._generation = 0
         self._info = EnvironmentInfo(self)
 
-    def _get_start_stop_lock(self) -> asyncio.Lock:
-        """Get or create the start/stop lock (must be called from async context)."""
-        if self._start_stop_lock is None:
-            self._start_stop_lock = asyncio.Lock()
-        return self._start_stop_lock
+    async def _wait_for_transition(
+        self,
+        transition: concurrent.futures.Future[None],
+        *,
+        operation: str,
+    ) -> None:
+        self._check_transition_reentrancy(transition, operation=operation)
+        # Shield the shared future: cancellation of one waiter must not cancel
+        # the lifecycle transition for every other sync or async caller.
+        await asyncio.shield(asyncio.wrap_future(transition))
+
+    def _check_transition_reentrancy(
+        self,
+        transition: concurrent.futures.Future[None],
+        *,
+        operation: str,
+    ) -> None:
+        if any(
+            owner is self and owned_transition is transition
+            for owner, owned_transition in _lifecycle_callback_transitions.get()
+        ):
+            raise RuntimeError(
+                f"LazyEnvironment.{operation}() cannot be called re-entrantly "
+                "from the same environment's lifespan startup or cleanup callback"
+            )
+
+    def _check_current_transition_reentrancy(self, *, operation: str) -> None:
+        with self._lifecycle_lock:
+            transition = self._transition
+        if transition is not None:
+            self._check_transition_reentrancy(transition, operation=operation)
+
+    @contextmanager
+    def _lifecycle_callback_scope(
+        self, transition: concurrent.futures.Future[None]
+    ) -> Iterator[None]:
+        previous = _lifecycle_callback_transitions.get()
+        _lifecycle_callback_transitions.set((*previous, (self, transition)))
+        try:
+            yield
+        finally:
+            # Save/restore the value rather than a ContextVar token because
+            # lifecycle cleanup may be delegated to another asyncio Task/loop.
+            _lifecycle_callback_transitions.set(previous)
+
+    def _complete_transition(
+        self,
+        transition: concurrent.futures.Future[None],
+        *,
+        error: BaseException | None = None,
+        clear_lifecycle_loop: bool = False,
+    ) -> None:
+        with self._lifecycle_lock:
+            if self._transition is not transition:
+                raise RuntimeError("LazyEnvironment lifecycle transition was replaced")
+            self._transition = None
+            if clear_lifecycle_loop:
+                self._lifecycle_loop = None
+        if error is None:
+            transition.set_result(None)
+        else:
+            transition.set_exception(error)
+
+    async def _close_exit_stack(
+        self,
+        exit_stack: AsyncExitStack,
+        owner_loop: asyncio.AbstractEventLoop,
+        transition: concurrent.futures.Future[None],
+    ) -> None:
+        async def _close() -> None:
+            with self._lifecycle_callback_scope(transition):
+                await exit_stack.aclose()
+
+        current_loop = asyncio.get_running_loop()
+        if (
+            owner_loop is current_loop
+            or owner_loop.is_closed()
+            or not owner_loop.is_running()
+        ):
+            # A closed owner loop cannot run cleanup.  The current loop is the
+            # only possible best-effort fallback (and is sufficient for sync
+            # generators and loop-agnostic async resources).
+            cleanup_task = asyncio.create_task(_close())
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                # Shutdown is a barrier: honor caller cancellation only after
+                # every registered cleanup callback has completed.
+                await cleanup_task
+                raise
+            return
+
+        cleanup = asyncio.run_coroutine_threadsafe(_close(), owner_loop)
+        wrapped_cleanup = asyncio.wrap_future(cleanup)
+        try:
+            await asyncio.shield(wrapped_cleanup)
+        except asyncio.CancelledError:
+            await asyncio.shield(wrapped_cleanup)
+            raise
+
+    def _lifecycle_loop_for_sync(self) -> asyncio.AbstractEventLoop:
+        with self._lifecycle_lock:
+            loop = self._lifecycle_loop
+        if loop is not None and loop.is_running() and not loop.is_closed():
+            return loop
+        return default_env_loop()
 
     @property
     def name(self) -> str:
@@ -343,82 +483,127 @@ class LazyEnvironment:
         """
         Start the default environment (executes on the default environment's event loop).
         """
-        async with self._get_start_stop_lock():
-            if self._env is not None:
-                return self._env
-            with self._lifespan_fn_lock:
-                fn = self._lifespan_fn or _noop_lifespan_fn
+        loop = asyncio.get_running_loop()
+        while True:
+            starter = False
+            with self._lifecycle_lock:
+                if self._env is not None:
+                    return self._env
+                transition = self._transition
+                if transition is None:
+                    transition = concurrent.futures.Future()
+                    self._transition = transition
+                    self._lifecycle_loop = loop
+                    next_generation = self._generation + 1
+                    starter = True
+            if starter:
+                break
+            await self._wait_for_transition(transition, operation="start")
 
-            env_builder = EnvironmentBuilder()
-            exit_stack = AsyncExitStack()
-            self._exit_stack = exit_stack
+        with self._lifespan_fn_lock:
+            fn = self._lifespan_fn or _noop_lifespan_fn
 
-            try:
-                if isasyncgenfunction(fn):
-                    # Start async generator and register cleanup
-                    async_gen: AsyncGenerator[None, None] = fn(env_builder)  # type: ignore[assignment]
+        env_builder = EnvironmentBuilder()
+        exit_stack = AsyncExitStack()
+
+        try:
+            if isasyncgenfunction(fn):
+                # Start async generator and register cleanup
+                async_gen: AsyncGenerator[None, None] = fn(env_builder)  # type: ignore[assignment]
+                with self._lifecycle_callback_scope(transition):
                     await anext(async_gen)
 
-                    async def _aclose() -> None:
-                        try:
-                            await anext(async_gen)
-                        except StopAsyncIteration:
-                            pass
-                        finally:
-                            await async_gen.aclose()
+                async def _aclose() -> None:
+                    try:
+                        await anext(async_gen)
+                    except StopAsyncIteration:
+                        pass
+                    finally:
+                        await async_gen.aclose()
 
-                    exit_stack.push_async_callback(_aclose)
-                else:
-                    # Start sync generator and register cleanup
-                    sync_gen: Iterator[None] = fn(env_builder)  # type: ignore[assignment]
+                exit_stack.push_async_callback(_aclose)
+            else:
+                # Start sync generator and register cleanup
+                sync_gen: Iterator[None] = fn(env_builder)  # type: ignore[assignment]
+                with self._lifecycle_callback_scope(transition):
                     next(sync_gen)
 
-                    def _close() -> None:
-                        try:
-                            next(sync_gen)
-                        except StopIteration:
-                            pass
-                        finally:
-                            close_fn = getattr(sync_gen, "close", None)
-                            if callable(close_fn):
-                                close_fn()
+                def _close() -> None:
+                    try:
+                        next(sync_gen)
+                    except StopIteration:
+                        pass
+                    finally:
+                        close_fn = getattr(sync_gen, "close", None)
+                        if callable(close_fn):
+                            close_fn()
 
-                    exit_stack.callback(_close)
+                exit_stack.callback(_close)
 
-                built_settings = env_builder.settings
-                if not built_settings.db_path:
-                    default_db_path = setting.get_default_db_path()
-                    if default_db_path:
-                        built_settings.db_path = default_db_path
-                    else:
-                        raise ValueError(
-                            "Environment settings must provide Settings.db_path "
-                            "(or set SYNOR_DB environment variable)"
-                        )
+            built_settings = env_builder.settings
+            if not built_settings.db_path:
+                default_db_path = setting.get_default_db_path()
+                if default_db_path:
+                    built_settings.db_path = default_db_path
+                else:
+                    raise ValueError(
+                        "Environment settings must provide Settings.db_path "
+                        "(or set SYNOR_DB environment variable)"
+                    )
 
-                context_provider = env_builder._context_provider
-                self._exit_stack.push_async_callback(context_provider.aclose)
+            context_provider = env_builder._context_provider
+            exit_stack.push_async_callback(context_provider.aclose)
 
-                loop = asyncio.get_running_loop()
-                env = Environment(
-                    built_settings,
-                    name=self._name,
-                    context_provider=context_provider,
-                    event_loop=loop,
-                    exception_handler=env_builder._exception_handler,
-                    info=self._info,
+            env = Environment(
+                built_settings,
+                name=self._name,
+                context_provider=context_provider,
+                event_loop=loop,
+                exception_handler=env_builder._exception_handler,
+                info=self._info,
+                _generation=next_generation,
+            )
+        except BaseException as exc:
+            completion_error: BaseException | None = (
+                None if isinstance(exc, asyncio.CancelledError) else exc
+            )
+            try:
+                await self._close_exit_stack(exit_stack, loop, transition)
+            except asyncio.CancelledError:
+                # This is the same cancellation that interrupted startup.  The
+                # transition itself is complete after cleanup, so unrelated
+                # waiters should retry rather than inherit that cancellation.
+                completion_error = None
+            except BaseException as cleanup_exc:
+                completion_error = cleanup_exc
+            finally:
+                self._complete_transition(
+                    transition,
+                    error=completion_error,
+                    clear_lifecycle_loop=True,
                 )
-                self._env = env
-                return env
-            except:
-                await exit_stack.aclose()
-                self._exit_stack = None
-                raise
+            if completion_error is not None and completion_error is not exc:
+                raise completion_error from exc
+            raise
+
+        with self._lifecycle_lock:
+            # Publish the monotonic generation only after both the lifespan and
+            # Environment have started successfully. Successful generations are
+            # never reused by this LazyEnvironment.
+            self._generation = next_generation
+            self._env = env
+            self._exit_stack = exit_stack
+        self._complete_transition(transition)
+        return env
 
     def _get_env_sync(self) -> Environment:
-        if self._env is not None:
-            return self._env
-        env_loop = default_env_loop()
+        with self._lifecycle_lock:
+            if self._env is not None and self._transition is None:
+                return self._env
+            transition = self._transition
+        if transition is not None:
+            self._check_transition_reentrancy(transition, operation="start")
+        env_loop = self._lifecycle_loop_for_sync()
         fut = asyncio.run_coroutine_threadsafe(self._get_env(), env_loop)
         return fut.result()
 
@@ -432,13 +617,138 @@ class LazyEnvironment:
         """
         Stop the default environment (executes on the default environment's event loop).
         """
-        async with self._get_start_stop_lock():
-            exit_stack = self._exit_stack
-            self._exit_stack = None
-            self._env = None
+        # Waiting for this environment's own operation lease can never make
+        # progress when stop is invoked from one of its Python callbacks.
+        # Reject before claiming or mutating the lifecycle transition so an
+        # external owner can still stop the generation normally.
+        if id(self._info) in _environment_callback_owners.get():
+            raise RuntimeError(
+                "LazyEnvironment.stop() cannot be called from an operation callback "
+                "using the same environment"
+            )
 
-        if exit_stack is not None:
-            await exit_stack.aclose()
+        # Preserve the component-context guard for manually attached contexts
+        # and other host-side paths that do not cross the Rust callback bridge.
+        from .component_ctx import get_context_from_ctx
+
+        try:
+            current_component = get_context_from_ctx()
+        except RuntimeError:
+            current_component = None
+        if current_component is not None and current_component._env._info is self._info:
+            raise RuntimeError(
+                "LazyEnvironment.stop() cannot be called from an operation callback "
+                "using the same environment"
+            )
+
+        env: Environment | None = None
+        exit_stack: AsyncExitStack | None = None
+        owner_loop: asyncio.AbstractEventLoop | None = None
+        while True:
+            stopper = False
+            with self._lifecycle_lock:
+                transition = self._transition
+                if transition is None:
+                    env = self._env
+                    exit_stack = self._exit_stack
+                    owner_loop = self._lifecycle_loop
+                    if env is None:
+                        return
+                    if exit_stack is None or owner_loop is None:
+                        raise RuntimeError(
+                            "LazyEnvironment has inconsistent lifecycle state"
+                        )
+                    transition = concurrent.futures.Future()
+                    self._transition = transition
+                    self._env = None
+                    self._exit_stack = None
+                    # This synchronous gate close linearizes with Rust-side
+                    # operation acquisition. Operations admitted first remain
+                    # tracked and may still schedule callbacks while draining;
+                    # operations racing after this point are rejected.
+                    env._async_context.close_operation_admission()
+                    # Live operations intentionally remain active after their
+                    # initial result is ready, so they cannot be passively
+                    # drained. Cancel only this generation's live operations;
+                    # ordinary admitted operations retain finish-before-stop
+                    # semantics and are drained below unchanged.
+                    env._async_context.cancel_live_operations()
+                    stopper = True
+            if stopper:
+                break
+            await self._wait_for_transition(transition, operation="stop")
+
+        assert env is not None
+        assert exit_stack is not None
+        assert owner_loop is not None
+        error: BaseException | None = None
+        cancelled: asyncio.CancelledError | None = None
+
+        async def _shutdown_generation(
+            closing_env: Environment,
+            closing_exit_stack: AsyncExitStack,
+            closing_owner_loop: asyncio.AbstractEventLoop,
+        ) -> None:
+            # Core app construction/update/drop leases cover the full operation,
+            # including eager LMDB initialization and terminal teardown. Keep
+            # callback admission open until every admitted operation has
+            # finished, because a pre-stop operation may not have scheduled its
+            # first Python callback yet.
+            await closing_env._async_context.drain_operations_async()
+
+            # An admitted operation can populate an App's cached Rust binding
+            # while the operation drain is in progress. Invalidate only after
+            # that drain so no late completion can recache this generation.
+            for app in self._info.get_apps():
+                app._invalidate_environment(closing_env)
+
+            # No admitted operation remains able to create callback work. Close
+            # the second gate, then drain every callback admitted before it.
+            closing_env._async_context.close_callback_admission()
+            await closing_env._async_context.drain_callbacks_async()
+            await self._close_exit_stack(
+                closing_exit_stack, closing_owner_loop, transition
+            )
+
+        shutdown_task = asyncio.create_task(
+            _shutdown_generation(env, exit_stack, owner_loop)
+        )
+        try:
+            while True:
+                try:
+                    await asyncio.shield(shutdown_task)
+                    break
+                except asyncio.CancelledError as exc:
+                    # Caller cancellation is deferred until callback drain and
+                    # lifespan cleanup are both complete. Repeated cancellation
+                    # requests likewise cannot cancel the shared shutdown task.
+                    if cancelled is None:
+                        cancelled = exc
+                    if shutdown_task.done():
+                        try:
+                            shutdown_task.result()
+                        except asyncio.CancelledError as shutdown_exc:
+                            cancelled = shutdown_exc
+                        except BaseException as shutdown_exc:
+                            error = shutdown_exc
+                        break
+                except BaseException as exc:
+                    error = exc
+                    break
+        finally:
+            # Drop the final local references before waking a concurrent starter.
+            del shutdown_task
+            del env
+            del exit_stack
+            self._complete_transition(
+                transition,
+                error=error,
+                clear_lifecycle_loop=True,
+            )
+        if error is not None:
+            raise error
+        if cancelled is not None:
+            raise cancelled
 
 
 _default_env = LazyEnvironment()
@@ -557,16 +867,12 @@ atexit.register(_shutdown_at_exit)
 
 
 def start_sync() -> Environment:
-    loop = default_env_loop()
-    fut = asyncio.run_coroutine_threadsafe(_default_env.start(), loop)
-    return fut.result()
+    return _default_env._get_env_sync()
 
 
 def stop_sync() -> None:
-    env = _default_env._env
-    if env is None:
-        return
-    loop = env.event_loop
+    _default_env._check_current_transition_reentrancy(operation="stop")
+    loop = _default_env._lifecycle_loop_for_sync()
     fut = asyncio.run_coroutine_threadsafe(_default_env.stop(), loop)
     fut.result()
 

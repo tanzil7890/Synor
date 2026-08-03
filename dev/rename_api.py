@@ -321,8 +321,7 @@ class Renamer(cst.CSTTransformer):
         # syn.task(...)
         if isinstance(func.value, cst.Name):
             return (
-                func.value.value in self.aliases
-                and func.attr.value in DECORATOR_ATTRS
+                func.value.value in self.aliases and func.attr.value in DECORATOR_ATTRS
             )
         # syn.task.as_async(...)
         inner = func.value
@@ -368,9 +367,7 @@ def rewrite(source: str, defs: bool = False) -> tuple[str, list[str]]:
         # TARGET_VERBS too: `def declare_row` is a bare name at its definition
         # site even though every call site reaches it as an attribute.
         # ATTRIBUTE_ONLY stays excluded even here -- see its docstring.
-        imported = (
-            imported | set(MODULE_ATTRS) | set(TARGET_VERBS)
-        ) - ATTRIBUTE_ONLY
+        imported = (imported | set(MODULE_ATTRS) | set(TARGET_VERBS)) - ATTRIBUTE_ONLY
     renamer = Renamer(_module_aliases(tree), imported)
     return tree.visit(renamer).code, renamer.hits
 

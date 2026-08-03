@@ -139,14 +139,14 @@ class ComponentContext:
         - walks this context's handler chain (innermost first);
         - if a handler raises, calls the next outer handler with the
           new exception;
-        - on chain exhaustion (every handler re-raised), **re-raises the
-          final handler's exception** — the Rust side propagates that
-          back through ``handle.ready()``. Handlers therefore control
-          propagation: returning swallows; raising propagates;
+        - on chain exhaustion (every handler re-raised), re-raises the
+          final handler's exception so the reporting failure is logged;
         - when no handler is registered at all, logs at ``ERROR`` via
-          the Python logger and returns normally (today's contract for
-          "no chain → not propagated"; ``app.drop`` uses a Rust-side
-          raising handler explicitly to surface root-delete failures).
+          the Python logger and returns normally.
+
+        Handlers are observers. Whether they return or raise never rewrites
+        the component's terminal result: failed work still makes
+        ``handle.ready()`` and the enclosing app operation fail.
 
         Always non-None. Single canonical entry point used by ``syn.spawn``,
         ``syn.spawn_each``, and the live-component operator so all
@@ -186,15 +186,14 @@ class ComponentContext:
                     ret = node.handler(current_exc, ctx)
                     if inspect.isawaitable(ret):
                         await ret
-                    return  # Handler swallowed → don't propagate.
+                    return  # Failure reported; the component remains failed.
                 except BaseException as handler_exc:
                     current_exc = handler_exc
                     source = "handler"
                     node = node.base
-            # Every handler in the chain raised. Propagate the final
-            # raise — Rust's on_error catches it and the spawned task
-            # returns Err, so `handle.ready()` raises. Handlers thus
-            # control propagation: return (swallow) vs raise (propagate).
+            # Every handler in the chain raised. Surface the reporting error;
+            # Rust logs it separately while preserving the original component
+            # failure as the terminal result.
             raise current_exc
 
         return _run
