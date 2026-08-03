@@ -39,13 +39,13 @@ async def app_main() -> None:
         LANCE_DB, table_name="employees",
         table_schema=await lancedb.TableSchema.from_class(Employee, primary_key=["emp_id"]))
     config = {"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS, "group.id": KAFKA_GROUP_ID,
-              "enable.auto.commit": "false", "auto.offset.reset": "earliest"}
-    consumer = AIOConsumer(config)
+              "auto.offset.reset": "earliest"}
+    consumer = kafka.create_consumer(config)  # ownership transfers to the stream
     items = kafka.topic_as_map(consumer, [KAFKA_TOPIC])
     await syn.spawn_each(process_message, items, products_table, employees_table)
 ```
 
-The line worth pausing on is `ensure_row` — deliberately *not* `upsert()`. A new or changed primary key is upserted; a tombstone (null value) removes that key's row; the same row declared again writes nothing. `enable.auto.commit` is **off** on purpose: Synor commits each offset *after* the row is durably written, so the consumer group resumes from the last message it actually persisted.
+The line worth pausing on is `ensure_row` — deliberately *not* `upsert()`. A new or changed primary key is upserted; a tombstone (null value) removes that key's row; the same row declared again writes nothing. `kafka.create_consumer()` forces both automatic commit and automatic offset storage off: Synor commits each offset *after* the row is durably written, so the consumer group resumes from the last message it actually persisted. Passing this helper-created consumer to `topic_as_map()` transfers ownership to the single-use stream, which drains, unsubscribes, and closes it on every exit path.
 
 ## Why this example is useful
 

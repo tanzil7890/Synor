@@ -77,7 +77,15 @@ class _MessageHandler:
         self._producer = producer
         self._topic = topic
         self._deletion_value_fn = deletion_value_fn
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                idempotent_replay="unsupported",
+                apply_ordering="unordered",
+                completion_verification="acknowledged",
+            ),
+        )
 
     async def _apply_actions(
         self,
@@ -150,7 +158,10 @@ class _TopicHandler:
     _sink: syn.TargetActionSink[_TopicAction, _MessageHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(),
+        )
 
     async def _apply_actions(
         self,

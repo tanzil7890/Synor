@@ -16,6 +16,7 @@ use crate::prelude::*;
 const NATIVE_EFFECT_RECORD_VERSION: u16 = 2;
 const NATIVE_EFFECT_OBLIGATION_CURSOR_VERSION: u16 = 1;
 const NATIVE_EFFECT_LINEAGE_CURSOR_VERSION: u16 = 1;
+const NATIVE_OBLIGATION_SUMMARY_VERSION: u16 = 1;
 const MAX_ACTION_ID_BYTES: usize = 256;
 const SHA256_HEX_BYTES: usize = 64;
 
@@ -330,6 +331,44 @@ pub struct NativeEffectCounts {
     pub completed: u64,
 }
 
+/// Transactionally maintained app-wide totals used by strict completion. The
+/// underlying evidence and tombstones remain the source of truth and are
+/// still scanned before destructive administration; this additive record is
+/// rebuilt atomically when an older schema is first opened by a supporting
+/// binary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct NativeObligationSummary {
+    #[serde(rename = "V", default = "default_obligation_summary_version")]
+    pub record_version: u16,
+    #[serde(rename = "E", default)]
+    pub effect_counts: NativeEffectCounts,
+    #[serde(rename = "T", default)]
+    pub query_verified_tombstones: u64,
+}
+
+fn default_obligation_summary_version() -> u16 {
+    NATIVE_OBLIGATION_SUMMARY_VERSION
+}
+
+impl NativeObligationSummary {
+    pub(crate) fn empty() -> Self {
+        Self {
+            record_version: NATIVE_OBLIGATION_SUMMARY_VERSION,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn validate(self) -> Result<()> {
+        if self.record_version == 0 {
+            internal_bail!("native obligation summary has an invalid schema version");
+        }
+        if self.record_version > NATIVE_OBLIGATION_SUMMARY_VERSION {
+            client_bail!("native obligation summary is newer than this binary");
+        }
+        Ok(())
+    }
+}
+
 /// Result of an explicit, archive-backed completed-evidence compaction.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeEffectCompactionResult {
@@ -468,6 +507,20 @@ impl NativeEffectCounts {
         *count = count
             .checked_add(1)
             .ok_or_else(|| internal_error!("native effect count overflow"))?;
+        Ok(())
+    }
+
+    pub(crate) fn remove(&mut self, status: NativeEffectStatus) -> Result<()> {
+        let count = match status {
+            NativeEffectStatus::Pending => &mut self.pending,
+            NativeEffectStatus::Verified => &mut self.verified,
+            NativeEffectStatus::Failed => &mut self.failed,
+            NativeEffectStatus::Blocked => &mut self.blocked,
+            NativeEffectStatus::Completed => &mut self.completed,
+        };
+        *count = count
+            .checked_sub(1)
+            .ok_or_else(|| internal_error!("native effect count underflow"))?;
         Ok(())
     }
 }

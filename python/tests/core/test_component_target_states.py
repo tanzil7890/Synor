@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import dataclasses
+from collections.abc import Collection
+from typing import Any, Generic
+
+import numpy as np
+import pytest
 import synor as syn
 import synor.inspect as synor_inspect
-import pytest
-
-import dataclasses
-from typing import Any, Collection, Generic
 
 from tests import common
 from tests.common.target_states import (
@@ -18,6 +20,19 @@ from tests.common.target_states import (
 synor_env = common.create_test_env(__file__)
 
 _source_data: dict[str, dict[str, Any]] = {}
+
+
+def _reported_huge_buffer() -> memoryview:
+    """Expose a huge logical buffer without backing it with hundreds of MiB."""
+    backing = np.zeros(1, dtype=np.uint8)
+    # The estimator reads only buffer metadata. A zero-stride view gives this
+    # test a real 600 MiB buffer-protocol extent while retaining one data byte.
+    logical: Any = np.lib.stride_tricks.as_strided(
+        backing,
+        shape=(600 * 1024 * 1024,),
+        strides=(0,),
+    )
+    return memoryview(logical)
 
 
 ##################################################################################
@@ -447,9 +462,7 @@ async def _declare_dict_containers_together() -> None:
         syn.unit_path("setup"), _declare_dict_containers, _source_data.keys()
     )
     for name, provider in containers.providers.items():
-        await syn.spawn(
-            syn.unit_path(name), _declare_one_dict_data, name, provider
-        )
+        await syn.spawn(syn.unit_path(name), _declare_one_dict_data, name, provider)
 
 
 @pytest.mark.asyncio
@@ -739,9 +752,7 @@ async def _declare_one_dict_w_exception(name: str) -> None:
 
 async def _declare_dicts_in_sub_components_w_exception() -> None:
     for name in _source_data.keys():
-        await syn.spawn(
-            syn.unit_path(name), _declare_one_dict_w_exception, name
-        )
+        await syn.spawn(syn.unit_path(name), _declare_one_dict_w_exception, name)
 
 
 def test_cleanup_partially_built_components() -> None:
@@ -756,7 +767,8 @@ def test_cleanup_partially_built_components() -> None:
     )
 
     _source_data["D1"] = {"a": 1}
-    app.update_blocking()
+    with pytest.raises(ValueError, match="injected test exception"):
+        app.update_blocking()
     assert DictsTarget.store.data == {"D1": {}}
     assert synor_inspect.list_stable_paths_sync(app) == [
         syn.ROOT_PATH,
@@ -798,7 +810,8 @@ def test_retry_from_gc_failed_components() -> None:
     del _source_data["D1"]
     try:
         DictsTarget.store.sink_exception = True
-        app.update_blocking()
+        with pytest.raises(ValueError, match="injected sink exception"):
+            app.update_blocking()
     finally:
         DictsTarget.store.sink_exception = False
     assert DictsTarget.store.data == {"D1": {}}
@@ -839,7 +852,8 @@ def test_restore_from_gc_failed_components() -> None:
     del _source_data["D1"]
     DictsTarget.store.sink_exception = True
     try:
-        app.update_blocking()
+        with pytest.raises(ValueError, match="injected sink exception"):
+            app.update_blocking()
     finally:
         DictsTarget.store.sink_exception = False
     assert DictsTarget.store.data == {"D1": {}}
@@ -1127,7 +1141,9 @@ _mount_target_source_data: dict[str, dict[str, Any]] = {}
 async def _declare_dicts_with_mount_target() -> None:
     with syn.unit_path("dict"):
         for name, data in _mount_target_source_data.items():
-            single_dict_provider = await syn.attach_target(DictsTarget.dict_target(name))
+            single_dict_provider = await syn.attach_target(
+                DictsTarget.dict_target(name)
+            )
             for key, value in data.items():
                 syn.ensure_target_state(single_dict_provider.target_state(key, value))
 
@@ -1235,7 +1251,9 @@ async def _dummy_leaf_component() -> None:
 async def _declare_transition_to_component() -> None:
     with syn.unit_path("transition_test"):
         if not _transition_to_component_mode:
-            single_dict_provider = await syn.attach_target(DictsTarget.dict_target("D1"))
+            single_dict_provider = await syn.attach_target(
+                DictsTarget.dict_target("D1")
+            )
             for key, value in _mount_target_source_data.get("D1", {}).items():
                 syn.ensure_target_state(single_dict_provider.target_state(key, value))
         else:
@@ -1277,3 +1295,33 @@ def test_directory_to_component_transition() -> None:
     assert syn.ROOT_PATH / "transition_test" in paths
     assert syn.ROOT_PATH / "transition_test" / "D1" in paths
     assert syn.ROOT_PATH / "transition_test" / "D1" / "a" not in paths
+
+
+@pytest.mark.asyncio
+async def test_caught_child_declaration_quota_error_does_not_poison_retry(
+    tmp_path: Any,
+) -> None:
+    DictsTarget.store.clear()
+
+    @syn.task
+    async def main() -> None:
+        huge: Any = _reported_huge_buffer()
+        with pytest.raises(Exception, match="working-set limit"):
+            syn.ensure_target_state_with_child(
+                DictsTarget._provider.target_state("quota-retry", huge)
+            )
+
+        syn.ensure_target_state_with_child(
+            DictsTarget._provider.target_state("quota-retry", None)
+        )
+
+    app = syn.App(
+        syn.AppConfig(
+            name="test-child-declaration-quota-retry",
+            environment=syn.Environment(syn.Settings(db_path=tmp_path / "state")),
+        ),
+        main,
+    )
+    await app.update()
+
+    assert DictsTarget.store.data["quota-retry"] == {}

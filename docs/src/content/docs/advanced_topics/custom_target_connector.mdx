@@ -149,6 +149,110 @@ def apply_actions(
     return outputs
 ```
 
+#### Declare operational guarantees
+
+Every sink exposes a versioned, machine-readable capability contract. Existing
+connectors that do not declare one report `"unknown"` rather than receiving an
+optimistic guarantee:
+
+```python
+capabilities = syn.TargetSinkCapabilities(
+    batch_atomicity="per_apply",
+    idempotent_replay="supported",
+    apply_ordering="input_order",
+    cancellation_safe="supported",
+    completion_verification="acknowledged",
+    max_batch_actions=1_000,
+    max_batch_bytes=8 * 1024 * 1024,
+)
+
+sink = syn.TargetActionSink.from_async_fn(
+    apply_actions_async,
+    capabilities=capabilities,
+)
+
+assert sink.capabilities.to_dict()["schema_version"] == 1
+```
+
+The contract distinguishes these concerns:
+
+| Field | Meaning |
+|---|---|
+| `batch_atomicity` | `none`, one atomic unit per action (`per_action`), or one atomic unit for the complete `apply` call (`per_apply`) |
+| `idempotent_replay` | Whether replaying an acknowledged action preserves the same external state |
+| `segmented_replay_safe` | Whether Synor may split one component's actions across multiple `apply` calls and safely replay an already-applied prefix |
+| `apply_ordering` | Whether actions become visible in input order or in an unspecified order |
+| `cancellation_safe` | Whether interruption leaves a state that a later reconciliation can safely retry |
+| `completion_verification` | `unverified` callback completion, an external provider acknowledgement (`acknowledged`), or a postcondition query (`query_verified`) |
+| `max_batch_actions` | Maximum actions accepted by one `apply` call |
+| `max_batch_bytes` | Best-effort in-memory byte limit accepted by one `apply` call |
+
+The engine uses 4,096 actions and approximately 8 MiB as internal packing
+thresholds when coalescing independently submitted work. They are not hard
+limits on one component's action set. Legacy sinks and sinks with an `unknown`
+or `unsupported` segmentation capability therefore keep the compatibility
+contract of one `apply` call, even when that call is larger. Set
+`max_batch_actions` or `max_batch_bytes` to publish a hard per-call connector
+limit; Synor preflights that declared limit before external side effects.
+
+Set `segmented_replay_safe="supported"` only when failure injection proves that
+the sink can safely replay a prefix that a previous attempt already applied.
+This claim requires `idempotent_replay="supported"`. Synor may then deliver the
+component's actions in ordered, bounded segments. Earlier segments can become
+externally visible before a later segment fails, so segmentation weakens
+external all-at-once visibility even when `batch_atomicity="per_apply"`.
+Synor commits the component's internal tracking state only after every segment
+succeeds; a later failure leaves the component failed and eligible for a full
+retry. A single action larger than a connector's declared byte limit is rejected
+before the first sink call. A single action larger only than the engine's
+internal packing threshold is delivered alone.
+
+`sink.queue_stats` provides point-in-time pressure telemetry: ongoing and queued
+batches, queued and in-flight inputs, estimated in-flight bytes, and the number
+of submitters currently waiting for capacity. These values are operational
+signals, not cumulative counters.
+
+Only claim a field after a connector-level failure-injection test exercises the
+relevant boundary. A fully certified sink covers success, retry after an
+acknowledgement loss, failure partway through a batch, cancellation during I/O,
+and recovery from the resulting external state. Partial certification is
+allowed, but untested fields stay `"unknown"` or `"unsupported"` instead of
+assuming the strongest deployment configuration.
+
+The reusable test runner is available without a pytest dependency:
+
+```python
+from synor.connectorkits.target_sink_testing import (
+    TargetSinkCertificationScenario,
+    certify_target_sink,
+)
+
+report = await certify_target_sink(
+    TargetSinkCertificationScenario(
+        name="my-connector-row-sink",
+        capabilities=sink.capabilities,
+        actions=actions,
+        reset=reset_external_state,
+        apply=apply_through_sink,
+        snapshot=read_external_state,
+        expected_final_snapshot=expected_state,
+        apply_with_failure_after=apply_with_injected_failure,
+        cancel_apply=cancel_during_external_io,
+        observed_order=read_observed_order,
+        expected_order=expected_order,
+        observed_batches=read_observed_batches,
+        action_size_bytes=estimate_action_size,
+        completion_evidence=read_completion_evidence,
+        apply_with_completion_failure=apply_with_rejected_acknowledgement,
+    )
+)
+```
+
+The runner requires evidence hooks only for the guarantees actually claimed,
+and treats a missing hook as a certification failure. Synor's built-in sink
+inventory is checked in at `dev/target-sink-certification.json`; CI rejects a
+new positive claim unless that manifest names its failure-injection test.
+
 ### TargetReconcileOutput *(you return)*
 
 `TargetReconcileOutput` bundles what `reconcile()` returns when an action is needed:

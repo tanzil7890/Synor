@@ -513,7 +513,12 @@ class _VectorIndexHandler:
         self._pool = pool
         self._table_name = table_name
         self._schema_name = pg_schema_name
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_VectorIndexAction]
@@ -631,7 +636,13 @@ class _SqlCommandHandler:
         self._pool = pool
         self._table_name = table_name
         self._schema_name = pg_schema_name
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                idempotent_replay="unsupported",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_SqlCommandAction]
@@ -701,7 +712,13 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
         self._table_name = table_name
         self._schema_name = pg_schema_name
         self._table_schema = table_schema
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_RowAction]
@@ -974,7 +991,13 @@ class _TableHandler(syn.TargetHandler[_TableSpec, _TableTrackingRecord, _RowHand
     _sink: syn.TargetActionSink[_TableAction, _RowHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Collection[_TableAction]

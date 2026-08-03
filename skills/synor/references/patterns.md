@@ -142,7 +142,9 @@ app = syn.App(syn.AppConfig(name="TextEmbedding"), app_main,
 **Key points:**
 - `mount_table_target(PG_DB, ...)` -- Takes `ContextKey` as first argument
 - `Annotated[NDArray, EMBEDDER]` -- Vector annotation uses ContextKey for auto dimension inference
-- `map()` -- Concurrent execution within a component (no child components created)
+- `map()` -- Unbounded full-fan-in execution within a component
+- `map_bounded()` -- Bounded task and iterator admission for large inputs
+- `map_stream()` -- Bounded completion-order iteration with O(limit) retained results
 - `IdGenerator` -- Generates stable unique IDs for chunks across incremental updates
 - `cache=True` on `process_file` -- Skips unchanged files entirely
 
@@ -314,7 +316,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from confluent_kafka import Message
-from confluent_kafka.aio import AIOConsumer
 
 import synor as syn
 from synor.connectors import kafka, lancedb
@@ -349,10 +350,9 @@ async def app_main() -> None:
         table_schema=await lancedb.TableSchema.from_class(Product, primary_key=["sku"]),
     )
 
-    consumer = AIOConsumer({
+    consumer = kafka.create_consumer({
         "bootstrap.servers": "localhost:9092",
         "group.id": "my-group",
-        "enable.auto.commit": "false",
         "auto.offset.reset": "earliest",
     })
     items = kafka.topic_as_map(consumer, ["products-topic"])

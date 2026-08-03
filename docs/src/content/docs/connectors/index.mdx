@@ -12,6 +12,25 @@ A *connector* links a Synor flow to an external system. It plays one or both of 
 
 Some connectors do both. Each page documents the APIs for whichever roles the system supports, under `## As source` / `## As target` sections.
 
+## Target sink guarantees
+
+Every built-in target sink has an explicit `TargetSinkCapabilities` contract.
+You can inspect `sink.capabilities.to_dict()` to distinguish atomicity, replay,
+replay-safe segmentation, ordering, cancellation recovery, provider
+acknowledgement versus query verification, and effective connector batch
+limits. An `"unknown"` value is a deliberate non-claim, not an optimistic
+default.
+
+Positive guarantees must have named failure-injection evidence in
+`dev/target-sink-certification.json`. Today, the SQLite row sink certifies
+per-apply transaction rollback, idempotent replay including replay after a
+completed segment, and commit acknowledgement; the Kafka message sink certifies
+that delivery-report rejection propagates and only an acknowledged delivery
+completes successfully. Other built-in sink tiers publish conservative
+declarations until their real-service failure suites are promoted to
+certification. This prevents a mock-only success test from silently becoming a
+production guarantee.
+
 ## Sources
 
 Connectors that feed rows into a flow.

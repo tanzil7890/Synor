@@ -456,7 +456,13 @@ class _SharedRecordApplier:
 
     def __init__(self, graph: Any) -> None:
         self._graph = graph
-        self.sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self.sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_RecordAction]
@@ -591,7 +597,13 @@ class _VectorIndexHandler:
     def __init__(self, graph: Any, table_name: str) -> None:
         self._graph = graph
         self._table_name = table_name
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                completion_verification="unverified",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_VectorIndexAction]
@@ -929,7 +941,14 @@ class _TableHandler(
     _sink: syn.TargetActionSink[_TableAction, _RecordHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+                completion_verification="unverified",
+            ),
+        )
 
     def reconcile(
         self,
@@ -945,9 +964,7 @@ class _TableHandler(
         key = _TableKey(*_TABLE_KEY_CHECKER.check(key))
 
         if syn.is_absent(desired_state):
-            tracking_record: _TableTrackingRecord | syn.AbsentType = (
-                syn.ABSENT
-            )
+            tracking_record: _TableTrackingRecord | syn.AbsentType = syn.ABSENT
             is_relation = False
         else:
             tracking_record = statediff.MutualTrackingRecord(
@@ -972,11 +989,7 @@ class _TableHandler(
                 if action is not None:
                     column_actions[sub_key] = action
 
-        if (
-            main_action is None
-            and not column_actions
-            and syn.is_absent(desired_state)
-        ):
+        if main_action is None and not column_actions and syn.is_absent(desired_state):
             return None
 
         # Recover prev PK + entity kind from the most recent system-managed

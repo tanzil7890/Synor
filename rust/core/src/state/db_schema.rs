@@ -38,8 +38,10 @@ pub const LIVE_COMPONENT_GENERATION_KEY_SYMBOL: &str = "synor/_internal/live_com
 pub struct NativeSchemaVersion(pub u32);
 
 impl NativeSchemaVersion {
-    pub const CURRENT: Self = Self(3);
+    pub const CURRENT: Self = Self(4);
     pub const MIN_SUPPORTED: Self = Self(1);
+    pub const LINEAGE_INDEXED: Self = Self(3);
+    pub const OBLIGATION_SUMMARY: Self = Self(4);
 
     pub fn is_supported(self) -> bool {
         (Self::MIN_SUPPORTED.0..=Self::CURRENT.0).contains(&self.0)
@@ -225,6 +227,11 @@ pub enum DbEntryKey<'a> {
     /// Value type:
     /// [`crate::state::native_effect::NativeEffectLineageCursor`].
     NativeEffectLineage(Fingerprint),
+    /// Singleton transactionally maintained totals for unresolved effects
+    /// and query-verified tombstones.
+    /// Value type:
+    /// [`crate::state::native_effect::NativeObligationSummary`].
+    NativeObligationSummary,
 }
 
 impl<'a> storekey::Encode for DbEntryKey<'a> {
@@ -291,6 +298,9 @@ impl<'a> storekey::Encode for DbEntryKey<'a> {
                 e.write_u8(0x50)?;
                 fp.encode(e)?;
             }
+            DbEntryKey::NativeObligationSummary => {
+                e.write_u8(0x58)?;
+            }
         }
         Ok(())
     }
@@ -331,6 +341,7 @@ impl<'a> storekey::Decode for DbEntryKey<'a> {
                 let fp: Fingerprint = storekey::Decode::decode(d)?;
                 DbEntryKey::NativeEffectLineage(fp)
             }
+            0x58 => DbEntryKey::NativeObligationSummary,
             _ => return Err(storekey::DecodeError::InvalidFormat),
         };
         Ok(key)
@@ -752,6 +763,7 @@ mod tests {
         let lineage_key = DbEntryKey::NativeEffectLineage(fingerprint)
             .encode()
             .unwrap();
+        let summary_key = DbEntryKey::NativeObligationSummary.encode().unwrap();
 
         assert_eq!(schema_key, vec![0x38]);
         assert_eq!(effect_prefix, vec![0x40]);
@@ -761,6 +773,7 @@ mod tests {
         assert!(!obligation_key.starts_with(&effect_prefix));
         assert_eq!(lineage_prefix, vec![0x50]);
         assert!(lineage_key.starts_with(&lineage_prefix));
+        assert_eq!(summary_key, vec![0x58]);
         assert_ne!(effect_prefix[0], 0x10);
         assert_ne!(effect_prefix[0], 0x20);
         assert_ne!(effect_prefix[0], 0x28);
@@ -779,6 +792,10 @@ mod tests {
         assert!(
             matches!(DbEntryKey::decode(&lineage_key).unwrap(), DbEntryKey::NativeEffectLineage(fp) if fp == fingerprint)
         );
+        assert!(matches!(
+            DbEntryKey::decode(&summary_key).unwrap(),
+            DbEntryKey::NativeObligationSummary
+        ));
     }
 
     #[test]

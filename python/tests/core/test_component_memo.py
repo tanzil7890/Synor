@@ -134,7 +134,8 @@ def test_source_data_memo() -> None:
     _source_data["A"] = SourceDataEntry(
         name="A", version=2, content="contentA2", err=True
     )
-    app.update_blocking()
+    with pytest.raises(Exception, match="injected test exception"):
+        app.update_blocking()
     _source_data["A"] = SourceDataEntry(name="A", version=1, content="contentA3")
     app.update_blocking()
     assert _metrics.collect() == {"calls": 1}

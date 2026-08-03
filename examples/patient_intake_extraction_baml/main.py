@@ -23,9 +23,7 @@ async def process_patient_form(file: FileLike, outdir: pathlib.Path) -> None:
     patient_info = await extract_patient_info(content)
     patient_json = patient_info.model_dump_json(indent=2)
     output_filename = file.file_path.path.stem + ".json"
-    localfs.ensure_file(
-        outdir / output_filename, patient_json, create_parent_dirs=True
-    )
+    localfs.ensure_file(outdir / output_filename, patient_json, create_parent_dirs=True)
 
 
 @syn.task

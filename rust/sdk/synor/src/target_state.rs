@@ -7,6 +7,10 @@ use std::sync::Arc;
 
 use serde::{Serialize, de::DeserializeOwned};
 use synor_core::engine::target_state::{ChildInvalidation, TargetActionSinkKeeper};
+pub use synor_core::engine::target_state::{
+    SinkApplyOrdering, SinkBatchAtomicity, SinkCapabilities, SinkCapabilitySupport,
+    SinkCompletionVerification, SinkQueueStats,
+};
 pub use synor_core::state::stable_path::StableKey;
 
 use crate::ctx::{ContextStore, Ctx};
@@ -196,22 +200,34 @@ where
         F: Fn(Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        let inner = TargetActionSinkKeeper::new(BoxedSink::new(move |actions| {
-            let decoded = actions
-                .into_iter()
-                .map(decode_action::<A>)
-                .collect::<Result<Vec<_>>>();
-            let fut = match decoded {
-                Ok(actions) => {
-                    Box::pin(f(actions)) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                }
-                Err(err) => Box::pin(async move { Err(err) }),
-            };
-            Box::pin(async move {
-                fut.await.map_err(crate::error::Error::into_core)?;
-                Ok(None)
-            })
-        }));
+        Self::from_async_fn_with_capabilities(f, SinkCapabilities::default())
+    }
+
+    /// Build a sink with an explicit, machine-readable operational contract.
+    pub fn from_async_fn_with_capabilities<F, Fut>(f: F, capabilities: SinkCapabilities) -> Self
+    where
+        F: Fn(Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let inner = TargetActionSinkKeeper::new(BoxedSink::new_with_capabilities(
+            move |actions| {
+                let decoded = actions
+                    .into_iter()
+                    .map(decode_action::<A>)
+                    .collect::<Result<Vec<_>>>();
+                let fut = match decoded {
+                    Ok(actions) => {
+                        Box::pin(f(actions)) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                    }
+                    Err(err) => Box::pin(async move { Err(err) }),
+                };
+                Box::pin(async move {
+                    fut.await.map_err(crate::error::Error::into_core)?;
+                    Ok(None)
+                })
+            },
+            capabilities,
+        ));
         Self {
             inner,
             _action: PhantomData,
@@ -230,33 +246,60 @@ where
         F: Fn(Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<Option<ChildTargetDef>>>> + Send + 'static,
     {
-        let inner = TargetActionSinkKeeper::new(BoxedSink::new(move |actions| {
-            let decoded = actions
-                .into_iter()
-                .map(decode_action::<A>)
-                .collect::<Result<Vec<_>>>();
-            let fut = match decoded {
-                Ok(actions) => Box::pin(f(actions))
-                    as Pin<Box<dyn Future<Output = Result<Vec<Option<ChildTargetDef>>>> + Send>>,
-                Err(err) => Box::pin(async move { Err(err) }),
-            };
-            Box::pin(async move {
-                let defs = fut.await.map_err(crate::error::Error::into_core)?;
-                let mapped = defs
+        Self::from_async_fn_with_children_and_capabilities(f, SinkCapabilities::default())
+    }
+
+    /// Build a container sink with an explicit operational contract.
+    pub fn from_async_fn_with_children_and_capabilities<F, Fut>(
+        f: F,
+        capabilities: SinkCapabilities,
+    ) -> Self
+    where
+        F: Fn(Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Option<ChildTargetDef>>>> + Send + 'static,
+    {
+        let inner = TargetActionSinkKeeper::new(BoxedSink::new_with_capabilities(
+            move |actions| {
+                let decoded = actions
                     .into_iter()
-                    .map(|d| {
-                        d.map(|d| synor_core::engine::target_state::ChildTargetDef {
-                            handler: d.handler,
+                    .map(decode_action::<A>)
+                    .collect::<Result<Vec<_>>>();
+                let fut = match decoded {
+                    Ok(actions) => Box::pin(f(actions))
+                        as Pin<
+                            Box<dyn Future<Output = Result<Vec<Option<ChildTargetDef>>>> + Send>,
+                        >,
+                    Err(err) => Box::pin(async move { Err(err) }),
+                };
+                Box::pin(async move {
+                    let defs = fut.await.map_err(crate::error::Error::into_core)?;
+                    let mapped = defs
+                        .into_iter()
+                        .map(|d| {
+                            d.map(|d| synor_core::engine::target_state::ChildTargetDef {
+                                handler: d.handler,
+                            })
                         })
-                    })
-                    .collect();
-                Ok(Some(mapped))
-            })
-        }));
+                        .collect();
+                    Ok(Some(mapped))
+                })
+            },
+            capabilities,
+        ));
         Self {
             inner,
             _action: PhantomData,
         }
+    }
+
+    /// Return the sink's versioned operational contract.
+    pub fn capabilities(&self) -> SinkCapabilities {
+        self.inner.capabilities()
+    }
+
+    /// Return point-in-time pressure metrics for this sink's bounded queue.
+    pub fn queue_stats(&self) -> SinkQueueStats {
+        self.inner.queue_stats()
     }
 
     /// Like [`Self::from_async_fn`], but the apply closure also receives the
@@ -271,8 +314,21 @@ where
         F: Fn(Arc<ContextStore>, Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        let inner =
-            TargetActionSinkKeeper::new(BoxedSink::new_with_ctx(move |host_ctx, actions| {
+        Self::from_async_fn_with_ctx_and_capabilities(f, SinkCapabilities::default())
+    }
+
+    /// Build a context-aware sink with an explicit operational contract.
+    #[allow(dead_code)]
+    pub(crate) fn from_async_fn_with_ctx_and_capabilities<F, Fut>(
+        f: F,
+        capabilities: SinkCapabilities,
+    ) -> Self
+    where
+        F: Fn(Arc<ContextStore>, Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let inner = TargetActionSinkKeeper::new(BoxedSink::new_with_ctx_and_capabilities(
+            move |host_ctx, actions| {
                 let decoded = actions
                     .into_iter()
                     .map(decode_action::<A>)
@@ -286,7 +342,9 @@ where
                     fut.await.map_err(crate::error::Error::into_core)?;
                     Ok(None)
                 })
-            }));
+            },
+            capabilities,
+        ));
         Self {
             inner,
             _action: PhantomData,
@@ -301,8 +359,21 @@ where
         F: Fn(Arc<ContextStore>, Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Vec<Option<ChildTargetDef>>>> + Send + 'static,
     {
-        let inner =
-            TargetActionSinkKeeper::new(BoxedSink::new_with_ctx(move |host_ctx, actions| {
+        Self::from_async_fn_with_children_ctx_and_capabilities(f, SinkCapabilities::default())
+    }
+
+    /// Build a context-aware container sink with an explicit contract.
+    #[allow(dead_code)]
+    pub(crate) fn from_async_fn_with_children_ctx_and_capabilities<F, Fut>(
+        f: F,
+        capabilities: SinkCapabilities,
+    ) -> Self
+    where
+        F: Fn(Arc<ContextStore>, Vec<TargetAction<A>>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<Option<ChildTargetDef>>>> + Send + 'static,
+    {
+        let inner = TargetActionSinkKeeper::new(BoxedSink::new_with_ctx_and_capabilities(
+            move |host_ctx, actions| {
                 let decoded = actions
                     .into_iter()
                     .map(decode_action::<A>)
@@ -326,7 +397,9 @@ where
                         .collect();
                     Ok(Some(mapped))
                 })
-            }));
+            },
+            capabilities,
+        ));
         Self {
             inner,
             _action: PhantomData,
@@ -571,5 +644,35 @@ mod tests {
         );
         assert_ne!(key, StableKey::Int(-1));
         assert_ne!(key, StableKey::Str(Arc::from(u64::MAX.to_string())));
+    }
+
+    #[test]
+    fn context_aware_sink_preserves_explicit_capabilities() {
+        let capabilities = SinkCapabilities {
+            max_batch_actions: Some(7),
+            max_batch_bytes: Some(4_096),
+            ..SinkCapabilities::default()
+        };
+        let sink = TargetActionSink::<u64>::from_async_fn_with_ctx_and_capabilities(
+            |_host_ctx, _actions| async { Ok(()) },
+            capabilities,
+        );
+
+        assert_eq!(sink.capabilities(), capabilities);
+    }
+
+    #[test]
+    fn context_aware_child_sink_preserves_explicit_capabilities() {
+        let capabilities = SinkCapabilities {
+            max_batch_actions: Some(3),
+            max_batch_bytes: Some(2_048),
+            ..SinkCapabilities::default()
+        };
+        let sink = TargetActionSink::<u64>::from_async_fn_with_children_ctx_and_capabilities(
+            |_host_ctx, _actions| async { Ok(Vec::new()) },
+            capabilities,
+        );
+
+        assert_eq!(sink.capabilities(), capabilities);
     }
 }

@@ -8,6 +8,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use synor_core::engine::context::{ComponentProcessorContext, FnCallContext};
@@ -26,6 +27,7 @@ use crate::live_component::{
     MountKind, build_chained_on_error, new_operator, start_process_live,
 };
 use crate::profile::{BoxedHandler, BoxedProcessor, RustProfile, Value};
+use crate::readiness::ReadinessOutcome;
 use crate::user_state::{IntoStateKey, StateHandle};
 
 type ContextFingerprinter<T> = Arc<dyn Fn(&str, &T) -> Result<Fingerprint> + Send + Sync>;
@@ -634,12 +636,9 @@ impl Ctx {
         let stable_path = child_path.to_string();
         let fn_ctx = Arc::new(FnCallContext::default());
         let pending = mount_live_prepare(comp_ctx, &fn_ctx, child_path, comp_ctx.live())
-            .map_err(|e| Error::engine(format!("{e}")))?;
+            .map_err(Error::from)?;
         let _guard = fn_call_guard(comp_ctx, fn_ctx);
-        let result = pending
-            .complete()
-            .await
-            .map_err(|e| Error::engine(format!("{e}")))?;
+        let result = pending.complete().await.map_err(Error::from)?;
         let controller = result.controller;
         let readiness_handle = result.readiness_handle;
         let state = self.state.clone();
@@ -669,21 +668,18 @@ impl Ctx {
                             controller.mark_ready().await;
                             ready_marked = true;
                         }
-                        Err(err) if ready_marked && !err.is_cancelled() => {
-                            tracing::error!(
-                                "auto_refresh cycle failed after readiness for `{key_str}`: {err:?}"
-                            );
-                        }
+                        // `auto_refresh` is an explicit retry policy. The
+                        // failed cycle has already been reported by
+                        // update_full; only post-readiness non-cancellation
+                        // failures are eligible for the next scheduled cycle.
+                        Err(err) if ready_marked && !err.is_cancelled() => {}
                         Err(err) => return Err(err),
                     }
                     tokio::time::sleep(interval).await;
                 }
             }
         });
-        readiness_handle
-            .ready()
-            .await
-            .map_err(|e| Error::engine(format!("{e}")))
+        readiness_handle.ready().await.map_err(Error::from)
     }
 
     /// Mount a [`LiveComponent`] under `key`.
@@ -697,19 +693,48 @@ impl Ctx {
         K: Display,
         C: LiveComponent,
     {
+        self.mount_live_outcome(key, component).await.into_result()
+    }
+
+    /// Mount a [`LiveComponent`] and return its explicit initial-readiness
+    /// outcome instead of converting it to `Result<()>`.
+    pub async fn mount_live_outcome<K, C>(&self, key: &K, component: C) -> ReadinessOutcome
+    where
+        K: Display,
+        C: LiveComponent,
+    {
         self.mount_live_impl(key.to_string(), Arc::new(component), None)
             .await
     }
 
     /// Like [`Ctx::mount_live`], but routes background failures (full-pass and
-    /// incremental update/delete) through `handler`. The handler returns
-    /// `Ok(())` to swallow a failure or `Err(_)` to propagate it.
+    /// incremental update/delete) through `handler`. `Ok(())` completes
+    /// reporting; `Err(_)` delegates reporting outward. The failed operation
+    /// remains terminal either way.
     pub async fn mount_live_with_handler<K, C, H>(
         &self,
         key: &K,
         component: C,
         handler: H,
     ) -> Result<()>
+    where
+        K: Display,
+        C: LiveComponent,
+        H: Fn(&Error, &ExceptionContext) -> Result<()> + Send + Sync + 'static,
+    {
+        self.mount_live_with_handler_outcome(key, component, handler)
+            .await
+            .into_result()
+    }
+
+    /// Like [`Ctx::mount_live_with_handler`], but returns the explicit initial
+    /// readiness outcome.
+    pub async fn mount_live_with_handler_outcome<K, C, H>(
+        &self,
+        key: &K,
+        component: C,
+        handler: H,
+    ) -> ReadinessOutcome
     where
         K: Display,
         C: LiveComponent,
@@ -789,28 +814,33 @@ impl Ctx {
         key_str: String,
         instance: Arc<dyn LiveComponent>,
         handler: Option<ExceptionHandler>,
-    ) -> Result<()> {
+    ) -> ReadinessOutcome {
         let Some(comp_ctx) = &self.comp_ctx else {
             // No pipeline context — run a single full pass directly, matching
             // `auto_refresh`'s standalone behavior.
-            return instance.process(self.clone()).await;
+            return ReadinessOutcome::from_result(instance.process(self.clone()).await);
         };
 
         let child_stable_key = StableKey::Str(Arc::from(key_str.as_str()));
         let child_path = comp_ctx.stable_path().concat_part(child_stable_key);
         let fn_ctx = Arc::new(FnCallContext::default());
-        let pending = mount_live_prepare(comp_ctx, &fn_ctx, child_path.clone(), comp_ctx.live())
-            .map_err(|e| Error::engine(format!("{e}")))?;
+        let pending =
+            match mount_live_prepare(comp_ctx, &fn_ctx, child_path.clone(), comp_ctx.live())
+                .map_err(Error::from)
+            {
+                Ok(pending) => pending,
+                Err(error) => return ReadinessOutcome::from_result(Err(error)),
+            };
         let _guard = fn_call_guard(comp_ctx, fn_ctx);
-        let result = pending
-            .complete()
-            .await
-            .map_err(|e| Error::engine(format!("{e}")))?;
+        let result = match pending.complete().await.map_err(Error::from) {
+            Ok(result) => result,
+            Err(error) => return ReadinessOutcome::from_result(Err(error)),
+        };
         let controller = result.controller;
         let readiness_handle = result.readiness_handle;
 
-        // Inherit ancestors' handlers and append this component's own, so an
-        // unswallowed failure walks outward through the chain.
+        // Inherit ancestors' handlers and append this component's own, so a
+        // reporting error walks outward through the chain.
         let handler_chain = match handler {
             Some(handler) => {
                 let mut chain = (*self.handler_chain).clone();
@@ -830,10 +860,7 @@ impl Ctx {
         );
         start_process_live(&controller, instance, operator);
 
-        readiness_handle
-            .ready()
-            .await
-            .map_err(|e| Error::engine(format!("{e}")))
+        ReadinessOutcome::from_core(readiness_handle.outcome().await)
     }
 
     /// Named sub-component. Creates a child scope in the pipeline tree.
@@ -1121,6 +1148,11 @@ impl Ctx {
     ///
     /// Like `futures::future::join_all` plus result collection: every started
     /// item runs to completion, then the first error in input order is returned.
+    /// This method intentionally polls every item concurrently so fan-in work
+    /// such as an all-item barrier can make progress. Use [`Self::map_bounded`]
+    /// when the number of in-flight item futures needs an explicit bound.
+    /// Both methods return an ordered `Vec`, so retained results are inherently
+    /// O(n) in the number of input items.
     ///
     /// # Examples
     ///
@@ -1160,6 +1192,93 @@ impl Ctx {
         let outcomes = futures::future::join_all(futs).await;
         let mut values = Vec::with_capacity(outcomes.len());
         for outcome in outcomes {
+            values.push(outcome?);
+        }
+        Ok(values)
+    }
+
+    /// Run a closure for each item with at most `max_in_flight` item futures
+    /// executing concurrently (no child scopes).
+    ///
+    /// Results preserve input order even when items complete out of order. Once
+    /// an item fails, no new items are pulled from the iterable. Futures that
+    /// were already admitted are drained, and the lowest-input-index failure
+    /// among that started window is returned. In contrast, [`Self::map`]
+    /// eagerly starts and drains every item.
+    ///
+    /// The concurrency bound applies to item futures, not returned values. The
+    /// ordered `Vec` necessarily retains O(n) results. A bounded map also cannot
+    /// make progress when an item waits for more than `max_in_flight` siblings
+    /// to start (for example, an all-input barrier wider than the bound). Use
+    /// [`Self::map`] for that fan-in shape, or choose a sufficient bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `max_in_flight` is zero or when any item closure
+    /// returns an error.
+    pub async fn map_bounded<I, F, Fut, T>(
+        &self,
+        items: I,
+        max_in_flight: usize,
+        f: F,
+    ) -> Result<Vec<T>>
+    where
+        I: IntoIterator,
+        T: Send + 'static,
+        F: Fn(I::Item) -> Fut,
+        Fut: Future<Output = Result<T>> + Send + 'static,
+    {
+        if max_in_flight == 0 {
+            return Err(Error::engine("max_in_flight must be at least 1"));
+        }
+        self.check_cancellation()?;
+
+        let deadline = self.deadline;
+        let mut items = items.into_iter().enumerate();
+        let make_task = |(index, item)| {
+            // Construct the item future only when the bounded scheduler admits
+            // it. This keeps both futures and closure-owned inputs bounded.
+            let future = deadline.check().map_err(Error::from).map(|()| f(item));
+            async move {
+                let result = match future {
+                    Ok(future) => future.await,
+                    Err(error) => Err(error),
+                };
+                let result = if result.is_ok() {
+                    deadline.check().map_err(Error::from).and(result)
+                } else {
+                    result
+                };
+                (index, result)
+            }
+        };
+        let mut tasks = futures::stream::FuturesUnordered::new();
+        for item in items.by_ref().take(max_in_flight) {
+            tasks.push(make_task(item));
+        }
+
+        let mut outcomes: Vec<Option<Result<T>>> = Vec::new();
+        let mut admission_stopped = false;
+        while let Some((index, outcome)) = tasks.next().await {
+            if outcome.is_err() {
+                admission_stopped = true;
+            }
+            if outcomes.len() <= index {
+                outcomes.resize_with(index + 1, || None);
+            }
+            outcomes[index] = Some(outcome);
+            if !admission_stopped {
+                if let Some(item) = items.next() {
+                    tasks.push(make_task(item));
+                }
+            }
+        }
+
+        let mut values = Vec::with_capacity(outcomes.len());
+        for outcome in outcomes {
+            let outcome = outcome.ok_or_else(|| {
+                Error::engine("bounded map item completed without recording a result")
+            })?;
             values.push(outcome?);
         }
         Ok(values)

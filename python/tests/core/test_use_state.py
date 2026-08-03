@@ -348,7 +348,8 @@ def test_use_state_unserializable_value_errors_at_commit_with_key() -> None:
         items=_source_items,
     )
     _source_items[:] = ["a"]
-    app.update_blocking()
+    with pytest.raises(NotImplementedError, match="Cannot serialize _Unserializable"):
+        app.update_blocking()
 
     assert len(captured) == 1
     assert "bad_key" in str(captured[0])  # error identifies the failing key
@@ -867,13 +868,9 @@ def test_use_state_type_hint_mismatch_raises_deserialization_error() -> None:
         async with syn.exception_handler(handler):
             for item in items:
                 if _store_mode[0]:
-                    await syn.spawn(
-                        syn.unit_path(item), _process_store_int, item
-                    )
+                    await syn.spawn(syn.unit_path(item), _process_store_int, item)
                 else:
-                    await syn.spawn(
-                        syn.unit_path(item), _process_load_as_cursor, item
-                    )
+                    await syn.spawn(syn.unit_path(item), _process_load_as_cursor, item)
 
     app = syn.App(  # type: ignore[type-arg]
         syn.AppConfig(name="use_state_type_hint_mismatch", environment=synor_env),
@@ -890,7 +887,8 @@ def test_use_state_type_hint_mismatch_raises_deserialization_error() -> None:
     _store_mode[0] = False
     _captured.clear()
     captured.clear()
-    app.update_blocking()
+    with pytest.raises(Exception, match="Failed to deserialize msgspec payload"):
+        app.update_blocking()
     assert len(captured) == 1
     exc_text = str(captured[0])
     assert "DeserializationError" in exc_text

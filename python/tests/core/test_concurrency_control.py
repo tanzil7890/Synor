@@ -204,3 +204,47 @@ def test_env_var_fallback() -> None:
 
     assert _tracker.total == 6
     assert _tracker.peak <= 2
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_rejects_non_positive_max_inflight_components(value: int) -> None:
+    with pytest.raises(ValueError, match="at least 1"):
+        syn.App(
+            syn.AppConfig(
+                name=f"test_invalid_max_inflight_{value}",
+                environment=synor_env,
+                max_inflight_components=value,
+            ),
+            _noop,
+        )
+
+
+def test_rejects_bool_max_inflight_components() -> None:
+    with pytest.raises(TypeError, match="must be an int"):
+        syn.App(
+            syn.AppConfig(
+                name="test_bool_max_inflight",
+                environment=synor_env,
+                max_inflight_components=True,
+            ),
+            _noop,
+        )
+
+
+def test_rejects_non_positive_env_var_max_inflight_components() -> None:
+    original = os.environ.get("SYNOR_MAX_INFLIGHT_COMPONENTS")
+    try:
+        os.environ["SYNOR_MAX_INFLIGHT_COMPONENTS"] = "0"
+        with pytest.raises(ValueError, match="at least 1"):
+            syn.App(
+                syn.AppConfig(
+                    name="test_invalid_env_var_max_inflight",
+                    environment=synor_env,
+                ),
+                _noop,
+            )
+    finally:
+        if original is None:
+            os.environ.pop("SYNOR_MAX_INFLIGHT_COMPONENTS", None)
+        else:
+            os.environ["SYNOR_MAX_INFLIGHT_COMPONENTS"] = original

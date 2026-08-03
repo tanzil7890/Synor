@@ -282,7 +282,13 @@ class _RowHandler(syn.TargetHandler[Row, _RowFingerprint]):
         self._client = client
         self._namespace_name = namespace_name
         self._schema = schema
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_RowAction]
@@ -381,7 +387,12 @@ class _NamespaceHandler(
     _sink: syn.TargetActionSink[_NamespaceAction, _RowHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Collection[_NamespaceAction]

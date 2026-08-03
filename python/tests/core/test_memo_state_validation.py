@@ -38,9 +38,7 @@ class Entry:
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
         # State changed → not reusable (simple case matching prior behavior)
-        memo_valid = (
-            not syn.is_absent(prev_state) and self.state_value == prev_state
-        )
+        memo_valid = not syn.is_absent(prev_state) and self.state_value == prev_state
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
 
@@ -266,9 +264,7 @@ class MultiEntry:
         return (self.name, self.version)
 
     def __synor_memo_state__(self, prev_state: Any) -> syn.MemoStateOutcome:
-        memo_valid = (
-            not syn.is_absent(prev_state) and self.state_value == prev_state
-        )
+        memo_valid = not syn.is_absent(prev_state) and self.state_value == prev_state
         return syn.MemoStateOutcome(state=self.state_value, memo_valid=memo_valid)
 
 

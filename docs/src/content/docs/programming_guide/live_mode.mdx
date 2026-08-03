@@ -126,15 +126,13 @@ For a complete working example, see `files_transform`.
 The [`kafka`](../connectors/kafka) connector treats a topic as a live keyed map — each message is an upsert or delete for a key. Since there's no snapshot to scan, it returns a `LiveMapFeed`:
 
 ```python
-from confluent_kafka.aio import AIOConsumer
 from synor.connectors import kafka
 
 @syn.task
 async def app_main() -> None:
-    consumer = AIOConsumer({
+    consumer = kafka.create_consumer({
         "bootstrap.servers": "localhost:9092",
         "group.id": "my-group",
-        "enable.auto.commit": "false",
     })
     items = kafka.topic_as_map(consumer, ["my-topic"])
     await syn.spawn_each(process_message, items)

@@ -63,9 +63,7 @@ def test_detect_change_key_invalidates_memo() -> None:
     def process(name: str, content: str) -> None:
         val = syn.use_context(_CHANGE_DETECTED_KEY)
         metrics.increment("calls")
-        syn.ensure_target_state(
-            GlobalDictTarget.target_state(name, f"{val}:{content}")
-        )
+        syn.ensure_target_state(GlobalDictTarget.target_state(name, f"{val}:{content}"))
 
     @syn.task
     async def app_main() -> None:
@@ -101,9 +99,7 @@ def test_no_detect_change_key_no_invalidation() -> None:
     def process(name: str, content: str) -> None:
         val = syn.use_context(_NO_CHANGE_DETECT_KEY)
         metrics.increment("calls")
-        syn.ensure_target_state(
-            GlobalDictTarget.target_state(name, f"{val}:{content}")
-        )
+        syn.ensure_target_state(GlobalDictTarget.target_state(name, f"{val}:{content}"))
 
     @syn.task
     async def app_main() -> None:

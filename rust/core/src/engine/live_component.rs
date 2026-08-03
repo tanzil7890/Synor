@@ -1,8 +1,12 @@
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
+
+use futures::FutureExt;
 
 use crate::engine::component::{
-    Component, ComponentBgChildReadinessChildGuard, ComponentExecutionHandle, OnError,
+    Component, ComponentBgChildReadinessChildGuard, ComponentExecutionHandle,
+    ComponentTerminalOutcome, OnError,
 };
 use crate::engine::context::{ComponentProcessingAction, ComponentProcessorContext, FnCallContext};
 use crate::engine::profile::EngineProfile;
@@ -13,7 +17,7 @@ use crate::state::db_schema::{ChildTombstoneCause, LIVE_COMPONENT_GENERATION_KEY
 use crate::state::native_effect::NativeVerificationPolicy;
 use crate::state::stable_path::{StableKey, StablePath};
 use crate::state::target_state_path::TargetStatePath;
-use synor_utils::error::{SharedError, SharedResult, SharedResultExt};
+use synor_utils::error::{SharedError, SharedResultExt};
 
 use tokio::sync::oneshot;
 
@@ -206,10 +210,8 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
         );
 
         // 9. Create readiness handle that resolves when mark_ready is called.
-        let readiness_handle = ComponentExecutionHandle::new(async move {
-            state.ready_notified().await;
-            Ok(())
-        });
+        let readiness_handle =
+            ComponentExecutionHandle::from_terminal(async move { state.ready_terminal().await });
 
         Ok(MountLiveResult {
             controller,
@@ -218,50 +220,33 @@ impl<Prof: EngineProfile> MountLivePending<Prof> {
     }
 }
 
-/// Outcome of an `update`/`delete` op as observed by its `ComponentMountHandle`.
-///
-/// Currently surfaces to Python through `make_handle`'s legacy
-/// `ComponentExecutionHandle` adapter:
-///   - `Executed(Ok(()))`   → `Ok(())`            — op ran cleanly
-///   - `Executed(Err(e))`   → `Err(e)`            — user code error
-///   - `Superseded`         → `Ok(())`            — coalesced; treated as no-op success
-///   - `Cancelled`          → `Err(<cancelled>)`  — drain saw cancellation mid-op
-///
-/// The Python `MountOutcome` enum (4 variants: Executed/Superseded/Cancelled/Failed)
-/// reconstructs this approximately at the boundary. Cancellation surfaces
-/// cleanly via `Error::cancelled()` → `asyncio.CancelledError` (typed, no
-/// string matching). The remaining boundary loss is `Superseded` being
-/// collapsed into `Executed` — exposing `HandleOutcome` directly via PyO3
-/// would close that gap.
-pub(crate) enum HandleOutcome {
-    Executed(SharedResult<()>),
-    Superseded,
-    Cancelled,
-}
+/// Live update/delete readiness uses the same explicit four-state terminal
+/// outcome as ordinary background component execution. The Python `ready()`
+/// compatibility surface maps Succeeded/Superseded to `None`, Failed to its
+/// exception, and Cancelled to `asyncio.CancelledError`.
 
 /// Readiness state. Under a single Mutex so mark_ready() can atomically
 /// take the guard and set the ready flag.
 pub(crate) struct ReadinessState {
     guard: Option<ComponentBgChildReadinessChildGuard>,
-    ready: bool,
+    terminal: Option<ComponentTerminalOutcome>,
 }
 
 /// One queued op for a subpath, paired with the oneshot sender that
 /// resolves the caller's handle.
 struct QueuedOp<Prof: EngineProfile> {
     op: Op<Prof>,
-    /// Single-shot. Resolved with `Executed(outcome)` if this op runs, or
+    /// Single-shot. Resolved with Succeeded/Failed if this op runs,
     /// `Superseded` immediately if displaced before the drain task picks it
-    /// up, or `Cancelled` if the drain task observes cancellation while
-    /// running this op.
-    handle_tx: oneshot::Sender<HandleOutcome>,
+    /// up, or `Cancelled` if the drain task observes cancellation.
+    handle_tx: oneshot::Sender<ComponentTerminalOutcome>,
 }
 
 enum Op<Prof: EngineProfile> {
     /// `update(subpath, processor)` — calls `child.run_in_background`.
     /// Failures route through `on_error` (parent's exception handler
-    /// chain); the handler's `Result` decides propagation (Ok = swallow
-    /// mount-style; Err = propagate via `handle.ready()`).
+    /// chain) for reporting, then propagate via `handle.ready()` regardless
+    /// of the handler's result.
     Update {
         processor: Prof::ComponentProc,
         on_error: Option<OnError>,
@@ -273,7 +258,7 @@ enum Op<Prof: EngineProfile> {
         result_tx: oneshot::Sender<std::result::Result<MountLiveResult<Prof>, SharedError>>,
     },
     /// `delete(subpath)` — calls `child.delete`. Same error model as
-    /// `Update`: handler controls whether failures propagate. The DB
+    /// `Update`: handlers observe and failures remain terminal. The DB
     /// tombstone+existence-removal is performed by the serialized
     /// per-subpath drain immediately before child cleanup, so an in-flight
     /// update cannot recreate existence after a newer delete.
@@ -362,7 +347,7 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
             pending_changed: tokio::sync::Notify::new(),
             readiness: Mutex::new(ReadinessState {
                 guard: Some(readiness_guard),
-                ready: false,
+                terminal: None,
             }),
             ready_notify: tokio::sync::Notify::new(),
             cancellation_token,
@@ -385,8 +370,8 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
         self.live_task.lock().unwrap().take()
     }
 
-    /// Wait until `mark_ready()` is signaled (or already was).
-    pub async fn ready_notified(&self) {
+    /// Wait for and return the first terminal readiness outcome.
+    pub(crate) async fn ready_terminal(&self) -> ComponentTerminalOutcome {
         // `Notify::notified()` does NOT register a waiter — registration
         // happens on first poll. Use `pin!` + `enable()` while holding the
         // readiness lock so any `ensure_mark_ready` between our flag-check
@@ -396,39 +381,40 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
         tokio::pin!(notified);
         {
             let state = self.readiness.lock().unwrap();
-            if state.ready {
-                return;
+            if let Some(terminal) = &state.terminal {
+                return terminal.clone();
             }
             notified.as_mut().enable();
         }
         notified.await;
+        self.readiness
+            .lock()
+            .unwrap()
+            .terminal
+            .clone()
+            .expect("readiness notification requires a terminal outcome")
     }
 
     fn is_ready(&self) -> bool {
-        self.readiness.lock().unwrap().ready
+        self.readiness.lock().unwrap().terminal.is_some()
     }
 
-    /// Resolve readiness as success. No-op if already resolved.
-    fn ensure_mark_ready(&self) {
+    /// Resolve readiness with an explicit terminal outcome. The first state
+    /// wins, keeping completion deterministic under cancellation races.
+    fn resolve_terminal(&self, terminal: ComponentTerminalOutcome) {
         let mut state = self.readiness.lock().unwrap();
-        if !state.ready {
-            state.ready = true;
+        if state.terminal.is_none() {
+            state.terminal = Some(terminal.clone());
             if let Some(guard) = state.guard.take() {
-                guard.resolve(Default::default());
+                guard.resolve_terminal(terminal);
             }
             self.ready_notify.notify_waiters();
         }
     }
 
-    /// Resolve readiness with error. Drops the guard without calling
-    /// resolve(); the guard's Drop reports failure to the parent.
-    fn resolve_ready_with_error(&self) {
-        let mut state = self.readiness.lock().unwrap();
-        if !state.ready {
-            state.ready = true;
-            state.guard.take();
-            self.ready_notify.notify_waiters();
-        }
+    /// Resolve readiness as success. No-op if already resolved.
+    fn ensure_mark_ready(&self) {
+        self.resolve_terminal(ComponentTerminalOutcome::Succeeded);
     }
 
     /// Wait until no entry has `processing == true`.
@@ -464,6 +450,7 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
         // cancellation signal ever fired.
         // The follow-up `cancel_and_await_quiescence` re-cancels (idempotent
         // — no-op on the second call) and then waits for `pending` to drain.
+        self.resolve_terminal(ComponentTerminalOutcome::Cancelled);
         self.cancellation_token.cancel();
         let state_io_guard = self.committed_state_io_lock.lock().await;
         drop(state_io_guard);
@@ -479,6 +466,7 @@ impl<Prof: EngineProfile> LiveComponentState<Prof> {
     /// which doesn't have direct access to the live_task JoinHandle and
     /// can rely on root-token cascade to terminate `process_live`.
     pub async fn cancel_and_await_quiescence(&self) {
+        self.resolve_terminal(ComponentTerminalOutcome::Cancelled);
         self.cancellation_token.cancel();
         let state_io_guard = self.committed_state_io_lock.lock().await;
         drop(state_io_guard);
@@ -628,22 +616,17 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
 
         // Now run process() via run_in_background. Errors from process() are
         // routed via `on_error` (parent's exception handler chain), matching
-        // the behavior of background `mount()` calls. Without on_error wired
-        // here, periodic-refresh patterns (e.g. `syn.auto_refresh`) would
-        // silently swallow cycle failures.
+        // the behavior of background `mount()` calls. Terminal propagation is
+        // independent of this reporting observer.
         let context = ComponentProcessorContext::new_with_live_fence(
             self.component.clone(),
             None,
             self.processing_stats.clone(),
             self.host_ctx.clone(),
-            // Mirror `Component::mount`: store the same on_error on the
-            // build context so the cycle's commit-phase GC sweep cascades
-            // it to orphan deletes too.
             ComponentProcessingAction::new_build(
                 self.providers.clone(),
                 self.full_reprocess,
                 self.live,
-                on_error.clone(),
                 None,
                 self.effect_mode,
             ),
@@ -687,9 +670,8 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
 
     /// Delete a child component. Same coalescing model as `update()`.
     /// Failures route through `on_error` (parent's exception handler
-    /// chain). The handler's `Result` decides propagation, symmetric
-    /// with `update()` — `Ok` swallows; `Err` propagates via the
-    /// returned handle. The tombstone always remains in the DB, so even
+    /// chain) for reporting and always propagate via the returned handle,
+    /// symmetric with `update()`. The tombstone always remains in the DB, so even
     /// a failed delete is retried by the next reconcile's GC sweep.
     pub async fn delete(
         &self,
@@ -714,12 +696,12 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
         subpath: StablePath,
         op: Op<Prof>,
     ) -> Result<ComponentExecutionHandle> {
-        let (handle_tx, handle_rx) = oneshot::channel::<HandleOutcome>();
+        let (handle_tx, handle_rx) = oneshot::channel::<ComponentTerminalOutcome>();
 
         // Pre-check cancellation: a controller that's already cancelled
         // (shutdown path) should not accept new work.
         if self.state.cancellation_token.is_cancelled() {
-            let _ = handle_tx.send(HandleOutcome::Cancelled);
+            let _ = handle_tx.send(ComponentTerminalOutcome::Cancelled);
             return Ok(make_handle(handle_rx));
         }
 
@@ -734,7 +716,9 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
             });
             // Coalesce: a queued-but-not-yet-promoted op is displaced.
             if let Some(displaced) = entry.queued.take() {
-                let _ = displaced.handle_tx.send(HandleOutcome::Superseded);
+                let _ = displaced
+                    .handle_tx
+                    .send(ComponentTerminalOutcome::Superseded);
             }
             entry.queued = Some(new_op);
             need_spawn
@@ -798,17 +782,7 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     ///   suspends indefinitely (Poll::Pending). select! in start() drops the
     ///   process_live future, terminating the Python task via CancelOnDropPy.
     pub async fn mark_ready(&self) {
-        {
-            let mut state = self.state.readiness.lock().unwrap();
-            if state.ready {
-                return; // Idempotent
-            }
-            state.ready = true;
-            if let Some(guard) = state.guard.take() {
-                guard.resolve(Default::default());
-            }
-        }
-        self.state.ready_notify.notify_waiters();
+        self.state.ensure_mark_ready();
 
         if !self.live {
             // Catch-up mode: cancel the token so select! in start() drops process_live.
@@ -827,32 +801,71 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
     {
         let token = self.state.cancellation_token.clone();
         let state = self.state.clone();
+        // Keep this component visible to App::wait_until_inactive until the
+        // live task has published any post-readiness terminal failure. The
+        // process_live future can drop its last controller reference before
+        // the result branch below runs, so the active-child tree alone would
+        // otherwise permit a successful app return just before error latching.
+        let component_liveness = self.component.clone();
         let app_ctx = self.component.app_ctx().clone();
         let operation_id = self.processing_stats.operation_id();
         let handle = crate::engine::runtime::get_runtime().spawn(async move {
+            let guarded_process_live = AssertUnwindSafe(process_live_fut).catch_unwind();
             let result = tokio::select! {
                 biased;
-                _ = token.cancelled() => Ok(()),
-                result = process_live_fut => result,
+                _ = token.cancelled() => Err(make_cancelled_error()),
+                result = guarded_process_live => match result {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        let message = payload
+                            .downcast_ref::<&str>()
+                            .copied()
+                            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                            .unwrap_or("non-string panic payload");
+                        Err(Error::internal_msg(format!(
+                            "process_live task panicked: {message}"
+                        )))
+                    }
+                },
             };
             match result {
                 Ok(()) => state.ensure_mark_ready(),
                 Err(e) => {
-                    // Cancellation arm or cancellation-flavored error: treat
-                    // as clean shutdown. Otherwise: real failure.
+                    // Cancellation remains a distinct terminal readiness
+                    // state. A real failure before readiness propagates
+                    // through both the mount handle and the parent's
+                    // aggregate. Failures after readiness are latched at the
+                    // app boundary because the guard has already resolved.
                     if token.is_cancelled() || e.is_cancelled() {
-                        state.ensure_mark_ready();
-                    } else {
-                        let shared_error = SharedError::from(e);
-                        app_ctx.report_live_terminal_error(operation_id, shared_error.clone());
                         if !state.is_ready() {
-                            state.resolve_ready_with_error();
+                            state.resolve_terminal(ComponentTerminalOutcome::Cancelled);
+                        }
+                    } else {
+                        let already_reported = e.is_reported();
+                        let shared_error = SharedError::from(e);
+                        if !state.is_ready() {
+                            state.resolve_terminal(ComponentTerminalOutcome::Failed(shared_error));
                         } else {
-                            error!("process_live failed after mark_ready: {shared_error:?}");
+                            if !already_reported {
+                                error!("process_live failed after mark_ready: {shared_error:?}");
+                            }
+                            // Do not retain a profile-specific traceback in
+                            // AppContext: Python traceback frames can own the
+                            // controller/component Arc and prevent the live
+                            // tree from reaching quiescence. The detached
+                            // diagnostic remains terminal and preserves the
+                            // original error's rendered context.
+                            app_ctx.report_live_terminal_error(
+                                operation_id,
+                                SharedError::new(Error::internal_msg(format!(
+                                    "process_live failed after readiness: {shared_error:?}"
+                                ))),
+                            );
                         }
                     }
                 }
             }
+            drop(component_liveness);
         });
         *self.state.live_task.lock().unwrap() = Some(handle);
     }
@@ -912,15 +925,15 @@ impl<Prof: EngineProfile> LiveComponentController<Prof> {
 ///
 /// Note on user-code panics: these surface through `JoinError::IsPanic`
 /// inside the spawned `run_in_background` Future and become
-/// `Executed(Err(...))` outcomes; they do NOT propagate as Rust panics
+/// `Failed(...)` outcomes; they do NOT propagate as Rust panics
 /// to this drain-task frame, so the panic guard's Pending → Cancelled
 /// path is reserved for genuinely rare runtime-level panics.
 enum HandleSlot {
     None,
-    Pending(oneshot::Sender<HandleOutcome>),
+    Pending(oneshot::Sender<ComponentTerminalOutcome>),
     Resolved {
-        handle_tx: oneshot::Sender<HandleOutcome>,
-        outcome: HandleOutcome,
+        handle_tx: oneshot::Sender<ComponentTerminalOutcome>,
+        outcome: ComponentTerminalOutcome,
     },
 }
 
@@ -937,7 +950,7 @@ impl HandleSlotGuard {
 
     /// Transition `None → Pending(tx)`. Called after step 1 takes the
     /// queued op, before step 2 awaits `run_op`.
-    fn set_pending(&mut self, tx: oneshot::Sender<HandleOutcome>) {
+    fn set_pending(&mut self, tx: oneshot::Sender<ComponentTerminalOutcome>) {
         debug_assert!(matches!(self.slot, HandleSlot::None));
         self.slot = HandleSlot::Pending(tx);
     }
@@ -947,7 +960,7 @@ impl HandleSlotGuard {
     /// statements with a one-instruction `Slot::None` gap (via
     /// `mem::replace`) — a panic in that instruction degrades to
     /// `Closed` (oneshot Sender drop → user sees RecvError).
-    fn set_resolved(&mut self, outcome: HandleOutcome) {
+    fn set_resolved(&mut self, outcome: ComponentTerminalOutcome) {
         let prev = std::mem::replace(&mut self.slot, HandleSlot::None);
         let HandleSlot::Pending(handle_tx) = prev else {
             debug_assert!(false, "set_resolved called from non-Pending state");
@@ -983,7 +996,7 @@ impl Drop for HandleSlotGuard {
                 // we exited an early-return path with the slot still
                 // owned. Send `Cancelled` so the user's handle doesn't
                 // hang forever waiting for an outcome.
-                let _ = tx.send(HandleOutcome::Cancelled);
+                let _ = tx.send(ComponentTerminalOutcome::Cancelled);
             }
             HandleSlot::Resolved { handle_tx, outcome } => {
                 // Outcome was computed; deliver the truthful value
@@ -1027,7 +1040,7 @@ async fn drain_task_body<Prof: EngineProfile>(
                     if let Some(entry) = pending.map.remove(&subpath)
                         && let Some(q) = entry.queued
                     {
-                        let _ = q.handle_tx.send(HandleOutcome::Cancelled);
+                        let _ = q.handle_tx.send(ComponentTerminalOutcome::Cancelled);
                     }
                     state.pending_changed.notify_waiters();
                     return;
@@ -1085,20 +1098,20 @@ async fn drain_task_body<Prof: EngineProfile>(
 
         let final_outcome = tokio::select! {
             biased;
-            _ = state.cancellation_token.cancelled() => HandleOutcome::Cancelled,
+            _ = state.cancellation_token.cancelled() => ComponentTerminalOutcome::Cancelled,
             outcome = std::future::ready(outcome) => {
                 // Reclassify cancellation-flavored errors when token already
                 // fired (covers the "drained but cancellation_token won the
                 // race elsewhere" case).
                 match outcome {
-                    Ok(()) => HandleOutcome::Executed(Ok(())),
+                    Ok(()) => ComponentTerminalOutcome::Succeeded,
                     Err(e) => {
                         if state.cancellation_token.is_cancelled()
                             && e.is_cancelled()
                         {
-                            HandleOutcome::Cancelled
+                            ComponentTerminalOutcome::Cancelled
                         } else {
-                            HandleOutcome::Executed(Err(SharedError::from(e)))
+                            ComponentTerminalOutcome::Failed(SharedError::from(e))
                         }
                     }
                 }
@@ -1150,7 +1163,6 @@ async fn mount_inner_live_now<Prof: EngineProfile>(
             full_reprocess,
             live,
             None,
-            None,
             effect_mode,
         ),
         Some(state.clone()),
@@ -1196,14 +1208,10 @@ async fn run_op<Prof: EngineProfile>(
                 None,
                 processing_stats.clone(),
                 host_ctx.clone(),
-                // Mirror `Component::mount`: same on_error stored on the
-                // build context so this op's commit-phase GC sweep
-                // cascades it to orphan deletes.
                 ComponentProcessingAction::new_build(
                     providers.clone(),
                     full_reprocess,
                     live,
-                    on_error.clone(),
                     None,
                     effect_mode,
                 ),
@@ -1337,6 +1345,7 @@ async fn run_op<Prof: EngineProfile>(
                 ComponentProcessingAction::Delete(crate::engine::context::ComponentDeleteContext {
                     providers: providers.clone(),
                     on_error,
+                    defer_failure_reporting: false,
                     effect_mode,
                     provider_missing_is_error: false,
                     tombstone_generation,
@@ -1383,21 +1392,14 @@ impl<'a, Prof: EngineProfile> Drop for UpdateFullActiveGuard<'a, Prof> {
     }
 }
 
-/// Wrap a `oneshot::Receiver<HandleOutcome>` as a `ComponentExecutionHandle`.
-/// Maps the four outcome shapes to the legacy `Result<()>`:
-///   - `Executed(Ok(()))`   → `Ok(())`
-///   - `Executed(Err(e))`   → `Err(e)`
-///   - `Superseded`         → `Ok(())`
-///   - `Cancelled`          → `Err(<cancelled>)`
-///   - oneshot closed (drain panicked) → `Err(<cancelled>)`
-fn make_handle(rx: oneshot::Receiver<HandleOutcome>) -> ComponentExecutionHandle {
-    ComponentExecutionHandle::new(async move {
+/// Wrap a terminal-outcome receiver as a `ComponentExecutionHandle`.
+/// A closed channel is classified as cancellation; `ready()` performs the
+/// public compatibility mapping.
+fn make_handle(rx: oneshot::Receiver<ComponentTerminalOutcome>) -> ComponentExecutionHandle {
+    ComponentExecutionHandle::from_terminal(async move {
         match rx.await {
-            Ok(HandleOutcome::Executed(Ok(()))) => synor_utils::error::shared_ok(()),
-            Ok(HandleOutcome::Executed(Err(e))) => Err(e),
-            Ok(HandleOutcome::Superseded) => synor_utils::error::shared_ok(()),
-            Ok(HandleOutcome::Cancelled) => Err(SharedError::from(make_cancelled_error())),
-            Err(_closed) => Err(SharedError::from(make_cancelled_error())),
+            Ok(terminal) => terminal,
+            Err(_closed) => ComponentTerminalOutcome::Cancelled,
         }
     })
 }

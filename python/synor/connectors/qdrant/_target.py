@@ -255,7 +255,13 @@ class _PointHandler(syn.TargetHandler[qdrant_models.PointStruct, _PointFingerpri
     ) -> None:
         self._client = client
         self._collection_name = collection_name
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_PointAction]
@@ -369,7 +375,13 @@ class _CollectionHandler(
     _sink: syn.TargetActionSink[_CollectionAction, _PointHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Collection[_CollectionAction]

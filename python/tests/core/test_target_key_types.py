@@ -56,9 +56,7 @@ class AnyKeyDictTargetStateStore:
         prev_possible_records: Collection[Any],
         prev_may_be_missing: bool,
     ) -> (
-        syn.TargetReconcileOutput[
-            tuple[Any, DictDataWithPrev | syn.AbsentType], Any
-        ]
+        syn.TargetReconcileOutput[tuple[Any, DictDataWithPrev | syn.AbsentType], Any]
         | None
     ):
         # Short-circuit no-change case

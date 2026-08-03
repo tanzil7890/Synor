@@ -92,7 +92,13 @@ class _MessageHandler(syn.TargetHandler[bytes | str, _MessageFingerprint, None])
         self._stream = stream
         self._partition = partition
         self._deletion_value_fn = deletion_value_fn
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                idempotent_replay="unsupported",
+            ),
+        )
 
     async def _apply_actions(
         self,
@@ -167,7 +173,10 @@ class _TopicHandler(syn.TargetHandler[_TopicSpec, None, _MessageHandler]):
         sink_fn: AsyncTargetActionSinkFn[_TopicAction, _MessageHandler] = (
             self._apply_actions
         )
-        self._sink = syn.TargetActionSink.from_async_fn(sink_fn)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            sink_fn,
+            capabilities=syn.TargetSinkCapabilities(),
+        )
 
     async def _apply_actions(
         self,

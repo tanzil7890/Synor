@@ -11,7 +11,7 @@ use synor_core::engine::component::{ComponentProcessor, ComponentProcessorInfo};
 use synor_core::engine::context::ComponentProcessorContext;
 use synor_core::engine::profile::{EngineProfile, Persist};
 use synor_core::engine::target_state::{
-    ChildTargetDef, TargetActionSink, TargetHandler, TargetReconcileOutput,
+    ChildTargetDef, SinkCapabilities, TargetActionSink, TargetHandler, TargetReconcileOutput,
 };
 use synor_core::state::stable_path::StableKey;
 use synor_utils::fingerprint::Fingerprint;
@@ -39,6 +39,17 @@ impl EngineProfile for RustProfile {
     type TargetAction = Action;
     type TargetActionSink = BoxedSink;
     type TargetStateValue = Value;
+
+    fn target_state_value_size_bytes(value: &Self::TargetStateValue) -> usize {
+        std::mem::size_of::<Value>() + value.0.len()
+    }
+
+    fn target_action_size_bytes(action: &Self::TargetAction) -> usize {
+        let value = match action {
+            Action::Create(value) | Action::Update(value) | Action::Delete(value) => value,
+        };
+        std::mem::size_of::<Action>() + value.0.len()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -252,23 +263,35 @@ type SinkFn = Arc<dyn Fn(Arc<ContextStore>, Vec<Action>) -> SinkFuture + Send + 
 #[derive(Clone)]
 pub(crate) struct BoxedSink {
     apply_fn: SinkFn,
+    capabilities: SinkCapabilities,
 }
 
 impl BoxedSink {
-    pub(crate) fn new(f: impl Fn(Vec<Action>) -> SinkFuture + Send + Sync + 'static) -> Self {
-        Self::new_with_ctx(move |_host_ctx, actions| f(actions))
+    pub(crate) fn new_with_capabilities(
+        f: impl Fn(Vec<Action>) -> SinkFuture + Send + Sync + 'static,
+        capabilities: SinkCapabilities,
+    ) -> Self {
+        Self::new_with_ctx_and_capabilities(move |_host_ctx, actions| f(actions), capabilities)
     }
 
-    pub(crate) fn new_with_ctx(
+    pub(crate) fn new_with_ctx_and_capabilities(
         f: impl Fn(Arc<ContextStore>, Vec<Action>) -> SinkFuture + Send + Sync + 'static,
+        capabilities: SinkCapabilities,
     ) -> Self {
         let arc: SinkFn = Arc::new(f);
-        Self { apply_fn: arc }
+        Self {
+            apply_fn: arc,
+            capabilities,
+        }
     }
 }
 
 #[async_trait]
 impl TargetActionSink<RustProfile> for BoxedSink {
+    fn capabilities(&self) -> SinkCapabilities {
+        self.capabilities
+    }
+
     async fn apply(
         &self,
         _host_runtime_ctx: &(),

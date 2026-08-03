@@ -28,17 +28,27 @@ The `kafka` connector can treat a Kafka topic as a live keyed map — each messa
 
 ### Setting up a consumer
 
-Create an `AIOConsumer` directly — no `ContextKey` needed. The consumer must be **unsubscribed** (the connector handles subscription internally to manage partition rebalance callbacks).
+Create the source consumer through `kafka.create_consumer()` — no `ContextKey` needed. The connector copies your configuration and forces both `enable.auto.commit` and `enable.auto.offset.store` to `False`, so only acknowledged Synor processing can advance the group offset. The consumer is **unsubscribed**; the connector handles subscription internally to manage partition rebalance callbacks.
 
 ```python
-from confluent_kafka.aio import AIOConsumer
+from synor.connectors import kafka
 
-consumer = AIOConsumer({
+consumer = kafka.create_consumer({
     "bootstrap.servers": "localhost:9092",
     "group.id": "my-group",
-    "enable.auto.commit": "false",
 })
 ```
+
+```python
+def create_consumer(config: Mapping[str, object]) -> AIOConsumer:
+    ...
+```
+
+Consumers returned by `create_consumer()` are connector-owned. Ownership transfers when the consumer is passed to `topic_as_map()` or `topic_as_stream()`: it can be bound to exactly one `TopicStream`, and that stream drains downstream work, unsubscribes, and closes the consumer whenever watching ends — including failure and cancellation. Create one helper consumer per stream; do not cache or close it separately.
+
+#### Migrating directly constructed consumers
+
+Pass the configuration mapping to `kafka.create_consumer()` instead of constructing `AIOConsumer` directly. Confluent does not expose an existing consumer's effective configuration, so Synor rejects directly constructed consumers rather than risk an automatic offset store or commit before downstream work is durable. The factory also gives the stream an unambiguous resource lifetime.
 
 ### `topic_as_map()`
 
@@ -53,7 +63,7 @@ def topic_as_map(
 
 **Parameters:**
 
-- `consumer` — An unsubscribed `AIOConsumer`. Auto-commit should be disabled.
+- `consumer` — An unsubscribed `AIOConsumer` returned by `kafka.create_consumer()`. It transfers ownership to this single-use stream. Directly constructed consumers are rejected because their effective offset settings cannot be verified.
 - `topics` — Topics to subscribe to.
 - `is_deletion` — Optional predicate `(message: Message) -> bool` for custom deletion detection on non-tombstone messages (see [Deletion handling](#deletion-handling)).
 
@@ -75,11 +85,15 @@ items = kafka.topic_as_map(
 
 ### Offset management
 
-Offsets are committed automatically with at-least-once semantics. Messages are processed in parallel, but an offset is only committed after all earlier messages in the same partition have been fully processed. Messages with `None` keys are logged as errors and skipped.
+Synor commits offsets with at-least-once semantics. `create_consumer()` disables Confluent's automatic commit and offset-store paths, so they cannot race ahead of Synor. Messages are processed in parallel, but a partition offset advances only after every earlier message has returned the typed `Succeeded` readiness outcome and Kafka has acknowledged the synchronous commit. A custom subscriber handle that only implements the legacy `ready()` method is rejected because it cannot prove durable success. A downstream failure, broker rejection, metadata failure, or non-EOF consumer error is terminal and does not advance the offset. During normal partition revocation, Synor fences new messages and drains already-started work before returning control to the broker. If Kafka reports that a partition is already lost, Synor instead aborts and fences its pending acknowledgement work without issuing another commit for that ownership epoch. Messages with `None` keys are skipped only after their offset enters the same acknowledged commit path.
+
+The source admits at most 256 messages that have not crossed their partition's contiguous readiness frontier. A later message that completes quickly still holds its slot while an earlier offset is pending, so out-of-order completion cannot grow retained offset history without bound. At the limit, Synor pauses the current Kafka assignment and continues one-second `poll()` calls to serve heartbeats and rebalance callbacks; it resumes the partitions after capacity is released. If a client returns an application record while its assignment is paused, Synor fails closed and leaves the record uncommitted for replay rather than exceeding the bound.
+
+When a partition has no valid committed offset, Synor applies the consumer's configured `auto.offset.reset` policy against Kafka's current low and high watermarks. `earliest` (including the `smallest` and `beginning` aliases) begins at the low watermark; `latest` (including `largest` and `end`) begins at the high watermark; and `error` fails closed. Unsupported values are rejected when the consumer is created.
 
 ### Readiness
 
-The feed signals readiness after catching up to the high watermark offsets that existed when consumption started. After that, it continues consuming indefinitely until the app is stopped.
+The feed signals readiness only after catching up to the high watermark offsets that existed when consumption started and receiving broker acknowledgement for the corresponding commits. After that, it continues consuming until the app is stopped or a terminal source/downstream failure occurs.
 
 ### Example
 
@@ -87,7 +101,6 @@ The feed signals readiness after catching up to the high watermark offsets that 
 from collections.abc import AsyncIterator
 
 from confluent_kafka import Message
-from confluent_kafka.aio import AIOConsumer
 from synor.connectors import kafka, localfs
 import synor as syn
 
@@ -105,10 +118,9 @@ async def process_message(msg: Message, target: localfs.DirTarget) -> None:
 async def app_main(outdir: pathlib.Path) -> None:
     target = await localfs.mount_dir_target(outdir)
 
-    consumer = AIOConsumer({
+    consumer = kafka.create_consumer({
         "bootstrap.servers": "localhost:9092",
         "group.id": "my-group",
-        "enable.auto.commit": "false",
     })
     items = kafka.topic_as_map(consumer, ["my-topic"])
     await syn.spawn_each(process_message, items, target)
@@ -139,7 +151,7 @@ def topic_as_stream(
 
 **Parameters:**
 
-- `consumer` — An unsubscribed `AIOConsumer`. Auto-commit should be disabled.
+- `consumer` — An unsubscribed `AIOConsumer` returned by `kafka.create_consumer()`. It transfers ownership to this single-use stream. Directly constructed consumers are rejected because their effective offset settings cannot be verified.
 - `topics` — Topics to subscribe to.
 
 **Returns:** A `TopicStream` (a `LiveStream[Message]`) that delivers raw `confluent_kafka.Message` objects to its subscriber. [Offset management](#offset-management) and [readiness](#readiness) behave identically to `topic_as_map()`.
@@ -155,13 +167,11 @@ A view over the same `TopicStream` that yields each message's value (the byte pa
 This is the typical input for sources that consume opaque event payloads:
 
 ```python
-from confluent_kafka.aio import AIOConsumer
 from synor.connectors import kafka, oci_object_storage
 
-consumer = AIOConsumer({
+consumer = kafka.create_consumer({
     "bootstrap.servers": "localhost:9092",
     "group.id": "my-group",
-    "enable.auto.commit": "false",
 })
 topic_stream = kafka.topic_as_stream(consumer, ["object-storage-events"])
 
@@ -174,7 +184,7 @@ walker = oci_object_storage.list_objects(
 For a complete app using this pattern, see the [OCI Object Storage live-mode example](./oci_object_storage#example).
 
 :::caution
-A `TopicStream` (and any `payloads()` view of it) supports at most one active watcher — the underlying consumer can hold only one subscription. A second concurrent `watch()` raises `RuntimeError`.
+A `TopicStream` (and any `payloads()` view of it) supports at most one active watcher — the underlying consumer can hold only one subscription. A second concurrent `watch()` raises `RuntimeError`. Factory-created consumers are bound to one stream, closed after its first watch, and cannot be watched or bound again.
 :::
 
 ## As target

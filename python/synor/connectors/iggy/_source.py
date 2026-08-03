@@ -11,15 +11,18 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any
 
 try:
-    from apache_iggy import AutoCommit  # type: ignore[import-not-found]
-    from apache_iggy import IggyClient  # type: ignore[import-not-found]
-    from apache_iggy import IggyConsumer  # type: ignore[import-not-found]
-    from apache_iggy import PollingStrategy  # type: ignore[import-not-found]
-    from apache_iggy import ReceiveMessage  # type: ignore[import-not-found]
+    from apache_iggy import (  # type: ignore[import-not-found]
+        AutoCommit,
+        IggyClient,
+        IggyConsumer,
+        PollingStrategy,
+        ReceiveMessage,
+    )
 except ImportError as e:
     raise ImportError(
         "apache-iggy is required to use the Iggy connector. Please install synor[iggy]."
@@ -31,11 +34,19 @@ from synor._internal.live_component import (
     LiveStream,
     LiveStreamSubscriber,
     ReadyAwaitable,
+    _await_readiness_succeeded,
+    _ReadinessAdmission,
+    _ReadinessPermit,
 )
 from synor._internal.typing import StableKey
 from synor.connectorkits import SingleWatcherGuard
 
 _logger = logging.getLogger(__name__)
+
+# Private until deployments demonstrate a need for a public connector knob.
+# This bounds messages pulled from Iggy that have not crossed the ordered
+# readiness frontier.
+_DEFAULT_MAX_INFLIGHT_READINESS = 256
 
 
 # --- Public type aliases ---
@@ -57,16 +68,22 @@ class _PartitionState:
     """
 
     __slots__ = (
-        "_consumer",
-        "_stream",
-        "_topic",
-        "_partition",
-        "_inflight",
-        "_completed",
-        "_tasks",
-        "_high_watermark",
+        "_accepting",
         "_committed_next_offset",
+        "_completed",
+        "_consumer",
+        "_failure",
+        "_high_watermark",
+        "_inflight",
+        "_last_tracked_offset",
         "_on_commit",
+        "_on_failure",
+        "_partition",
+        "_pending_store_offset",
+        "_store_task",
+        "_stream",
+        "_tasks",
+        "_topic",
     )
 
     def __init__(
@@ -78,39 +95,81 @@ class _PartitionState:
         high_watermark: int,
         committed_next_offset: int,
         on_commit: Callable[[], None],
+        on_failure: Callable[[BaseException], None] | None = None,
     ) -> None:
         self._consumer = consumer
         self._stream = stream
         self._topic = topic
         self._partition = partition
-        self._inflight: deque[int] = deque()
+        self._inflight: deque[tuple[int, _ReadinessPermit | None]] = deque()
         self._completed: set[int] = set()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._store_task: asyncio.Task[None] | None = None
+        self._pending_store_offset: int | None = None
+        self._last_tracked_offset: int | None = None
+        self._accepting = True
+        self._failure: BaseException | None = None
         self._high_watermark = high_watermark
         self._committed_next_offset = committed_next_offset
         self._on_commit = on_commit
+        self._on_failure = on_failure
 
     def is_caught_up(self) -> bool:
         """Whether this partition has consumed up to its initial high watermark."""
         return self._committed_next_offset >= self._high_watermark
 
-    def track(self, offset: int, handle: ReadyAwaitable) -> None:
+    def track(
+        self,
+        offset: int,
+        handle: ReadyAwaitable,
+        permit: _ReadinessPermit | None = None,
+    ) -> None:
         """Register an inflight offset with its readiness handle."""
-        self._inflight.append(offset)
-        if handle is _IMMEDIATE_READY:
-            self._completed.add(offset)
-            self._try_drain_and_store()
-            return
+        try:
+            if not self._accepting:
+                raise RuntimeError(
+                    "Iggy partition "
+                    f"{self._stream}/{self._topic}/{self._partition} is closed"
+                )
+            self.raise_if_failed()
+            if (
+                self._last_tracked_offset is not None
+                and offset <= self._last_tracked_offset
+            ):
+                raise RuntimeError(
+                    "Iggy delivered a non-monotonic offset for "
+                    f"{self._stream}/{self._topic}/{self._partition}: {offset} after "
+                    f"{self._last_tracked_offset}"
+                )
+            self._last_tracked_offset = offset
+            self._inflight.append((offset, permit))
+            if handle is _IMMEDIATE_READY:
+                self._completed.add(offset)
+                self._try_drain_and_store()
+                return
 
-        task = asyncio.create_task(self._await_handle(offset, handle))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+            task = asyncio.create_task(self._await_handle(offset, handle))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+        except BaseException:
+            if permit is not None:
+                permit.release()
+            raise
 
-    async def _await_handle(self, offset: int, handle: ReadyAwaitable) -> None:
+    async def _await_handle(
+        self,
+        offset: int,
+        handle: ReadyAwaitable,
+    ) -> None:
         """Await a readiness handle and mark the offset as completed."""
         try:
-            await handle.ready()
-        except asyncio.CancelledError:
+            await _await_readiness_succeeded(handle)
+        except asyncio.CancelledError as error:
+            self._record_failure(error)
+            return
+        # Readiness failures are opaque user exceptions; all are terminal.
+        except BaseException as error:  # noqa: BLE001
+            self._record_failure(error)
             return
         self._completed.add(offset)
         self._try_drain_and_store()
@@ -118,35 +177,95 @@ class _PartitionState:
     def _try_drain_and_store(self) -> None:
         """Drain contiguous completed offsets from the front and store the last."""
         last_drained: int | None = None
-        while self._inflight and self._inflight[0] in self._completed:
-            offset = self._inflight.popleft()
+        while self._inflight and self._inflight[0][0] in self._completed:
+            offset, permit = self._inflight.popleft()
             self._completed.discard(offset)
+            if permit is not None:
+                permit.release()
             last_drained = offset
 
         if last_drained is not None:
-            self._committed_next_offset = last_drained + 1
-            self._on_commit()
-            asyncio.ensure_future(self._store_offset(last_drained))
+            if (
+                self._pending_store_offset is None
+                or last_drained > self._pending_store_offset
+            ):
+                self._pending_store_offset = last_drained
+            self._ensure_store_worker()
 
-    async def _store_offset(self, offset: int) -> None:
-        """Store the given last-consumed offset in Iggy."""
+    def _ensure_store_worker(self) -> None:
+        """Start the one serialized, monotonic offset-store worker."""
+        if self._failure is not None:
+            return
+        if self._store_task is None or self._store_task.done():
+            self._store_task = asyncio.create_task(self._run_store_worker())
+
+    async def _run_store_worker(self) -> None:
+        """Coalesce stores and publish progress only after Iggy acknowledges."""
         try:
-            await self._consumer.store_offset(offset, self._partition)
-        except Exception:
-            _logger.exception(
-                "Failed to store offset %d for Iggy %s/%s partition %d",
-                offset,
-                self._stream,
-                self._topic,
-                self._partition,
-            )
+            while self._pending_store_offset is not None:
+                offset = self._pending_store_offset
+                self._pending_store_offset = None
+                try:
+                    await self._consumer.store_offset(offset, self._partition)
+                except asyncio.CancelledError:
+                    raise
+                # Broker/client implementations expose heterogeneous errors.
+                except Exception as error:
+                    _logger.exception(
+                        "Failed to store offset %d for Iggy %s/%s partition %d",
+                        offset,
+                        self._stream,
+                        self._topic,
+                        self._partition,
+                    )
+                    self._record_failure(error)
+                    return
 
-    def discard(self) -> None:
-        """Cancel background readiness tasks and clear state."""
-        for task in self._tasks:
-            task.cancel()
+                next_offset = offset + 1
+                if next_offset > self._committed_next_offset:
+                    self._committed_next_offset = next_offset
+                    self._on_commit()
+        finally:
+            self._store_task = None
+            # Linearize worker handoff: progress can become storeable while
+            # the current worker is exiting, so pending work must acquire a
+            # successor after the task slot is cleared.
+            if self._failure is None and self._pending_store_offset is not None:
+                self._ensure_store_worker()
+
+    def _record_failure(self, error: BaseException) -> None:
+        if self._failure is not None:
+            return
+        self._failure = error
+        if self._on_failure is not None:
+            self._on_failure(error)
+
+    def raise_if_failed(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+
+    async def close(self) -> None:
+        """Fence the partition, drain downstream work, then store offsets."""
+        self._accepting = False
+        tasks = tuple(self._tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
-        self._inflight.clear()
+        # Follow successor workers as well as the instance observed at entry.
+        # Returning after only one task can expose readiness before the final
+        # offset-store acknowledgement.
+        while True:
+            store_task = self._store_task
+            if store_task is None:
+                if self._failure is None and self._pending_store_offset is not None:
+                    self._ensure_store_worker()
+                    continue
+                break
+            await store_task
+        while self._inflight:
+            _, permit = self._inflight.popleft()
+            if permit is not None:
+                permit.release()
         self._completed.clear()
 
 
@@ -161,12 +280,33 @@ class _OffsetTracker:
     initial high watermark for each consumed partition before watching starts.
     """
 
-    __slots__ = ("_partitions", "_initialized", "ready_event")
+    __slots__ = (
+        "_close_task",
+        "_closed",
+        "_failure",
+        "_initialized",
+        "_partitions",
+        "failure_event",
+        "ready_event",
+    )
 
     def __init__(self) -> None:
         self._partitions: dict[int, _PartitionState] = {}
+        self._close_task: asyncio.Task[None] | None = None
+        self._closed = False
         self._initialized = False
+        self._failure: BaseException | None = None
+        self.failure_event = asyncio.Event()
         self.ready_event = asyncio.Event()
+
+    def _record_failure(self, error: BaseException) -> None:
+        if self._failure is None:
+            self._failure = error
+            self.failure_event.set()
+
+    def raise_if_failed(self) -> None:
+        if self._failure is not None:
+            raise self._failure
 
     def _check_ready(self) -> None:
         if self._initialized and all(
@@ -192,6 +332,7 @@ class _OffsetTracker:
             high_watermark=high_watermark,
             committed_next_offset=committed_next_offset,
             on_commit=self._check_ready,
+            on_failure=self._record_failure,
         )
         self._partitions[partition] = state
         return state
@@ -211,11 +352,53 @@ class _OffsetTracker:
         self._initialized = True
         self._check_ready()
 
-    def discard_all(self) -> None:
-        """Discard all partition states."""
-        for state in self._partitions.values():
-            state.discard()
-        self._partitions.clear()
+    async def close_all(self) -> None:
+        """Fence and drain all work despite repeated caller cancellation."""
+        if not self._closed:
+            self._closed = True
+            states = tuple(self._partitions.values())
+            self._partitions.clear()
+            if states:
+                self._close_task = asyncio.create_task(self._close_states(states))
+
+        close_task = self._close_task
+        if close_task is None:
+            self.raise_if_failed()
+            return
+
+        cancelled: asyncio.CancelledError | None = None
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError as error:
+                # Preserve the caller's first cancellation, while every later
+                # cancellation remains unable to detach the readiness/store
+                # graph from stream shutdown.
+                if cancelled is None:
+                    cancelled = error
+        close_task.result()
+        self.raise_if_failed()
+        if cancelled is not None:
+            raise cancelled
+
+    async def _close_states(self, states: tuple[_PartitionState, ...]) -> None:
+        """Drain every partition and retain the first terminal failure."""
+        close_results = await asyncio.gather(
+            *(state.close() for state in states),
+            return_exceptions=True,
+        )
+        for result in close_results:
+            if isinstance(result, BaseException):
+                self._record_failure(result)
+        for state in states:
+            try:
+                state.raise_if_failed()
+            except asyncio.CancelledError as error:
+                self._record_failure(error)
+            # Connector/user failures have no shared concrete base type.
+            except Exception as error:  # noqa: BLE001
+                self._record_failure(error)
+        self.raise_if_failed()
 
 
 def _committed_next_offset(stored_offset: int | None) -> int:
@@ -231,23 +414,23 @@ class TopicStream:
 
     The stream creates an Iggy consumer group with auto-commit disabled, sends
     messages to Synor, and stores offsets only after the returned
-    ``ReadyAwaitable`` is ready. This mirrors the Kafka connector's at-least-once
-    processing contract.
+    ``ReadyAwaitable`` reports typed success. This mirrors the Kafka connector's
+    at-least-once processing contract.
     """
 
     __slots__ = (
+        "_allow_replay",
+        "_batch_length",
         "_client",
         "_consumer_group",
-        "_stream",
-        "_topic",
-        "_partition_id",
-        "_batch_length",
-        "_poll_interval",
-        "_polling_retry_interval",
         "_init_retries",
         "_init_retry_interval",
-        "_allow_replay",
         "_initial_high_watermark",
+        "_partition_id",
+        "_poll_interval",
+        "_polling_retry_interval",
+        "_stream",
+        "_topic",
         "_watch_guard",
     )
 
@@ -329,6 +512,7 @@ class TopicStream:
         high_watermark = await self._resolve_initial_high_watermark()
         consumer = await self._create_consumer()
         tracker = _OffsetTracker()
+        admission = _ReadinessAdmission(_DEFAULT_MAX_INFLIGHT_READINESS)
         tracker.add(
             consumer=consumer,
             stream=self._stream,
@@ -342,11 +526,32 @@ class TopicStream:
         tracker.mark_initialized()
 
         ready_signaled = False
-        active_next_task: asyncio.Future[ReceiveMessage] | None = None
+        active_next_task: (
+            asyncio.Task[tuple[ReceiveMessage, _ReadinessPermit]] | None
+        ) = None
+        active_failure_task: asyncio.Task[bool] | None = None
         last_delivered_offsets: dict[int, int] = {}
         iterator = consumer.iter_messages().__aiter__()
 
-        async def _process_message(message: ReceiveMessage) -> None:
+        async def _next_message() -> tuple[ReceiveMessage, _ReadinessPermit]:
+            """Reserve capacity before pulling the next Iggy message."""
+            if admission.is_full:
+                _logger.debug(
+                    "Applying Iggy source backpressure at the %d-message "
+                    "readiness limit",
+                    admission.limit,
+                )
+            permit = await admission.acquire()
+            try:
+                message = await anext(iterator)
+            except BaseException:
+                permit.release()
+                raise
+            return message, permit
+
+        async def _process_message(
+            message: ReceiveMessage, permit: _ReadinessPermit
+        ) -> None:
             partition = message.partition_id()
             offset = message.offset()
             last_delivered_offset = last_delivered_offsets.get(partition)
@@ -360,49 +565,121 @@ class TopicStream:
                     offset,
                     last_delivered_offset,
                 )
+                permit.release()
                 return
             last_delivered_offsets[partition] = offset
-            part_state = tracker.get(partition)
-            handle = await subscriber.send(message)
-            part_state.track(offset, handle)
+            try:
+                part_state = tracker.get(partition)
+                handle = await subscriber.send(message)
+                part_state.track(offset, handle, permit)
+            except BaseException:
+                permit.release()
+                raise
 
         try:
             while True:
+                tracker.raise_if_failed()
                 if not ready_signaled:
                     if active_next_task is None:
-                        active_next_task = asyncio.ensure_future(anext(iterator))
+                        active_next_task = asyncio.create_task(_next_message())
                     ready_task: asyncio.Future[bool] = asyncio.ensure_future(
                         tracker.ready_event.wait()
+                    )
+                    active_failure_task = asyncio.ensure_future(
+                        tracker.failure_event.wait()
                     )
                     wait_set: set[asyncio.Future[Any]] = {
                         active_next_task,
                         ready_task,
+                        active_failure_task,
                     }
                     done, _ = await asyncio.wait(
                         wait_set,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
 
+                    if active_failure_task in done:
+                        active_next_task.cancel()
+                        ready_task.cancel()
+                        await asyncio.gather(
+                            active_next_task, ready_task, return_exceptions=True
+                        )
+                        tracker.raise_if_failed()
                     if ready_task in done:
                         await subscriber.mark_ready()
                         ready_signaled = True
                     else:
                         ready_task.cancel()
+                    active_failure_task.cancel()
+                    await asyncio.gather(
+                        ready_task, active_failure_task, return_exceptions=True
+                    )
 
                     if active_next_task in done:
-                        message = await active_next_task
+                        message, permit = await active_next_task
                         active_next_task = None
-                        await _process_message(message)
+                        await _process_message(message, permit)
+                    active_failure_task = None
                     continue
 
-                message = await anext(iterator)
-                await _process_message(message)
+                if active_next_task is None:
+                    active_next_task = asyncio.create_task(_next_message())
+                active_failure_task = asyncio.ensure_future(
+                    tracker.failure_event.wait()
+                )
+                done, _ = await asyncio.wait(
+                    {active_next_task, active_failure_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if active_failure_task in done:
+                    active_next_task.cancel()
+                    await asyncio.gather(active_next_task, return_exceptions=True)
+                    tracker.raise_if_failed()
+                active_failure_task.cancel()
+                await asyncio.gather(active_failure_task, return_exceptions=True)
+                message, permit = await active_next_task
+                active_next_task = None
+                active_failure_task = None
+                await _process_message(message, permit)
         except StopAsyncIteration:
+            # A finite/mock iterator must not report completion before all
+            # eligible offsets are durably stored.
+            await tracker.close_all()
+            tracker.raise_if_failed()
+            if not ready_signaled and tracker.ready_event.is_set():
+                await subscriber.mark_ready()
+                ready_signaled = True
             return
         finally:
-            if active_next_task is not None:
-                active_next_task.cancel()
-            tracker.discard_all()
+
+            async def _shutdown() -> None:
+                if active_next_task is not None:
+                    if not active_next_task.done():
+                        active_next_task.cancel()
+                    next_result = await asyncio.gather(
+                        active_next_task, return_exceptions=True
+                    )
+                    if next_result and isinstance(next_result[0], tuple):
+                        # A completed iterator pull may have raced readiness,
+                        # failure, or cancellation before delivery.
+                        next_result[0][1].release()
+                if active_failure_task is not None:
+                    active_failure_task.cancel()
+                    await asyncio.gather(active_failure_task, return_exceptions=True)
+                await tracker.close_all()
+                tracker.raise_if_failed()
+
+            shutdown_task = asyncio.create_task(_shutdown())
+            cancelled: asyncio.CancelledError | None = None
+            while not shutdown_task.done():
+                try:
+                    await asyncio.shield(shutdown_task)
+                except asyncio.CancelledError as error:
+                    if cancelled is None:
+                        cancelled = error
+            shutdown_task.result()
+            if cancelled is not None:
+                raise cancelled
 
 
 class _TopicPayloadsStream:
@@ -438,7 +715,7 @@ class _PayloadsAdapter:
 class _StreamToMapSubscriber:
     """Adapts a :class:`LiveMapSubscriber` to consume a ``LiveStream``."""
 
-    __slots__ = ("_map_sub", "_key", "_is_deletion")
+    __slots__ = ("_is_deletion", "_key", "_map_sub")
 
     def __init__(
         self,
@@ -471,7 +748,7 @@ class _StreamToMapSubscriber:
 class _TopicMapFeed:
     """``LiveMapFeed`` view over a :class:`TopicStream`."""
 
-    __slots__ = ("_stream", "_key", "_is_deletion")
+    __slots__ = ("_is_deletion", "_key", "_stream")
 
     def __init__(
         self,

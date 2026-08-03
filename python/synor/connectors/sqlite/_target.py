@@ -427,7 +427,7 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
     _managed_conn: ManagedConnection
     _table_name: str
     _table_schema: TableSchema[Any]
-    _is_virtual_table: bool
+    _is_virtual_table: bool = False
     _sink: syn.TargetActionSink[_RowAction, None]
 
     def __init__(
@@ -435,13 +435,20 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
         managed_conn: ManagedConnection,
         table_name: str,
         table_schema: TableSchema[Any],
-        is_virtual_table: bool = False,
     ) -> None:
         self._managed_conn = managed_conn
         self._table_name = table_name
         self._table_schema = table_schema
-        self._is_virtual_table = is_virtual_table
-        self._sink = syn.TargetActionSink[_RowAction, None].from_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink[_RowAction, None].from_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="per_apply",
+                idempotent_replay="supported",
+                segmented_replay_safe="supported",
+                apply_ordering="unordered",
+                completion_verification="acknowledged",
+            ),
+        )
 
     def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_RowAction]
@@ -582,6 +589,33 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
             action=_RowAction(key=key, value=desired_state),
             sink=self._sink,
             tracking_record=target_fp,
+        )
+
+
+class _VirtualRowHandler(_RowHandler):
+    """Row handler for virtual tables with separately certified guarantees.
+
+    sqlite-vec currently has no failure-injection certification in this
+    repository. Keep its contract conservative even though it shares the same
+    transaction wrapper as ordinary SQLite tables.
+    """
+
+    _is_virtual_table: bool = True
+
+    def __init__(
+        self,
+        managed_conn: ManagedConnection,
+        table_name: str,
+        table_schema: TableSchema[Any],
+    ) -> None:
+        self._managed_conn = managed_conn
+        self._table_name = table_name
+        self._table_schema = table_schema
+        self._sink = syn.TargetActionSink[_RowAction, None].from_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                apply_ordering="unordered",
+            ),
         )
 
 
@@ -903,12 +937,16 @@ def _apply_table_actions(
                     continue
 
                 spec = action.spec
+                handler_type = (
+                    _VirtualRowHandler
+                    if spec.virtual_table_def is not None
+                    else _RowHandler
+                )
                 outputs[i] = syn.ChildTargetDef(
-                    handler=_RowHandler(
+                    handler=handler_type(
                         managed_conn=managed_conn,
                         table_name=key.table_name,
                         table_schema=spec.table_schema,
-                        is_virtual_table=(spec.virtual_table_def is not None),
                     )
                 )
 
@@ -947,7 +985,11 @@ def _apply_table_actions(
 
 # Shared action sink for table-level actions
 _table_action_sink = syn.TargetActionSink[_TableAction, _RowHandler].from_fn(
-    _apply_table_actions
+    _apply_table_actions,
+    capabilities=syn.TargetSinkCapabilities(
+        batch_atomicity="none",
+        apply_ordering="unordered",
+    ),
 )
 
 
@@ -1066,9 +1108,7 @@ class TableTarget(
             if pk_value is None:
                 raise ValueError(f"SQLite primary key column {pk!r} cannot be None")
             pk_values.append(pk_value)
-        syn.ensure_target_state(
-            self._provider.target_state(tuple(pk_values), row_dict)
-        )
+        syn.ensure_target_state(self._provider.target_state(tuple(pk_values), row_dict))
 
     def _row_to_dict(self, row: RowT) -> dict[str, Any]:
         """

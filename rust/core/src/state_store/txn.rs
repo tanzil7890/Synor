@@ -1,9 +1,10 @@
 //! LMDB transaction wrappers and the shared transaction/resize coordinator.
 //!
-//! Every read or write LMDB transaction in this process acquires a read guard
-//! on `StorageInner::coord` for its full lifetime. [`TxnRunner`] acquires the
-//! write guard before calling `unsafe Env::resize()`, guaranteeing no
-//! participating transaction is active.
+//! Every read or write LMDB transaction in this process acquires the shared
+//! per-environment read guard for its full lifetime. [`TxnRunner`] acquires
+//! the write guard before calling `unsafe Env::resize()`, guaranteeing no
+//! participating transaction is active in this process; storage's durable
+//! resize lease serializes size changes across processes.
 
 use std::ops::{Deref, DerefMut};
 
@@ -24,6 +25,14 @@ impl<'store> ReadTxn<'store> {
         txn: heed::RoTxn<'store, heed::WithoutTls>,
     ) -> Self {
         Self { txn, _guard: guard }
+    }
+
+    /// Commit a read transaction while retaining the local resize guard for
+    /// the whole LMDB call. Most readers simply drop their snapshot, but LMDB
+    /// requires named-database handles opened by another process to be
+    /// committed before those handles can be reused by later transactions.
+    pub(crate) fn commit(self) -> heed::Result<()> {
+        self.txn.commit()
     }
 }
 

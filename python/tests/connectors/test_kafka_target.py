@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,17 +20,24 @@ class MockAIOProducer:
 
     def __init__(self) -> None:
         self.produced_messages: list[tuple[str, Any, Any]] = []
+        self.delivery_error: Exception | None = None
+        self.acknowledged_deliveries = 0
 
     async def produce(
         self, topic: str, *, key: Any = None, value: Any = None
     ) -> asyncio.Future[None]:
         self.produced_messages.append((topic, key, value))
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        fut.set_result(None)
+        if self.delivery_error is None:
+            self.acknowledged_deliveries += 1
+            fut.set_result(None)
+        else:
+            fut.set_exception(self.delivery_error)
         return fut
 
     def clear(self) -> None:
         self.produced_messages.clear()
+        self.acknowledged_deliveries = 0
 
 
 _mock_aio = MagicMock()
@@ -40,19 +47,24 @@ _mock_module.aio = _mock_aio
 sys.modules.setdefault("confluent_kafka", _mock_module)
 sys.modules.setdefault("confluent_kafka.aio", _mock_aio)
 
-from confluent_kafka.aio import AIOProducer  # type: ignore[import-not-found]  # noqa: E402
-from synor.connectors.kafka._target import (  # noqa: E402
+import synor as syn
+from confluent_kafka.aio import (
+    AIOProducer,  # type: ignore[import-not-found]
+)
+from synor._internal.context_keys import ContextProvider
+from synor.connectorkits.target_sink_testing import (
+    TargetSinkCertificationScenario,
+    certify_target_sink,
+)
+from synor.connectors.kafka._target import (
+    KafkaTopicTarget,
     _MessageAction,
     _MessageHandler,
     _TopicAction,
     _TopicHandler,
     _TopicKey,
     _TopicSpec,
-    KafkaTopicTarget,
 )
-import synor as syn  # noqa: E402
-from synor._internal.context_keys import ContextProvider  # noqa: E402
-
 
 # =============================================================================
 # Fixtures
@@ -234,6 +246,65 @@ class TestMessageHandlerReconcile:
 
 
 class TestMessageHandlerSink:
+    @pytest.mark.asyncio
+    async def test_passes_acknowledgement_failure_injection_certification(
+        self, producer: MockAIOProducer
+    ) -> None:
+        handler = _MessageHandler(
+            producer=_as_producer(producer), topic="test-topic", deletion_value_fn=None
+        )
+        actions = (
+            _MessageAction(key=b"k1", value=b"v1"),
+            _MessageAction(key=b"k2", value=b"v2"),
+        )
+        context_provider = MagicMock(spec=ContextProvider)
+
+        async def reset() -> None:
+            producer.clear()
+
+        async def apply(batch: tuple[_MessageAction, ...]) -> None:
+            await handler._apply_actions(context_provider, batch)
+
+        async def snapshot() -> tuple[tuple[str, Any, Any], ...]:
+            return tuple(producer.produced_messages)
+
+        async def apply_with_completion_failure(
+            batch: tuple[_MessageAction, ...],
+        ) -> None:
+            producer.delivery_error = RuntimeError("delivery rejected")
+            try:
+                await handler._apply_actions(context_provider, batch)
+            finally:
+                producer.delivery_error = None
+
+        async def completion_evidence() -> Literal["unverified", "acknowledged"]:
+            return (
+                "acknowledged"
+                if producer.acknowledged_deliveries == len(actions)
+                else "unverified"
+            )
+
+        report = await certify_target_sink(
+            TargetSinkCertificationScenario[
+                _MessageAction, tuple[tuple[str, Any, Any], ...]
+            ](
+                name="kafka-message-sink",
+                capabilities=handler._sink.capabilities,
+                actions=actions,
+                reset=reset,
+                apply=apply,
+                snapshot=snapshot,
+                expected_final_snapshot=(
+                    ("test-topic", b"k1", b"v1"),
+                    ("test-topic", b"k2", b"v2"),
+                ),
+                completion_evidence=completion_evidence,
+                apply_with_completion_failure=apply_with_completion_failure,
+            )
+        )
+
+        assert report.checks == ("success", "completion_verification")
+
     @pytest.mark.asyncio
     async def test_produce_messages(self, producer: MockAIOProducer) -> None:
         handler = _MessageHandler(

@@ -25,7 +25,7 @@ async def iter_stable_paths(
     - component nodes (node_type=StablePathNodeType.component)
     - intermediate directory nodes (node_type=StablePathNodeType.directory)
     """
-    core_app = await app._get_core()
+    _env, core_app, _operation_lease = await app._get_core_env_app_for_operation()
     async for item in core.iter_stable_paths(core_app):
         yield item
 
@@ -40,6 +40,7 @@ async def iter_stable_paths_by_name(
     Like :func:`iter_stable_paths`, but does not require a full ``App`` object —
     only an :class:`Environment` and the app name.
     """
+    _operation_lease = env._async_context.acquire_operation()
     async for item in core.iter_stable_paths_by_name(env._core_env, app_name):
         yield item
 
@@ -62,7 +63,7 @@ def list_stable_paths_info_sync(
 
 async def native_effect_counts(app: App[Any, Any]) -> NativeEffectCounts:
     """Return privacy-safe native effect status totals for an app."""
-    core_app = await app._get_core()
+    _env, core_app, _operation_lease = await app._get_core_env_app_for_operation()
     return core.native_effect_counts(core_app)
 
 
@@ -71,6 +72,7 @@ async def native_effect_counts_by_name(
     app_name: str,
 ) -> NativeEffectCounts | None:
     """Return native effect status totals, or ``None`` when the app is absent."""
+    _operation_lease = env._async_context.acquire_operation()
     return core.native_effect_counts_by_name(env._core_env, app_name)
 
 
@@ -84,7 +86,7 @@ async def iter_stable_path_details(
     path-key resolver, so provider prefixes shared across paths are
     resolved once — unlike calling :func:`get_stable_path_detail` per path.
     """
-    core_app = await app._get_core()
+    _env, core_app, _operation_lease = await app._get_core_env_app_for_operation()
     async for detail in core.iter_stable_path_details(core_app):
         yield detail
 
@@ -94,6 +96,7 @@ async def iter_stable_path_details_by_name(
     app_name: str,
 ) -> AsyncIterator[core.StablePathDetail]:
     """Like :func:`iter_stable_path_details`, but takes an environment and an app name."""
+    _operation_lease = env._async_context.acquire_operation()
     async for detail in core.iter_stable_path_details_by_name(env._core_env, app_name):
         yield detail
 
@@ -103,7 +106,7 @@ async def get_stable_path_detail(
     path: StablePath,
 ) -> core.StablePathDetail | None:
     """Get detailed information about a single stable path from LMDB."""
-    core_app = await app._get_core()
+    _env, core_app, _operation_lease = await app._get_core_env_app_for_operation()
     return core.get_stable_path_detail(core_app, path._core)
 
 
@@ -113,6 +116,7 @@ async def get_stable_path_detail_by_name(
     path: StablePath,
 ) -> core.StablePathDetail | None:
     """Get detailed information about a single stable path from LMDB (by app name)."""
+    _operation_lease = env._async_context.acquire_operation()
     return core.get_stable_path_detail_by_name(env._core_env, app_name, path._core)
 
 
@@ -124,7 +128,7 @@ async def query_stable_path_details(
     include_parents: bool = False,
 ) -> list[core.StablePathDetail]:
     """Query details for a path with optional children/parents from a live App."""
-    core_app = await app._get_core()
+    _env, core_app, _operation_lease = await app._get_core_env_app_for_operation()
     return core.query_stable_path_details(
         core_app, path._core, include_children, recursive, include_parents
     )
@@ -139,6 +143,7 @@ async def query_stable_path_details_by_name(
     include_parents: bool = False,
 ) -> list[core.StablePathDetail]:
     """Query details for a path with optional children/parents (by app name)."""
+    _operation_lease = env._async_context.acquire_operation()
     return core.query_stable_path_details_by_name(
         env._core_env,
         app_name,
@@ -158,7 +163,7 @@ async def iter_target_states(
     Entries come in stored (fingerprint) order: children of the same parent
     are adjacent, but there is no global human-meaningful ordering.
     """
-    core_app = await app._get_core()
+    _env, core_app, _operation_lease = await app._get_core_env_app_for_operation()
     async for entry in core.iter_target_states(core_app):
         yield entry
 
@@ -168,6 +173,7 @@ async def iter_target_states_by_name(
     app_name: str,
 ) -> AsyncIterator[core.TargetStateEntry]:
     """Like :func:`iter_target_states`, but takes an environment and an app name."""
+    _operation_lease = env._async_context.acquire_operation()
     async for entry in core.iter_target_states_by_name(env._core_env, app_name):
         yield entry
 

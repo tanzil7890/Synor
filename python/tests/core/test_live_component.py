@@ -364,9 +364,7 @@ class _OuterLiveComponentWithInner:
     async def process_live(self, operator: syn.LiveComponentOperator) -> None:
         await operator.update_full()
         # Mount a nested live component at "inner" subpath.
-        handle = await operator.update(
-            syn.unit_path("inner"), _InnerLiveComponent
-        )
+        handle = await operator.update(syn.unit_path("inner"), _InnerLiveComponent)
         await handle.ready()
         await operator.mark_ready()
 
@@ -503,9 +501,7 @@ def test_process_inside_live_can_call_synor_mount() -> None:
     GlobalDictTarget.store.clear()
 
     async def _main() -> None:
-        await syn.spawn(
-            syn.unit_path("inner_ok"), _LiveComponentInnerCallsSynorMount
-        )
+        await syn.spawn(syn.unit_path("inner_ok"), _LiveComponentInnerCallsSynorMount)
 
     app = syn.App(
         syn.AppConfig(
@@ -633,9 +629,7 @@ def test_live_component_incremental_delete_direct() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.spawn(
-            syn.unit_path("live"), _IncrementalDeleteDirectLiveComponent
-        )
+        await syn.spawn(syn.unit_path("live"), _IncrementalDeleteDirectLiveComponent)
 
     app = syn.App(
         syn.AppConfig(
@@ -681,9 +675,7 @@ async def test_live_component_incremental_delete_no_stale_tombstone() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.spawn(
-            syn.unit_path("live"), _IncrementalDeleteNoStaleComponent
-        )
+        await syn.spawn(syn.unit_path("live"), _IncrementalDeleteNoStaleComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_incr_delete_no_stale", environment=synor_env),
@@ -940,9 +932,7 @@ def test_live_component_incremental_delete() -> None:
     _source_data["b"] = 2
 
     async def _main() -> None:
-        await syn.spawn(
-            syn.unit_path("live"), _IncrementalDeleteViaGCLiveComponent
-        )
+        await syn.spawn(syn.unit_path("live"), _IncrementalDeleteViaGCLiveComponent)
 
     app = syn.App(
         syn.AppConfig(name="test_live_incremental_delete", environment=synor_env),
@@ -1142,8 +1132,8 @@ class _LiveThatDeletesWithFailingSink:
 
     ``operator.delete`` is symmetric with ``operator.update`` —
     failures route through the parent's exception handler chain.
-    Handlers control whether ``handle.ready()`` raises (raise to
-    propagate, return to swallow). This test verifies the routing.
+    The handler observes the failure, while ``handle.ready()`` and the live
+    app remain failed. This test verifies both routing and terminality.
     """
 
     async def process(self) -> None:
@@ -1162,9 +1152,10 @@ class _LiveThatDeletesWithFailingSink:
             GlobalDictTarget.store.sink_exception = False
 
 
+@pytest.mark.timeout(10, method="thread")
 def test_operator_delete_failure_routes_to_handler() -> None:
     """`operator.delete()` failure → handler chain (mount-style symmetry
-    with `operator.update`). Handler that returns normally → swallow."""
+    with `operator.update`). A returning handler cannot swallow it."""
     GlobalDictTarget.store.clear()
     GlobalDictTarget.store.sink_exception = False
 
@@ -1181,7 +1172,8 @@ def test_operator_delete_failure_routes_to_handler() -> None:
         await syn.spawn(syn.unit_path("live"), _LiveThatDeletesWithFailingSink)
 
     app = syn.App(syn.AppConfig(name="test_delete_route", environment=env), _root)
-    app.update_blocking(live=True)
+    with pytest.raises(RuntimeError, match="injected sink exception"):
+        app.update_blocking(live=True)
 
     assert len(seen) == 1
     exc_name, mount_kind, stable_path = seen[0]
@@ -1214,7 +1206,7 @@ class _LiveThatDeletesWithRaisingHandler:
             dh = await operator.delete(syn.unit_path("c"))
             try:
                 await dh.ready()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # Hold the real exception object on a class attribute:
                 # exercises the operator-detach guarantee (the framework
                 # releases the controller in `_process_live_wrapper`'s
@@ -1240,9 +1232,7 @@ def test_operator_delete_failure_propagates_via_raising_handler() -> None:
     )
 
     async def _root() -> None:
-        await syn.spawn(
-            syn.unit_path("live"), _LiveThatDeletesWithRaisingHandler
-        )
+        await syn.spawn(syn.unit_path("live"), _LiveThatDeletesWithRaisingHandler)
 
     app = syn.App(syn.AppConfig(name="test_delete_raise", environment=env), _root)
     app.update_blocking(live=True)
@@ -1264,12 +1254,10 @@ class _LiveThatUpdatesFailingChild:
         type(self).update_err = None
         await operator.update_full()
         await operator.mark_ready()
-        handle = await operator.update(
-            syn.unit_path("bad_child"), _failing_child, 42
-        )
+        handle = await operator.update(syn.unit_path("bad_child"), _failing_child, 42)
         try:
             await handle.ready()
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # Hold the real exception (with traceback) on a class
             # attribute to verify the operator-detach guarantee:
             # `_process_live_wrapper`'s finally releases the controller
@@ -1277,6 +1265,29 @@ class _LiveThatUpdatesFailingChild:
             type(self).update_err = e
 
 
+class _LiveThatRetainsFailedOutcomeHandle:
+    """Retain a completed typed handle without retaining its native child."""
+
+    retained_handle: syn.SpawnHandle | None = None
+    retained_outcome: syn.ReadinessOutcome | None = None
+
+    async def process(self) -> None:
+        syn.ensure_target_state(GlobalDictTarget.target_state("marker", 1))
+
+    async def process_live(self, operator: syn.LiveComponentOperator) -> None:
+        type(self).retained_handle = None
+        type(self).retained_outcome = None
+        await operator.update_full()
+        await operator.mark_ready()
+        handle = await operator.update(syn.unit_path("bad_child"), _failing_child, 42)
+        outcome = await handle.outcome()
+        assert isinstance(outcome, syn.Failed)
+        assert handle._cores == []
+        type(self).retained_handle = handle
+        type(self).retained_outcome = outcome
+
+
+@pytest.mark.timeout(10, method="thread")
 def test_operator_update_child_failure_routes_to_handler() -> None:
     """A child mounted via operator.update() that raises should be routed
     through the parent's exception handler chain with mount_kind='process_live'
@@ -1304,8 +1315,51 @@ def test_operator_update_child_failure_routes_to_handler() -> None:
     assert exc_name == "RuntimeError"
     assert mount_kind == "process_live"
     assert "bad_child" in stable_path
-    # Swallowing handler → no propagation
-    assert _LiveThatUpdatesFailingChild.update_err is None
+    err = _LiveThatUpdatesFailingChild.update_err
+    assert err is not None
+    assert "child failed with value=42" in str(err)
+
+
+@pytest.mark.timeout(10, method="thread")
+def test_retained_typed_outcome_handle_does_not_block_live_quiescence() -> None:
+    GlobalDictTarget.store.clear()
+    _LiveThatRetainsFailedOutcomeHandle.retained_handle = None
+    _LiveThatRetainsFailedOutcomeHandle.retained_outcome = None
+
+    seen: list[str] = []
+
+    def handler(exc: BaseException, _ctx: syn.ExceptionContext) -> None:
+        seen.append(str(exc))
+
+    env = common.create_test_env(
+        __file__, suffix="retained_typed_handle", exception_handler=handler
+    )
+
+    async def _root() -> None:
+        await syn.spawn(syn.unit_path("live"), _LiveThatRetainsFailedOutcomeHandle)
+
+    app = syn.App(
+        syn.AppConfig(name="test_retained_typed_handle", environment=env), _root
+    )
+    app.update_blocking(live=True)
+
+    retained_handle = _LiveThatRetainsFailedOutcomeHandle.retained_handle
+    retained_outcome = _LiveThatRetainsFailedOutcomeHandle.retained_outcome
+    assert retained_handle is not None
+    assert retained_handle._cores == []
+    assert isinstance(retained_outcome, syn.Failed)
+    assert "child failed with value=42" in str(retained_outcome.error)
+    traceback_cursor = retained_outcome.error.__traceback__
+    assert traceback_cursor is not None
+    traceback_names: list[str] = []
+    while traceback_cursor is not None:
+        traceback_names.append(traceback_cursor.tb_frame.f_code.co_name)
+        traceback_cursor = traceback_cursor.tb_next
+    assert "_failing_child" in traceback_names
+    assert len(seen) == 1
+
+    _LiveThatRetainsFailedOutcomeHandle.retained_handle = None
+    _LiveThatRetainsFailedOutcomeHandle.retained_outcome = None
 
 
 @pytest.mark.timeout(10, method="thread")
@@ -1779,10 +1833,8 @@ async def test_live_component_global_cancel_terminates_update() -> None:
         # finished propagating via CancelOnDropPy.
         await asyncio.wait_for(cancelled_in_python.wait(), timeout=5.0)
 
-        try:
+        with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(result_task, timeout=5.0)
-        except Exception:
-            pass
     finally:
         if not result_task.done():
             result_task.cancel()
@@ -1858,7 +1910,7 @@ def test_live_stream_protocol_runtime_check() -> None:
     )
 
     class _Sub:
-        async def send(self, message: Any) -> ReadyAwaitable:  # noqa: ARG002
+        async def send(self, message: Any) -> ReadyAwaitable:
             raise NotImplementedError
 
         async def mark_ready(self) -> None:

@@ -219,9 +219,7 @@ def _call_entries(
         stored = None
     results: list[_StateCallResult] = []
     for i, entry in enumerate(entries):
-        prev = (
-            entry.deserialize_prev(stored[i]) if stored is not None else ABSENT
-        )
+        prev = entry.deserialize_prev(stored[i]) if stored is not None else ABSENT
         results.append(_StateCallResult(prev=prev, outcome=entry.call(prev)))
     return results
 

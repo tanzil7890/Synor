@@ -109,10 +109,8 @@ async def test_auto_refresh_live_runs_periodically() -> None:
         assert counter["calls"] >= 3
 
         _core.cancel_all()
-        try:
+        with pytest.raises(asyncio.CancelledError, match="operation cancelled"):
             await asyncio.wait_for(result_task, timeout=5.0)
-        except Exception:
-            pass
     finally:
         if not result_task.done():
             result_task.cancel()
@@ -170,10 +168,8 @@ async def test_auto_refresh_cycle_exception_reported_and_loop_continues() -> Non
         assert any(r.startswith("process_live:") for r in reports), reports
 
         _core.cancel_all()
-        try:
+        with pytest.raises(asyncio.CancelledError, match="operation cancelled"):
             await asyncio.wait_for(result_task, timeout=5.0)
-        except Exception:
-            pass
     finally:
         if not result_task.done():
             result_task.cancel()

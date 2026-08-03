@@ -102,6 +102,29 @@ await handle.ready()
 
 You usually only need to call `ready()` when you have logic that depends on the processing component's target states being applied — for example, querying the latest data from a target table after syncing it.
 
+When control flow needs to distinguish terminal states without catching an
+exception, use the typed outcome API:
+
+```python
+outcome = await handle.outcome()
+match outcome:
+    case syn.Succeeded():
+        pass  # durable downstream success
+    case syn.Failed(error=error):
+        report(error)
+    case syn.Cancelled():
+        reschedule()
+    case syn.Superseded():
+        pass  # a newer live operation owns the same path
+```
+
+`outcome()` is repeatable and does not raise for a component terminal state.
+`ready()` remains fully compatible: it returns `None` for `Succeeded` and
+`Superseded`, raises the component error for `Failed`, and raises
+`asyncio.CancelledError` for `Cancelled`. The exception stored in `Failed` is
+safe to retain or raise in a later, independent operation; Synor's internal
+error-reporting marker is not exposed on it.
+
 `spawn()` also accepts **LiveComponent classes** — components that process continuously and react to changes incrementally instead of rescanning everything. See [Live Components](../advanced_topics/live_component) for details.
 
 ### `call()`
@@ -224,14 +247,14 @@ Synor processes each component in two phases: **processing** (running your funct
 
 ### Failure isolation
 
-The framework's general rule: **a call raises on failure iff the failed work was on the critical path for the call to return.**
+Scheduling is isolated, but readiness is truthful:
 
 - **`call()`** — you're awaiting the child's *value*, so the child succeeding is on the critical path. The child's exception propagates to the parent.
-- **`spawn()` and `spawn_each()`** — these return as soon as the work is *scheduled* (you get a handle back). The child's execution runs in the background, off your critical path. A failure in one child does **not** affect the parent or siblings — by default the exception is logged and other components continue. One bad file shouldn't take down the entire pipeline.
+- **`spawn()` and `spawn_each()`** — these return as soon as the work is *scheduled* (you get a handle back). A failure does not cancel sibling work, but it remains terminal: `await handle.ready()` raises, and the parent aggregates that failure so the enclosing app update cannot report success.
 
 To react to background failures, you can:
 
-- Install [exception handlers](../advanced_topics/exception_handlers#exception-handlers) — global or scoped — to send alerts, record metrics, or implement custom logic. A handler that raises propagates the failure through `await handle.ready()` if you choose to await it.
+- Install [exception handlers](../advanced_topics/exception_handlers#exception-handlers) — global or scoped — to send alerts, record metrics, or implement custom logic. Handlers observe failures but cannot convert them into success.
 - [Monitor app progress](../advanced_topics/progress_monitoring) — `UpdateStats` exposes per-component stats including error counts, so you can detect failures programmatically.
 
 For the full picture — including the critical-path principle applied to every API, interrupted update recovery, and the exception handler API — see [Error Handling](../advanced_topics/exception_handlers).
@@ -259,6 +282,21 @@ In general:
 - **Fine-grained** (more, smaller components): Each component syncs its target states as soon as it finishes, but target states owned by different components do not sync together as a unit.
 
 For small datasets, a single processing component that owns all target states is simple and ensures all target states sync together. As data grows, consider breaking it down into one component per source item (e.g., one per file) to reduce latency: you see each item's target states synced as soon as it's processed, without waiting for the full dataset to complete. This also helps isolate failures to that item.
+
+One component may retain at most 1,048,576 declared target states and an
+estimated 512 MiB declaration working set. These are safety ceilings, not
+recommended batch sizes. For million-item pipelines, shard by stable source key
+with `spawn_each()` (or explicit `spawn()` paths): this bounds each atomic
+ownership unit, lets the component scheduler apply backpressure, and allows sink
+action sets to stay operationally manageable. Synor uses 4,096 actions and
+approximately 8 MiB as internal sink-call packing thresholds, but these do not
+reject or split a legacy connector's indivisible component action set. Sinks
+that explicitly certify replay-safe segmentation may receive an already
+materialized action set through bounded sink calls, but earlier segments can
+become externally visible before the full component succeeds. This bounds each
+connector call; it does not make reconciliation itself constant-memory. Synor
+does not commit the component's internal tracking state until every segment
+succeeds.
 
 ## Explicit context management
 
@@ -301,7 +339,52 @@ async def process_file(file: FileLike, table: postgres.TableTarget[DocEmbedding]
 
 The first argument to the function receives each item; additional arguments are passed through to every call. `map()` returns a `list` of the results, in the same order as the input items.
 
+`map()` starts every item without imposing an internal concurrency limit. This
+allows item coroutines to coordinate with the full group, but means its task set
+and returned results both retain O(n) memory until the call finishes.
+
+Use `map_bounded()` when item futures or input iteration need backpressure:
+
+```python
+embeddings = await syn.map_bounded(embed_chunk, chunks, 32, model)
+```
+
+At most 32 item coroutines are admitted. Results remain in input order, and an
+item failure stops further input admission while already-started work drains.
+The returned list still retains O(n) values. A bounded map cannot be used when
+items wait at a barrier for more siblings than the configured limit; use
+`map()` for that fan-in shape. Use `spawn_each()` when each item also needs its
+own stable ownership and reconciliation boundary.
+
+For inputs large enough that retaining the returned list is itself a problem,
+stream completion-order results with `map_stream()`:
+
+```python
+async for embedding in syn.map_stream(embed_chunk, chunks, 32, model):
+    await write_embedding(embedding)
+```
+
+The admission window includes running tasks and completed results waiting to be
+yielded, so Synor retains at most 32 pulled-but-not-yielded items. Results are
+yielded in completion order rather than input order. A worker or input-iterator
+failure cancels the admitted window and surfaces on the consumer's current or
+next pull.
+
+Fully consuming the iterator cleans it up automatically. If the consumer may
+break early, close it explicitly so its admitted work is cancelled promptly:
+
+```python
+from contextlib import aclosing
+
+async with aclosing(syn.map_stream(embed_chunk, chunks, 32, model)) as results:
+    async for embedding in results:
+        if enough_embeddings(embedding):
+            break
+```
+
 #### When to use `map()` vs `spawn_each()`
 
 - Use **`spawn_each()`** when each item should be its own processing component — with its own component path, target state ownership, and target states sync boundary.
 - Use **`map()`** when you want to process items concurrently *within* the current component, without creating new component boundaries. This is common for sub-item work like processing chunks within a file. See [A processing component owns a work unit](./core_concepts#a-processing-component-owns-a-work-unit) for the ownership boundary.
+- Use **`map_bounded()`** for the same within-component work when pulling and executing the entire input at once would retain too much memory.
+- Use **`map_stream()`** when even an O(n) result list is too large and completion-order consumption is acceptable.

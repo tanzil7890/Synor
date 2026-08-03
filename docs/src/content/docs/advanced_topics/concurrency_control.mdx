@@ -6,7 +6,7 @@ description: >
   environment variable, and understand how Synor avoids deadlocks in
   nested mount scenarios.
 ---
-Synor executes each [processing component](../programming_guide/processing_component) as a unit of concurrent work. By default, up to **1024** processing components can be in flight per app. When components perform resource-intensive work (e.g., calling external APIs, running ML models), you may want a tighter limit.
+Synor executes each [processing component](../programming_guide/processing_component) as a unit of concurrent work. By default, up to **1024 leaf components** can hold execution-admission slots per app. When components perform resource-intensive work (e.g., calling external APIs, running ML models), you may want a tighter limit.
 
 ## Setting the limit
 
@@ -20,9 +20,16 @@ app = syn.App(
 )
 ```
 
-With `max_inflight_components=4`, at most 4 processing components execute at the same time. When a component finishes, the next pending one starts.
+With `max_inflight_components=4`, at most four components that have not yielded
+their slot to a descendant are admitted at the same time. When one releases its
+slot, the next pending component starts.
 
-Setting `max_inflight_components=1` serializes all components — only one runs at a time.
+Setting `max_inflight_components=1` serializes sibling leaf work. It is not a
+preemptive task or memory limit: an ancestor that has yielded its slot may
+resume after a background child is mounted, so user coroutines at different
+levels of a nested pipeline can overlap.
+The limit must be a positive integer; zero, negative values, and booleans are rejected
+when the app is constructed.
 
 You can also set the limit via the `SYNOR_MAX_INFLIGHT_COMPONENTS` environment variable:
 
@@ -34,4 +41,10 @@ export SYNOR_MAX_INFLIGHT_COMPONENTS=4
 
 ## Deadlock prevention
 
-When a parent component mounts a child, the parent releases its concurrency slot so the child can make progress. This prevents deadlocks in nested mount scenarios — even with `max_inflight_components=1`, a parent mounting a child will not block forever.
+When a parent component first mounts a child, the parent releases its
+concurrency slot so the child can make progress. This prevents deadlocks in
+nested mount scenarios, even with `max_inflight_components=1`. Use stable,
+fine-grained component paths and the declaration limits described in
+[Processing components](../programming_guide/processing_component) to bound
+retained state; do not treat this cooperative admission quota as an app-wide
+heap ceiling.

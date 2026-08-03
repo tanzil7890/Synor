@@ -225,6 +225,10 @@ files = localfs.walk_dir(sourcedir, live=True, ...)
 await syn.spawn_each(process_file, files.items(), target)
 
 # Kafka -- inherently live
+consumer = kafka.create_consumer({
+    "bootstrap.servers": "localhost:9092",
+    "group.id": "my-group",
+})
 items = kafka.topic_as_map(consumer, ["my-topic"])
 await syn.spawn_each(process_message, items, target)
 ```
@@ -323,6 +327,15 @@ async def process_file(file: FileLike, table: postgres.TableTarget[DocEmbedding]
     chunks = _splitter.split(text, chunk_size=2000, chunk_overlap=500)
     id_gen = IdGenerator()
     await syn.map(process_chunk, chunks, file.file_path.path, id_gen, table)
+
+# For large inputs without a full-group barrier, bound task/input admission:
+# await syn.map_bounded(process_chunk, chunks, 32, file.file_path.path, id_gen, table)
+
+# To avoid retaining an O(n) result list, consume completion-order results:
+# async for result in syn.map_stream(
+#     process_chunk, chunks, 32, file.file_path.path, id_gen, table
+# ):
+#     ...
 
 @syn.task
 async def app_main(sourcedir: pathlib.Path) -> None:

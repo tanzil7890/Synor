@@ -292,7 +292,13 @@ class _DocumentHandler(syn.TargetHandler[Document, _DocumentFingerprint]):
     def __init__(self, client: GlideClient, index_name: str) -> None:
         self._client = client
         self._index_name = index_name
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+            ),
+        )
 
     async def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_DocumentAction]
@@ -383,7 +389,14 @@ class _IndexHandler(
     _sink: syn.TargetActionSink[_IndexAction, _DocumentHandler]
 
     def __init__(self) -> None:
-        self._sink = syn.TargetActionSink.from_async_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink.from_async_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+                completion_verification="unverified",
+            ),
+        )
 
     async def _apply_actions(
         self,

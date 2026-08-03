@@ -840,7 +840,14 @@ class _RowHandler(syn.TargetHandler[_RowValue, _RowFingerprint]):
         self._managed_conn = managed_conn
         self._table_name = table_name
         self._table_schema = table_schema
-        self._sink = syn.TargetActionSink[_RowAction, None].from_fn(self._apply_actions)
+        self._sink = syn.TargetActionSink[_RowAction, None].from_fn(
+            self._apply_actions,
+            capabilities=syn.TargetSinkCapabilities(
+                batch_atomicity="none",
+                apply_ordering="unordered",
+                completion_verification="unverified",
+            ),
+        )
 
     def _apply_actions(
         self, context_provider: ContextProvider, actions: Sequence[_RowAction]
@@ -1117,7 +1124,12 @@ def _apply_table_actions(
 
 
 _table_action_sink = syn.TargetActionSink[_TableAction, _RowHandler].from_fn(
-    _apply_table_actions
+    _apply_table_actions,
+    capabilities=syn.TargetSinkCapabilities(
+        batch_atomicity="none",
+        apply_ordering="unordered",
+        completion_verification="unverified",
+    ),
 )
 
 

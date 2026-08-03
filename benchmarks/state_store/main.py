@@ -55,9 +55,7 @@ class _NoopTargetHandler:
         /,
     ) -> syn.TargetReconcileOutput[tuple[syn.StableKey, bool], None] | None:
         is_delete = syn.is_absent(desired_state)
-        tracking_record: None | syn.AbsentType = (
-            syn.ABSENT if is_delete else None
-        )
+        tracking_record: None | syn.AbsentType = syn.ABSENT if is_delete else None
         return syn.TargetReconcileOutput(
             action=(key, is_delete),
             sink=self._sink,

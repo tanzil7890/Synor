@@ -54,11 +54,13 @@ Each processing component must be mounted at a unique path. See [Processing Comp
 
 Synor's API is **async-first**. The APIs fall into three categories:
 
-### Orchestration APIs (async only)
+### Orchestration APIs (async use)
 
-The APIs that shape your pipeline are async:
+The APIs that shape your pipeline run in async code:
 
-`spawn()`, `call()`, `spawn_each()`, `attach_target()`, `map()`
+`spawn()`, `call()`, `spawn_each()`, `attach_target()`, `map()`, and
+`map_bounded()` are awaited. `map_stream()` returns an async iterator consumed
+with `async for`.
 
 ### Entry-point APIs (async + sync)
 

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import threading
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import (
@@ -46,6 +47,67 @@ class _StatsSnapshot(NamedTuple):
 
 _ENV_MAX_INFLIGHT_COMPONENTS = "SYNOR_MAX_INFLIGHT_COMPONENTS"
 _DEFAULT_MAX_INFLIGHT_COMPONENTS = 1024
+
+
+def _core_result_future(result: Awaitable[Any]) -> asyncio.Future[Any]:
+    # PyO3 returns an asyncio Future. Preserve it directly: wrapping an
+    # existing Future is unnecessary, and application code may monkeypatch
+    # ``asyncio.ensure_future`` while the Rust callback bridge is being tested
+    # or instrumented.
+    return (
+        result if isinstance(result, asyncio.Future) else asyncio.ensure_future(result)
+    )
+
+
+async def _cancel_and_drain_core_update(
+    handle: core.UpdateHandle,
+    core_result: asyncio.Future[Any],
+    caller_cancelled: asyncio.CancelledError,
+) -> Any:
+    handle.request_cancel()
+    while not core_result.done():
+        try:
+            await asyncio.shield(core_result)
+        except asyncio.CancelledError:
+            # A repeated Task.cancel() request must not punch through the
+            # cleanup barrier. A core-side cancellation ends the loop via
+            # done(), while caller-side repeats are simply deferred.
+            continue
+        except BaseException:
+            break
+
+    # Retrieve the terminal result so asyncio does not report an unhandled
+    # exception. The caller's cancellation remains the public outcome.
+    if core_result.done():
+        try:
+            core_result.result()
+        except BaseException:
+            pass
+    raise caller_cancelled
+
+
+async def _await_core_update_result(
+    handle: core.UpdateHandle, result: Awaitable[Any]
+) -> Any:
+    """Await a core update without letting caller cancellation orphan it.
+
+    The Rust operation owns the actual quiescence barrier. Shielding preserves
+    that future long enough to request cooperative cancellation and observe the
+    barrier, including cancellation-before-task-install and blocking callback
+    drains, before propagating the caller's ``CancelledError``.
+    """
+    core_result = _core_result_future(result)
+    try:
+        return await asyncio.shield(core_result)
+    except asyncio.CancelledError as caller_cancelled:
+        # A terminal core cancellation also arrives as CancelledError. If the
+        # core future is already done, there is no outer cancellation to defer.
+        if core_result.done():
+            raise
+
+        return await _cancel_and_drain_core_update(
+            handle, core_result, caller_cancelled
+        )
 
 
 class UpdateHandle(Generic[R]):
@@ -105,14 +167,26 @@ class UpdateHandle(Generic[R]):
         handle = await self._ensure_started()
         last_version = 0
         while True:
-            version = await handle.changed()
+            try:
+                version = await handle.changed()
+            except asyncio.CancelledError as caller_cancelled:
+                # `watch()` is a consuming wait just like `result()`. If its
+                # caller is cancelled while waiting for the next snapshot,
+                # cancel the update and observe the same quiescence barrier.
+                # GeneratorExit from an ordinary `break`/`aclose` is left
+                # observational so callers may switch from watch to result.
+                core_result = _core_result_future(handle.result())
+                await _cancel_and_drain_core_update(
+                    handle, core_result, caller_cancelled
+                )
+                raise AssertionError("cancellation drain unexpectedly returned")
 
             # Check termination before dedup — notify_terminated() sends
             # TERMINATED_VERSION on the watch channel without updating the
             # stats version, so the dedup check would skip it.
             if version >= _TERMINATED_VERSION:
                 snap = self._snapshot_from_handle(handle)
-                pyvalue: Any = await handle.result()
+                pyvalue: Any = await _await_core_update_result(handle, handle.result())
                 result: R = pyvalue.get(fn_ret_deserializer(self._main_fn))
                 if snap.stats is not None:
                     yield UpdateSnapshot(
@@ -135,14 +209,14 @@ class UpdateHandle(Generic[R]):
         """Await the update result. Raises on error."""
         handle = await self._ensure_started()
         if self._preview:
-            await handle.result()
+            await _await_core_update_result(handle, handle.result())
             from .target_state import _unwrap_target_action
 
             return [  # type: ignore[return-value]
                 _unwrap_target_action(action)
                 for action in handle.take_preview_actions()
             ]
-        pyvalue: Any = await handle.result()
+        pyvalue: Any = await _await_core_update_result(handle, handle.result())
         return pyvalue.get(fn_ret_deserializer(self._main_fn))  # type: ignore[no-any-return]
 
     def __await__(self) -> Any:
@@ -174,7 +248,10 @@ async def show_progress(
     refresh_interval_secs = (
         refresh_interval.total_seconds() if refresh_interval is not None else None
     )
-    pyvalue: Any = await core.show_progress(core_handle, refresh_interval_secs)
+    pyvalue: Any = await _await_core_update_result(
+        core_handle,
+        core.show_progress(core_handle, refresh_interval_secs),
+    )
     return pyvalue.get(fn_ret_deserializer(handle._main_fn))  # type: ignore[no-any-return]
 
 
@@ -196,6 +273,7 @@ class App(Generic[P, R]):
 
     _lock: threading.Lock
     _core_env_app: tuple[Environment, core.App] | None
+    _core_env_app_generation: int | None
 
     @overload
     def __init__(
@@ -241,40 +319,69 @@ class App(Generic[P, R]):
                 max_inflight = int(env_val)
             else:
                 max_inflight = _DEFAULT_MAX_INFLIGHT_COMPONENTS
+        if type(max_inflight) is not int:
+            raise TypeError("max_inflight_components must be an int")
+        if max_inflight < 1:
+            raise ValueError("max_inflight_components must be at least 1")
         self._max_inflight_components = max_inflight
 
         self._lock = threading.Lock()
         self._core_env_app = None
+        self._core_env_app_generation = None
 
         # Register this app with its environment's info
         config.environment._info.register_app(self._name, self)
 
-    async def _get_core_env_app(self) -> tuple[Environment, core.App]:
-        with self._lock:
-            if self._core_env_app is not None:
-                return self._core_env_app
-        env = await self._environment._get_env()
-        return self._ensure_core_env_app(env)
+    async def _get_core_env_app_for_operation(
+        self,
+    ) -> tuple[Environment, core.App, core.OperationLease]:
+        while True:
+            env = await self._environment._get_env()
+            try:
+                operation_lease = env._async_context.acquire_operation()
+            except RuntimeError:
+                if isinstance(self._environment, LazyEnvironment):
+                    # Stop won the admission race. Resolve the next published
+                    # generation and retry instead of touching the closing one.
+                    continue
+                raise
+            _bound_env, core_app = self._ensure_core_env_app(env)
+            return env, core_app, operation_lease
 
-    def _get_core_env_app_sync(self) -> tuple[Environment, core.App]:
-        with self._lock:
-            if self._core_env_app is not None:
-                return self._core_env_app
-        env = self._environment._get_env_sync()
-        return self._ensure_core_env_app(env)
-
-    async def _get_core(self) -> core.App:
-        _env, core_app = await self._get_core_env_app()
-        return core_app
+    def _get_core_env_app_sync_for_operation(
+        self,
+    ) -> tuple[Environment, core.App, core.OperationLease]:
+        while True:
+            env = self._environment._get_env_sync()
+            try:
+                operation_lease = env._async_context.acquire_operation()
+            except RuntimeError:
+                if isinstance(self._environment, LazyEnvironment):
+                    continue
+                raise
+            _bound_env, core_app = self._ensure_core_env_app(env)
+            return env, core_app, operation_lease
 
     def _ensure_core_env_app(self, env: Environment) -> tuple[Environment, core.App]:
         with self._lock:
-            if self._core_env_app is None:
+            if (
+                self._core_env_app is None
+                or self._core_env_app[0] is not env
+                or self._core_env_app_generation != env._generation
+            ):
                 self._core_env_app = (
                     env,
                     core.App(self._name, env._core_env, self._max_inflight_components),
                 )
+                self._core_env_app_generation = env._generation
             return self._core_env_app
+
+    def _invalidate_environment(self, env: Environment) -> None:
+        """Drop a cached core binding when a lazy environment stops."""
+        with self._lock:
+            if self._core_env_app is not None and self._core_env_app[0] is env:
+                self._core_env_app = None
+                self._core_env_app_generation = None
 
     def update(
         self,
@@ -321,7 +428,11 @@ class App(Generic[P, R]):
         deadline_context = _deadline_for_engine()
 
         async def _init() -> core.UpdateHandle:
-            env, core_app = await self._get_core_env_app()
+            (
+                env,
+                core_app,
+                operation_lease,
+            ) = await self._get_core_env_app_for_operation()
             root_path = core.StablePath()
             processor = create_core_component_processor(
                 self._main_fn,
@@ -339,6 +450,7 @@ class App(Generic[P, R]):
                 strict_effects=_strict_effects,
                 host_ctx=env._context_provider,
                 deadline=deadline_context,
+                operation_lease=operation_lease,
             )
 
         return UpdateHandle(
@@ -371,7 +483,7 @@ class App(Generic[P, R]):
         Returns:
             The result of the main function, or a list of actions in preview mode.
         """
-        env, core_app = self._get_core_env_app_sync()
+        env, core_app, operation_lease = self._get_core_env_app_sync_for_operation()
         root_path = core.StablePath()
         deadline_context = _deadline_for_engine()
         processor = create_core_component_processor(
@@ -392,6 +504,7 @@ class App(Generic[P, R]):
             live=live,
             preview=preview,
             deadline=deadline_context,
+            operation_lease=operation_lease,
         )
         if preview:
             from .target_state import _unwrap_target_action
@@ -407,8 +520,10 @@ class App(Generic[P, R]):
         - Delete all target states created by the app (e.g., drop tables, delete rows)
         - Clear the app's internal state database
         """
-        env, core_app = await self._get_core_env_app()
-        drop_handle = core_app.drop_async(env._context_provider)
+        env, core_app, operation_lease = await self._get_core_env_app_for_operation()
+        drop_handle = core_app.drop_async(
+            env._context_provider, operation_lease=operation_lease
+        )
         await drop_handle.result()
 
     def drop_blocking(self, *, report_to_stdout: bool | timedelta = False) -> None:
@@ -424,10 +539,11 @@ class App(Generic[P, R]):
                 stdout. Pass a ``timedelta`` to set the refresh interval; ``True``
                 uses the default interval.
         """
-        env, core_app = self._get_core_env_app_sync()
+        env, core_app, operation_lease = self._get_core_env_app_sync_for_operation()
         report, refresh_interval_secs = _resolve_report_to_stdout(report_to_stdout)
         core_app.drop(
             env._context_provider,
             report_to_stdout=report,
             refresh_interval_secs=refresh_interval_secs,
+            operation_lease=operation_lease,
         )

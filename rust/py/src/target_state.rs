@@ -3,8 +3,10 @@ use std::sync::{LazyLock, Mutex};
 
 use pyo3::types::{PyList, PySequence, PyTuple};
 use synor_core::engine::target_state::{
-    ChildInvalidation, ChildTargetDef, SinkAssurance, TargetActionSink, TargetActionSinkKeeper,
-    TargetHandler, TargetReconcileOutput, TargetStateProvider, TargetStateProviderRegistry,
+    ChildInvalidation, ChildTargetDef, SinkApplyOrdering, SinkAssurance, SinkBatchAtomicity,
+    SinkCapabilities, SinkCapabilitySupport, SinkCompletionVerification, SinkQueueStats,
+    TargetActionSink, TargetActionSinkKeeper, TargetHandler, TargetReconcileOutput,
+    TargetStateProvider, TargetStateProviderRegistry,
 };
 use synor_core::state::native_effect::{
     NativeEffectDescriptor, NativeEffectOperation, NativeVerificationPolicy,
@@ -39,33 +41,225 @@ enum PyBoundDescriptorState {
     Failed,
 }
 
+pub(crate) fn bind_verified_target_action(
+    py: Python<'_>,
+    action: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    Ok(Py::new(
+        py,
+        PyBoundVerifiedTargetAction {
+            action,
+            descriptor: Mutex::new(PyBoundDescriptorState::Unbound),
+        },
+    )?
+    .into_any())
+}
+
+/// Return the host-owned members retained by the engine-only verified-action
+/// envelope.  The generic Python size estimator cannot discover these through
+/// ordinary container traversal because the envelope deliberately exposes no
+/// Python attributes.
+pub(crate) fn bound_verified_action_retained_members(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> Option<(Py<PyAny>, usize)> {
+    let envelope = value
+        .extract::<PyRef<'_, PyBoundVerifiedTargetAction>>()
+        .ok()?;
+    let action = envelope.action.clone_ref(py);
+    let descriptor_heap_bytes = envelope
+        .descriptor
+        .lock()
+        .ok()
+        .and_then(|state| match &*state {
+            PyBoundDescriptorState::Bound(descriptor) => Some(
+                descriptor
+                    .action_id
+                    .capacity()
+                    .saturating_add(descriptor.source_digest.capacity())
+                    .saturating_add(descriptor.target_locator_digest.capacity()),
+            ),
+            _ => None,
+        })
+        .unwrap_or(0);
+    Some((action, descriptor_heap_bytes))
+}
+
 pub struct PyTargetActionSinkInner {
     callback: PyCallback,
     describe_callback: Option<Arc<Py<PyAny>>>,
+    capabilities: SinkCapabilities,
+}
+
+type PySinkCapabilities = (
+    u16,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<usize>,
+    Option<usize>,
+);
+
+type PySinkQueueStats = (usize, usize, usize, usize, usize, usize);
+
+fn parse_sink_capabilities(value: Option<PySinkCapabilities>) -> PyResult<SinkCapabilities> {
+    let Some((
+        schema_version,
+        atomicity,
+        idempotency,
+        segmented_replay,
+        ordering,
+        cancellation,
+        completion_verification,
+        max_actions,
+        max_bytes,
+    )) = value
+    else {
+        return Ok(SinkCapabilities::default());
+    };
+    if schema_version != 1 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "unsupported target sink capability schema_version",
+        ));
+    }
+    let batch_atomicity = match atomicity.as_str() {
+        "unknown" => SinkBatchAtomicity::Unknown,
+        "none" => SinkBatchAtomicity::None,
+        "per_action" => SinkBatchAtomicity::PerAction,
+        "per_apply" => SinkBatchAtomicity::PerApply,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "invalid target sink batch_atomicity",
+            ));
+        }
+    };
+    let support = |value: &str, field: &str| match value {
+        "unknown" => Ok(SinkCapabilitySupport::Unknown),
+        "unsupported" => Ok(SinkCapabilitySupport::Unsupported),
+        "supported" => Ok(SinkCapabilitySupport::Supported),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid target sink {field}"
+        ))),
+    };
+    let apply_ordering = match ordering.as_str() {
+        "unknown" => SinkApplyOrdering::Unknown,
+        "unordered" => SinkApplyOrdering::Unordered,
+        "input_order" => SinkApplyOrdering::InputOrder,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "invalid target sink apply_ordering",
+            ));
+        }
+    };
+    let completion_verification = match completion_verification.as_str() {
+        "unknown" => SinkCompletionVerification::Unknown,
+        "unverified" => SinkCompletionVerification::Unverified,
+        "acknowledged" => SinkCompletionVerification::Acknowledged,
+        "query_verified" => SinkCompletionVerification::QueryVerified,
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "invalid target sink completion_verification",
+            ));
+        }
+    };
+    if max_actions == Some(0) || max_bytes == Some(0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "target sink batch limits must be positive",
+        ));
+    }
+    let idempotent_replay = support(&idempotency, "idempotent_replay")?;
+    let segmented_replay_safe = support(&segmented_replay, "segmented_replay_safe")?;
+    if segmented_replay_safe == SinkCapabilitySupport::Supported
+        && idempotent_replay != SinkCapabilitySupport::Supported
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "segmented_replay_safe requires idempotent_replay='supported'",
+        ));
+    }
+    Ok(SinkCapabilities {
+        schema_version,
+        batch_atomicity,
+        idempotent_replay,
+        segmented_replay_safe,
+        apply_ordering,
+        cancellation_safe: support(&cancellation, "cancellation_safe")?,
+        completion_verification,
+        max_batch_actions: max_actions,
+        max_batch_bytes: max_bytes,
+    })
+}
+
+fn sink_capabilities_tuple(value: SinkCapabilities) -> PySinkCapabilities {
+    let atomicity = match value.batch_atomicity {
+        SinkBatchAtomicity::Unknown => "unknown",
+        SinkBatchAtomicity::None => "none",
+        SinkBatchAtomicity::PerAction => "per_action",
+        SinkBatchAtomicity::PerApply => "per_apply",
+    };
+    let support = |value| match value {
+        SinkCapabilitySupport::Unknown => "unknown",
+        SinkCapabilitySupport::Unsupported => "unsupported",
+        SinkCapabilitySupport::Supported => "supported",
+    };
+    let ordering = match value.apply_ordering {
+        SinkApplyOrdering::Unknown => "unknown",
+        SinkApplyOrdering::Unordered => "unordered",
+        SinkApplyOrdering::InputOrder => "input_order",
+    };
+    let completion_verification = match value.completion_verification {
+        SinkCompletionVerification::Unknown => "unknown",
+        SinkCompletionVerification::Unverified => "unverified",
+        SinkCompletionVerification::Acknowledged => "acknowledged",
+        SinkCompletionVerification::QueryVerified => "query_verified",
+    };
+    (
+        value.schema_version,
+        atomicity.to_owned(),
+        support(value.idempotent_replay).to_owned(),
+        support(value.segmented_replay_safe).to_owned(),
+        ordering.to_owned(),
+        support(value.cancellation_safe).to_owned(),
+        completion_verification.to_owned(),
+        value.max_batch_actions,
+        value.max_batch_bytes,
+    )
 }
 
 #[pymethods]
 impl PyTargetActionSink {
     #[staticmethod]
-    pub fn new_sync(callback: Py<PyAny>) -> Self {
+    #[pyo3(signature = (callback, capabilities=None))]
+    pub fn new_sync(
+        callback: Py<PyAny>,
+        capabilities: Option<PySinkCapabilities>,
+    ) -> PyResult<Self> {
         let inner = PyTargetActionSinkInner {
             callback: PyCallback::Sync(Arc::new(callback)),
             describe_callback: None,
+            capabilities: parse_sink_capabilities(capabilities)?,
         };
-        Self {
+        Ok(Self {
             keeper: TargetActionSinkKeeper::new(inner),
-        }
+        })
     }
 
     #[staticmethod]
-    pub fn new_async(callback: Py<PyAny>) -> Self {
+    #[pyo3(signature = (callback, capabilities=None))]
+    pub fn new_async(
+        callback: Py<PyAny>,
+        capabilities: Option<PySinkCapabilities>,
+    ) -> PyResult<Self> {
         let inner = PyTargetActionSinkInner {
             callback: PyCallback::Async(Arc::new(callback)),
             describe_callback: None,
+            capabilities: parse_sink_capabilities(capabilities)?,
         };
-        Self {
+        Ok(Self {
             keeper: TargetActionSinkKeeper::new(inner),
-        }
+        })
     }
 
     #[staticmethod]
@@ -92,10 +286,37 @@ impl PyTargetActionSink {
         let inner = PyTargetActionSinkInner {
             callback: PyCallback::Async(Arc::new(apply_bound_callback)),
             describe_callback: Some(Arc::new(describe_callback)),
+            capabilities: SinkCapabilities {
+                completion_verification: SinkCompletionVerification::QueryVerified,
+                ..SinkCapabilities::default()
+            },
         };
         Ok(Self {
             keeper: TargetActionSinkKeeper::new(inner),
         })
+    }
+
+    pub fn capabilities(&self) -> PySinkCapabilities {
+        sink_capabilities_tuple(self.keeper.capabilities())
+    }
+
+    pub fn queue_stats(&self) -> PySinkQueueStats {
+        let SinkQueueStats {
+            ongoing_batches,
+            queued_batches,
+            queued_inputs,
+            in_flight_inputs,
+            in_flight_bytes,
+            capacity_waiters,
+        } = self.keeper.queue_stats();
+        (
+            ongoing_batches,
+            queued_batches,
+            queued_inputs,
+            in_flight_inputs,
+            in_flight_bytes,
+            capacity_waiters,
+        )
     }
 }
 
@@ -113,6 +334,10 @@ impl TargetActionSink<PyEngineProfile> for PyTargetActionSinkInner {
         } else {
             SinkAssurance::Legacy
         }
+    }
+
+    fn capabilities(&self) -> SinkCapabilities {
+        self.capabilities
     }
 
     fn describe_effect(&self, action: &Py<PyAny>) -> Result<Option<NativeEffectDescriptor>> {
@@ -332,14 +557,9 @@ impl TargetHandler<PyEngineProfile> for PyTargetHandler {
                     py_output.extract::<(Py<PyAny>, Py<PyAny>, Py<PyAny>, Py<PyAny>)>(py)?;
                 let sink = get_core_field(py, sink)?.extract::<PyTargetActionSink>(py)?;
                 let action = match sink.keeper.assurance() {
-                    SinkAssurance::Verified(NativeVerificationPolicy::QueryVerified) => Py::new(
-                        py,
-                        PyBoundVerifiedTargetAction {
-                            action: raw_action,
-                            descriptor: Mutex::new(PyBoundDescriptorState::Unbound),
-                        },
-                    )?
-                    .into_any(),
+                    SinkAssurance::Verified(NativeVerificationPolicy::QueryVerified) => {
+                        bind_verified_target_action(py, raw_action)?
+                    }
                     _ => raw_action,
                 };
                 let child_invalidation = if py_child_invalidation.is_none(py) {

@@ -6,6 +6,7 @@ use crate::deadline::PyDeadlineContext;
 use crate::stable_path::PyStableKey;
 
 use crate::app::PyStatsGroupHandle;
+use crate::component::PyComponentMountHandle;
 use crate::value::PyStoredValue;
 use crate::{environment::PyEnvironment, stable_path::PyStablePath};
 use pyo3::types::PyDict;
@@ -36,6 +37,19 @@ impl PyComponentProcessorContext {
     fn join_fn_call(&self, fn_ctx: &PyFnCallContext) -> PyResult<()> {
         self.0.join_fn_call(&fn_ctx.0);
         Ok(())
+    }
+
+    /// Open an O(1)-state readiness accumulator for a bulk mount operation.
+    fn begin_mount_group(&self) -> (PyComponentProcessorContext, PyComponentMountHandle) {
+        let (derived, handle) = self.0.begin_mount_group();
+        (
+            PyComponentProcessorContext(derived),
+            PyComponentMountHandle::from_handle(handle),
+        )
+    }
+
+    fn end_mount_group(&self) {
+        self.0.end_mount_group();
     }
 
     /// Open a stats group rooted at this context. Returns the derived context

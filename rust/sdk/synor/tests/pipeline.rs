@@ -2168,6 +2168,154 @@ async fn ctx_mount_each_preserves_input_order_under_concurrency() {
 }
 
 #[tokio::test]
+async fn ctx_map_bounded_limits_concurrency_and_preserves_input_order() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (app, _dir) = temp_app("map_bounded_concurrency_order").await;
+    let current = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+
+    app.update({
+        let current = current.clone();
+        let peak = peak.clone();
+        move |ctx| async move {
+            let items = vec![(0, 40_u64), (1, 5), (2, 20), (3, 0)];
+            let results = ctx
+                .map_bounded(items, 2, {
+                    let current = current.clone();
+                    let peak = peak.clone();
+                    move |(value, delay)| {
+                        let current = current.clone();
+                        let peak = peak.clone();
+                        async move {
+                            let active = current.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(active, Ordering::SeqCst);
+                            sleep(Duration::from_millis(delay)).await;
+                            current.fetch_sub(1, Ordering::SeqCst);
+                            Ok(value)
+                        }
+                    }
+                })
+                .await?;
+
+            assert_eq!(results, vec![0, 1, 2, 3]);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(peak.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn ctx_map_bounded_stops_admission_drains_started_work_and_orders_errors() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (app, _dir) = temp_app("map_bounded_error_order").await;
+    let started = Arc::new(AtomicUsize::new(0));
+
+    app.update({
+        let started = started.clone();
+        move |ctx| async move {
+            let error = ctx
+                .map_bounded([0, 1, 2, 3], 2, {
+                    let started = started.clone();
+                    move |value| {
+                        let started = started.clone();
+                        started.fetch_or(1 << value, Ordering::SeqCst);
+                        async move {
+                            if value == 0 {
+                                sleep(Duration::from_millis(30)).await;
+                            }
+                            match value {
+                                0 => Err(synor::Error::engine("first-input-error")),
+                                1 => Err(synor::Error::engine("second-input-error")),
+                                _ => Ok(value),
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect_err("bounded map should return the first input-order error");
+
+            assert_eq!(error.to_string(), "first-input-error");
+            assert_eq!(
+                started.load(Ordering::SeqCst),
+                0b0011,
+                "items beyond the already-admitted window must not start after failure"
+            );
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ctx_map_bounded_rejects_zero_without_starting_work() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (app, _dir) = temp_app("map_bounded_zero").await;
+    let started = Arc::new(AtomicUsize::new(0));
+
+    app.update({
+        let started = started.clone();
+        move |ctx| async move {
+            let error = ctx
+                .map_bounded([1], 0, {
+                    let started = started.clone();
+                    move |value| {
+                        started.fetch_add(1, Ordering::SeqCst);
+                        async move { Ok(value) }
+                    }
+                })
+                .await
+                .expect_err("zero max_in_flight should be rejected");
+
+            assert_eq!(error.to_string(), "max_in_flight must be at least 1");
+            assert_eq!(started.load(Ordering::SeqCst), 0);
+            Ok(())
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ctx_map_keeps_unbounded_fan_in_barrier_semantics() {
+    use std::sync::Arc;
+
+    const BOUNDED_LIMIT: usize = 4;
+    const ITEM_COUNT: usize = BOUNDED_LIMIT + 1;
+
+    let (app, _dir) = temp_app("map_unbounded_barrier").await;
+    app.update(|ctx| async move {
+        let barrier = Arc::new(tokio::sync::Barrier::new(ITEM_COUNT));
+        let results = tokio::time::timeout(
+            Duration::from_secs(5),
+            ctx.map(0..ITEM_COUNT, move |value| {
+                let barrier = barrier.clone();
+                async move {
+                    barrier.wait().await;
+                    Ok(value)
+                }
+            }),
+        )
+        .await
+        .expect("ordinary map must admit every participant in a wider barrier")?;
+
+        assert_eq!(results, (0..ITEM_COUNT).collect::<Vec<_>>());
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn max_inflight_components_limits_mount_each_concurrency() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3029,6 +3177,49 @@ mod mount_macros {
         // Same argument: component-memo hit, fn not re-run, cached value replayed.
         assert_eq!(run(&app).await, 21);
         assert_eq!(ONCE_CALLS.load(Ordering::SeqCst), 1);
+    }
+
+    static CAUGHT_ROOT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static CAUGHT_PARENT_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static CAUGHT_CHILD_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[synor::function]
+    async fn caught_failing_child(_ctx: &Ctx) -> Result<()> {
+        CAUGHT_CHILD_CALLS.fetch_add(1, Ordering::SeqCst);
+        Err(synor::Error::engine("expected foreground failure"))
+    }
+
+    #[synor::function]
+    async fn caught_failure_parent(ctx: &Ctx) -> Result<u32> {
+        CAUGHT_PARENT_CALLS.fetch_add(1, Ordering::SeqCst);
+        let error = synor::use_mount!(caught_failing_child(ctx))
+            .await
+            .expect_err("foreground child should fail");
+        assert_eq!(error.to_string(), "expected foreground failure");
+        Ok(7)
+    }
+
+    #[synor::function]
+    async fn caught_failure_root(ctx: &Ctx) -> Result<u32> {
+        CAUGHT_ROOT_CALLS.fetch_add(1, Ordering::SeqCst);
+        synor::use_mount!(caught_failure_parent(ctx)).await
+    }
+
+    #[tokio::test]
+    async fn caught_use_mount_failure_does_not_fail_app_or_cache_ancestors() {
+        let (app, _dir) = temp_app("caught_use_mount_failure").await;
+
+        async fn run(app: &synor::App) -> u32 {
+            app.update(|ctx| async move { synor::use_mount!(caught_failure_root(ctx)).await })
+                .await
+                .unwrap()
+        }
+
+        assert_eq!(run(&app).await, 7);
+        assert_eq!(run(&app).await, 7);
+        assert_eq!(CAUGHT_ROOT_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(CAUGHT_PARENT_CALLS.load(Ordering::SeqCst), 2);
+        assert_eq!(CAUGHT_CHILD_CALLS.load(Ordering::SeqCst), 2);
     }
 
     #[synor::function]

@@ -152,11 +152,10 @@ async def app_main() -> None:
     config: dict[str, str] = {
         "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
         "group.id": KAFKA_GROUP_ID,
-        "enable.auto.commit": "false",
         "auto.offset.reset": "earliest",
     }
 
-    consumer = AIOConsumer(config)
+    consumer = kafka.create_consumer(config)  # ownership transfers to the stream
     items = kafka.topic_as_map(consumer, [KAFKA_TOPIC])
     await syn.spawn_each(process_message, items, products_table, employees_table)
 
@@ -167,7 +166,7 @@ app = syn.App(syn.AppConfig(name="KafkaToLanceDB"), app_main)
 Three things to notice:
 
 1. `mount_table_target(...)` resolves the connection from the context key and creates the table from the dataclass schema — `products` keyed by `sku`, `employees` keyed by `emp_id`. The handle it returns is what you call `ensure_row` on.
-2. `enable.auto.commit` is **off** on purpose. Synor commits each offset *after* the row is durably written, so the consumer group always resumes from the last message it actually persisted — at-least-once delivery without `__consumer_offsets` drifting ahead of your data. `auto.offset.reset="earliest"` means a fresh group reads the topic from the start.
+2. `kafka.create_consumer()` forces both automatic commit and automatic offset storage **off**. Synor commits each offset *after* the row is durably written, so the consumer group always resumes from the last message it actually persisted — at-least-once delivery without `__consumer_offsets` drifting ahead of your data. Passing the helper-created consumer to `topic_as_map()` transfers ownership to that single-use stream, which drains, unsubscribes, and closes it on every exit path. `auto.offset.reset="earliest"` means a fresh group reads the topic from the start.
 3. `topic_as_map` treats the topic as a live keyed map: each message becomes an item keyed by its Kafka key, and a tombstone (null value) deletes that key's row. `spawn_each` runs one `process_message` component per message.
 
 That's the whole pipeline — one file.

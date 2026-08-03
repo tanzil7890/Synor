@@ -104,9 +104,23 @@ items = iggy.topic_as_map(
 
 ### Readiness and offsets
 
-The source connector disables Iggy auto-commit and stores offsets after the
-downstream readiness handle completes. This mirrors Kafka-style back-pressure:
-an offset is stored only after Synor has finished processing the message.
+The source connector disables Iggy auto-commit and stores offsets only after the
+downstream readiness handle returns the typed `Succeeded` outcome. A custom
+subscriber handle that only implements the legacy `ready()` method is rejected
+because it cannot prove durable success. Readiness and visible progress advance
+only after Iggy acknowledges that store. A downstream failure, cancellation,
+or offset-store failure is terminal and leaves the failed offset
+unadvanced. Shutdown drains already-started readiness and store work instead of
+cancelling it mid-acknowledgement, even if the watching task receives repeated
+cancellation requests.
+
+The source pulls at most 256 messages that have not crossed the partition's
+contiguous readiness frontier. Later messages that finish before an earlier
+offset retain their slots, and the connector stops advancing Iggy's async
+iterator when the window is full. Pulling resumes only after the gap closes or
+shutdown releases the retained entries. This bound is independent of Iggy's
+`batch_length`, which controls broker fetch batches rather than downstream
+readiness.
 
 For single-partition topics, the connector can infer the initial high watermark
 from Iggy's topic details. For multi-partition topics, pass

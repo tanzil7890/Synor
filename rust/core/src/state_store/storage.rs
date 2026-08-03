@@ -14,15 +14,16 @@ use crate::state::native_effect::{
 };
 use crate::state::stable_path::{StablePath, StablePathPrefix, StablePathRef};
 use crate::state_store::app_store::{AppStore, Database};
-use crate::state_store::txn::WriteTxn;
+use crate::state_store::txn::{ReadTxn, WriteTxn};
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 use synor_utils::batching::{BatchQueue, Batcher, BatchingOptions, Runner};
 use synor_utils::deser::from_msgpack_slice;
 use synor_utils::fingerprint::Fingerprint;
@@ -31,6 +32,7 @@ const DEFAULT_MAX_DBS: u32 = 1024;
 const DEFAULT_MAP_SIZE: usize = 0x1_0000_0000; // 4GiB
 const MAP_SIZE_GROWTH_FACTOR: usize = 2;
 const ENVIRONMENT_OPERATION_LEASE_FILENAME: &str = "environment.lock";
+const MAP_RESIZE_LEASE_FILENAME: &str = "map-resize.lock";
 const OPERATION_LEASE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Sync sibling of [`AppStore::read_txn`]'s `MDB_READERS_FULL` retry,
@@ -83,6 +85,18 @@ fn open_read_txn_on_env_with_retry(
     }
 }
 
+/// Returns `true` if `err` is an LMDB `MDB_MAP_RESIZED` error.
+fn is_map_resized(err: &Error) -> bool {
+    let inner = err.without_contexts();
+    if let Error::Internal(anyhow_err) = inner {
+        return matches!(
+            anyhow_err.downcast_ref::<heed::Error>(),
+            Some(heed::Error::Mdb(heed::MdbError::MapResized))
+        );
+    }
+    false
+}
+
 fn default_max_dbs() -> u32 {
     DEFAULT_MAX_DBS
 }
@@ -90,6 +104,20 @@ fn default_max_dbs() -> u32 {
 fn default_map_size() -> usize {
     DEFAULT_MAP_SIZE
 }
+
+static READ_TXN_RETRY_PHASE1: synor_utils::retryable::RetryOptions =
+    synor_utils::retryable::RetryOptions {
+        retry_timeout: Some(std::time::Duration::from_secs(3)),
+        initial_backoff: std::time::Duration::from_millis(10),
+        max_backoff: std::time::Duration::from_secs(1),
+    };
+
+static READ_TXN_RETRY_PHASE2: synor_utils::retryable::RetryOptions =
+    synor_utils::retryable::RetryOptions {
+        retry_timeout: None,
+        initial_backoff: std::time::Duration::from_millis(10),
+        max_backoff: std::time::Duration::from_secs(1),
+    };
 
 /// Round `requested` up to the next multiple of the OS page size.
 ///
@@ -107,6 +135,31 @@ fn align_map_size_to_page(requested: usize) -> usize {
     // (practically impossible) case of `requested` being within one page of
     // `usize::MAX`.
     requested.div_ceil(page).saturating_mul(page)
+}
+
+/// Return the process-wide transaction/resize coordinator for one canonical
+/// LMDB path. heed deduplicates environments opened on the same path within a
+/// process, so independently constructed `Storage` handles must also share
+/// this guard; otherwise one handle could resize while another handle still
+/// owns a transaction.
+fn txn_coordinator_for(db_path: &Path) -> Arc<tokio::sync::RwLock<()>> {
+    static COORDINATORS: OnceLock<
+        parking_lot::Mutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>>,
+    > = OnceLock::new();
+
+    let canonical = db_path
+        .canonicalize()
+        .unwrap_or_else(|_| db_path.to_path_buf());
+    let mut coordinators = COORDINATORS
+        .get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+        .lock();
+    coordinators.retain(|_, coordinator| coordinator.strong_count() != 0);
+    if let Some(coordinator) = coordinators.get(&canonical).and_then(Weak::upgrade) {
+        return coordinator;
+    }
+    let coordinator = Arc::new(tokio::sync::RwLock::new(()));
+    coordinators.insert(canonical, Arc::downgrade(&coordinator));
+    coordinator
 }
 
 /// Configuration for opening the storage environment.
@@ -130,9 +183,153 @@ pub struct Storage {
 struct StorageInner {
     db_env: heed::Env<heed::WithoutTls>,
     coord: Arc<tokio::sync::RwLock<()>>,
+    map_resize: MapResizeCoordinator,
     batcher: Batcher<TxnRunner>,
     lease_dir: PathBuf,
     settings: StorageSettings,
+}
+
+/// Coordinates LMDB map-size changes both within this process and with other
+/// Synor processes sharing the same environment.
+///
+/// The Tokio lock proves that this process has no live transaction when
+/// `mdb_env_set_mapsize` is called. The durable lock file serializes competing
+/// growers across processes. A process that observes `MDB_MAP_RESIZED` adopts
+/// the size stored in LMDB's metadata by calling `Env::resize(0)` and retries
+/// the transaction opening operation.
+#[derive(Clone)]
+struct MapResizeCoordinator {
+    db_env: heed::Env<heed::WithoutTls>,
+    coord: Arc<tokio::sync::RwLock<()>>,
+    lease_path: PathBuf,
+}
+
+impl MapResizeCoordinator {
+    fn open_lease_file(&self) -> Result<File> {
+        Ok(OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&self.lease_path)?)
+    }
+
+    async fn acquire_lease(&self) -> Result<File> {
+        let file = self.open_lease_file()?;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(file),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(OPERATION_LEASE_RETRY_INTERVAL).await;
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// Adopt the map size published by another process. The write guard must
+    /// be acquired before the cross-process lease so every local transaction
+    /// is gone before the unsafe LMDB call.
+    async fn adopt_external_resize(&self) -> Result<usize> {
+        let local_guard = self.coord.write().await;
+        let _lease = self.acquire_lease().await?;
+        self.adopt_external_resize_unlocked(&local_guard)
+    }
+
+    fn adopt_external_resize_unlocked(
+        &self,
+        _local_guard: &tokio::sync::RwLockWriteGuard<'_, ()>,
+    ) -> Result<usize> {
+        // LMDB defines a zero size as "adopt the size currently recorded in
+        // the environment metadata". The local write guard guarantees that
+        // no transaction in this process is active.
+        unsafe {
+            self.db_env.resize(0)?;
+        }
+        let adopted = self.db_env.info().map_size;
+        debug!("Adopted externally resized LMDB map: {adopted} bytes");
+        Ok(adopted)
+    }
+
+    /// Resolve `MDB_MAP_FULL` without racing a concurrent process. First
+    /// adopt any size that another writer published while this process was
+    /// waiting; grow only when the shared size has not already advanced.
+    async fn grow_after_map_full(&self, observed_size: usize) -> Result<usize> {
+        let local_guard = self.coord.write().await;
+        let _lease = self.acquire_lease().await?;
+        let adopted_size = self.adopt_external_resize_unlocked(&local_guard)?;
+        if adopted_size > observed_size {
+            debug!(
+                "Another process already grew the LMDB map from {observed_size} to {adopted_size} bytes"
+            );
+            return Ok(adopted_size);
+        }
+
+        // `resize(0)` can expose an older persisted size after this process
+        // has already grown its local map but has not yet committed beyond
+        // the old boundary. Never discard that local progress.
+        let current = observed_size.max(adopted_size);
+        let new_size = current.checked_mul(MAP_SIZE_GROWTH_FACTOR).ok_or_else(|| {
+            internal_error!("LMDB map size overflow while doubling: current={current} bytes")
+        })?;
+        let new_size = align_map_size_to_page(new_size);
+        warn!("LMDB map full, auto-resizing to {new_size} bytes and retrying");
+        unsafe {
+            self.db_env.resize(new_size)?;
+        }
+        Ok(new_size)
+    }
+
+    /// Synchronous counterpart used only on a Tokio blocking-pool thread.
+    fn adopt_external_resize_blocking(&self) -> Result<usize> {
+        let local_guard = self.coord.blocking_write();
+        let lease = self.open_lease_file()?;
+        lease.lock()?;
+        self.adopt_external_resize_unlocked(&local_guard)
+    }
+
+    /// Create a compact LMDB snapshot while recovering a map size published by
+    /// another process. LMDB's compact-copy implementation opens an internal
+    /// read transaction, so it can surface `MDB_MAP_RESIZED` even though no
+    /// explicit transaction is visible at this call site.
+    fn compact_copy_to_path_blocking(&self, copy_path: &Path) -> Result<()> {
+        loop {
+            let local_guard = self.coord.blocking_read();
+            // The downgrade staging directory is freshly created. Refuse to
+            // follow or overwrite a path that appeared unexpectedly, and use a
+            // fresh file for every retry because a failed compact copy may have
+            // already written a prefix.
+            let mut file = OpenOptions::new()
+                .write(true)
+                .read(true)
+                .create_new(true)
+                .open(copy_path)?;
+            match self
+                .db_env
+                .copy_to_file(&mut file, heed::CompactionOption::Enabled)
+            {
+                Ok(()) => {
+                    file.sync_all()?;
+                    return Ok(());
+                }
+                Err(raw_error) => {
+                    let error: Error = raw_error.into();
+                    drop(file);
+                    drop(local_guard);
+                    match std::fs::remove_file(copy_path) {
+                        Ok(()) => {}
+                        Err(remove_error)
+                            if remove_error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(remove_error) => return Err(remove_error.into()),
+                    }
+                    if is_map_resized(&error) {
+                        self.adopt_external_resize_blocking()?;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
 }
 
 /// Process-scoped exclusive lease for one app's mutating operation lifecycle.
@@ -211,9 +408,18 @@ fn is_map_full(err: &Error) -> bool {
 struct TxnRunner {
     db_env: heed::Env<heed::WithoutTls>,
     coord: Arc<tokio::sync::RwLock<()>>,
+    map_resize: MapResizeCoordinator,
 }
 
 impl TxnRunner {
+    /// Read the current local map size while excluding a concurrent local
+    /// resize/adoption. `mdb_env_info` dereferences LMDB's mapped metadata, so
+    /// it must participate in the same coordinator protocol as transactions.
+    async fn observed_map_size(&self) -> usize {
+        let _read_guard = self.coord.read().await;
+        self.db_env.info().map_size
+    }
+
     /// Attempts one write-txn pass over `inputs`. If any body or the final
     /// commit returns an error the write txn and coordinator read guard are
     /// dropped before the error propagates. On `MapFull` the caller should
@@ -228,33 +434,6 @@ impl TxnRunner {
         wtxn.into_inner().commit()?;
         Ok(outputs)
     }
-
-    /// Doubles the env's current map size (aligned to page). Caller must hold
-    /// the coordinator write guard before calling `Env::resize`.
-    fn next_map_size(db_env: &heed::Env<heed::WithoutTls>) -> Result<usize> {
-        let current = db_env.info().map_size;
-        let doubled = current.checked_mul(MAP_SIZE_GROWTH_FACTOR).ok_or_else(|| {
-            internal_error!("LMDB map size overflow while doubling: current={current} bytes")
-        })?;
-        Ok(align_map_size_to_page(doubled))
-    }
-
-    async fn resize_on_map_full(&self) -> Result<usize> {
-        let resize_guard = self.coord.write().await;
-        let new_size = Self::next_map_size(&self.db_env)?;
-        warn!(
-            "LMDB map full, auto-resizing to {} bytes and retrying",
-            new_size
-        );
-        // Safety: `resize_guard` excludes all coordinator-participating LMDB
-        // transactions in this process; the failed write txn and its read
-        // guard were dropped before this path runs.
-        unsafe {
-            self.db_env.resize(new_size)?;
-        }
-        drop(resize_guard);
-        Ok(new_size)
-    }
 }
 
 #[async_trait]
@@ -267,10 +446,16 @@ impl Runner for TxnRunner {
         inputs: Vec<TxnBody>,
     ) -> Result<impl ExactSizeIterator<Item = Box<dyn Any + Send>>> {
         loop {
+            // This short guard is released before `try_run_once` acquires its
+            // transaction-lifetime guard, avoiding a nested read acquisition.
+            let observed_size = self.observed_map_size().await;
             match self.try_run_once(&inputs).await {
                 Ok(outputs) => return Ok(outputs.into_iter()),
                 Err(e) if is_map_full(&e) => {
-                    self.resize_on_map_full().await?;
+                    self.map_resize.grow_after_map_full(observed_size).await?;
+                }
+                Err(e) if is_map_resized(&e) => {
+                    self.map_resize.adopt_external_resize().await?;
                 }
                 Err(e) => return Err(e),
             }
@@ -312,11 +497,17 @@ impl Storage {
         if cleared_count > 0 {
             info!("Cleared {cleared_count} stale readers");
         }
-        let coord = Arc::new(tokio::sync::RwLock::new(()));
+        let coord = txn_coordinator_for(db_env.path());
+        let map_resize = MapResizeCoordinator {
+            db_env: db_env.clone(),
+            coord: coord.clone(),
+            lease_path: lease_dir.join(MAP_RESIZE_LEASE_FILENAME),
+        };
         let batcher = Batcher::new(
             TxnRunner {
                 db_env: db_env.clone(),
                 coord: coord.clone(),
+                map_resize: map_resize.clone(),
             },
             Arc::new(BatchQueue::new()),
             BatchingOptions::default(),
@@ -325,6 +516,7 @@ impl Storage {
             inner: Arc::new(StorageInner {
                 db_env,
                 coord,
+                map_resize,
                 batcher,
                 lease_dir,
                 settings: settings.clone(),
@@ -348,11 +540,17 @@ impl Storage {
             .unwrap_or_else(|| db_env.path())
             .join("leases");
         std::fs::create_dir_all(&lease_dir).expect("create test lease directory");
-        let coord = Arc::new(tokio::sync::RwLock::new(()));
+        let coord = txn_coordinator_for(db_env.path());
+        let map_resize = MapResizeCoordinator {
+            db_env: db_env.clone(),
+            coord: coord.clone(),
+            lease_path: lease_dir.join(MAP_RESIZE_LEASE_FILENAME),
+        };
         let batcher = Batcher::new(
             TxnRunner {
                 db_env: db_env.clone(),
                 coord: coord.clone(),
+                map_resize: map_resize.clone(),
             },
             Arc::new(BatchQueue::new()),
             BatchingOptions::default(),
@@ -361,6 +559,7 @@ impl Storage {
             inner: Arc::new(StorageInner {
                 db_env,
                 coord,
+                map_resize,
                 batcher,
                 lease_dir,
                 settings: StorageSettings {
@@ -514,8 +713,54 @@ impl Storage {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn txn_coordinator(&self) -> Arc<tokio::sync::RwLock<()>> {
         self.inner.coord.clone()
+    }
+
+    /// Open a locally guarded read transaction, recovering both exhausted
+    /// reader slots and a map size published by another process.
+    pub(crate) async fn read_txn(&self) -> Result<ReadTxn<'_>> {
+        loop {
+            let guard = self.inner.coord.clone().read_owned().await;
+            let env = &self.inner.db_env;
+            let try_open = || async {
+                match env.read_txn() {
+                    Ok(txn) => synor_utils::retryable::Ok(txn),
+                    Err(heed::Error::Mdb(heed::MdbError::ReadersFull)) => {
+                        warn!("LMDB readers full, retrying");
+                        Err(synor_utils::retryable::Error::retryable(internal_error!(
+                            "LMDB readers full"
+                        )))
+                    }
+                    Err(error) => Err(synor_utils::retryable::Error::not_retryable(error)),
+                }
+            };
+
+            let opened: Result<heed::RoTxn<'_, heed::WithoutTls>> =
+                match synor_utils::retryable::run(&try_open, &READ_TXN_RETRY_PHASE1).await {
+                    Ok(txn) => Ok(txn),
+                    Err(error) if !error.is_retryable => Err(error.into()),
+                    Err(_) => {
+                        let cleared = env.clear_stale_readers()?;
+                        if cleared > 0 {
+                            warn!("Cleared {cleared} stale LMDB readers");
+                        }
+                        synor_utils::retryable::run(&try_open, &READ_TXN_RETRY_PHASE2)
+                            .await
+                            .map_err(Into::<Error>::into)
+                    }
+                };
+
+            match opened {
+                Ok(txn) => return Ok(ReadTxn::new(guard, txn)),
+                Err(error) if is_map_resized(&error) => {
+                    drop(guard);
+                    self.inner.map_resize.adopt_external_resize().await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Migrate legacy files from the old layout (directly in `base_path`)
@@ -588,30 +833,39 @@ impl Storage {
         let _environment_lease = self
             .acquire_environment_shared_lease(std::time::Duration::from_secs(30))
             .await?;
-        let _guard = self.inner.coord.read().await;
-        let mut wtxn = self.inner.db_env.write_txn()?;
+        let env = self.inner.db_env.clone();
+        let app_name = app_name.to_owned();
         let db = self
-            .inner
-            .db_env
-            .create_database(&mut wtxn, Some(app_name))?;
-        wtxn.commit()?;
-        Ok(AppStore::new(db, self.inner.db_env.clone(), self.clone()))
+            .run_txn(move |wtxn| {
+                let env = env.clone();
+                let app_name = app_name.clone();
+                Box::pin(async move { Ok(env.create_database(&mut **wtxn, Some(&app_name))?) })
+            })
+            .await?;
+        let store = AppStore::new(db, self.inner.db_env.clone(), self.clone());
+        store.upgrade_native_obligation_summary_if_present().await?;
+        Ok(store)
     }
 
     /// Open the per-app sub-database by name, or `None` if it doesn't exist.
     /// Opens an internal read transaction for the lookup.
     pub async fn open_app_store_by_name(&self, app_name: &str) -> Result<Option<AppStore>> {
-        let _guard = self.inner.coord.read().await;
-        let rtxn = self.inner.db_env.read_txn()?;
+        let _environment_lease = self
+            .acquire_environment_shared_lease(std::time::Duration::from_secs(30))
+            .await?;
+        let rtxn = self.read_txn().await?;
         let db: Option<Database> = self.inner.db_env.open_database(&rtxn, Some(app_name))?;
         // The dbi handle opened in a read txn only becomes usable by other
         // transactions after this txn commits; dropping (aborting) it instead
         // leaves the handle invalid and later reads fail with EINVAL when the
         // sub-database was created by another process.
         rtxn.commit()?;
-        let env = self.inner.db_env.clone();
-        let storage = self.clone();
-        Ok(db.map(|db| AppStore::new(db, env, storage.clone())))
+        let Some(db) = db else {
+            return Ok(None);
+        };
+        let store = AppStore::new(db, self.inner.db_env.clone(), self.clone());
+        store.upgrade_native_obligation_summary_if_present().await?;
+        Ok(Some(store))
     }
 
     /// Drop an app's operational data while retaining native effect evidence.
@@ -625,8 +879,7 @@ impl Storage {
     /// Idempotent: dropping a non-existent app is a no-op.
     pub async fn drop_app(&self, app_name: &str) -> Result<()> {
         let db = {
-            let _guard = self.inner.coord.read().await;
-            let rtxn = self.inner.db_env.read_txn()?;
+            let rtxn = self.read_txn().await?;
             let db = self
                 .inner
                 .db_env
@@ -681,13 +934,24 @@ impl Storage {
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
         let coord = self.inner.coord.clone();
+        let map_resize = self.inner.map_resize.clone();
         tokio::task::spawn_blocking(move || {
-            let result: Result<()> = (|| {
-                let _guard = coord.blocking_read();
-                let txn = open_read_txn_on_env_with_retry(&app_store.env)?;
-                let db = app_store.db();
-                f(&db, &txn, &tx)
-            })();
+            let result: Result<()> = loop {
+                let guard = coord.blocking_read();
+                match open_read_txn_on_env_with_retry(&app_store.env) {
+                    Ok(txn) => {
+                        let db = app_store.db();
+                        break f(&db, &txn, &tx);
+                    }
+                    Err(error) if is_map_resized(&error) => {
+                        drop(guard);
+                        if let Err(error) = map_resize.adopt_external_resize_blocking() {
+                            break Err(error);
+                        }
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
             if let Err(err) = result {
                 let _ = tx.blocking_send(Err(err));
             }
@@ -828,13 +1092,9 @@ impl Storage {
             let staging_mdb = staging_path.join("mdb");
             std::fs::create_dir(&staging_mdb)?;
             let copy_path = staging_mdb.join("data.mdb");
-            let env = self.inner.db_env.clone();
-            let coord = self.inner.coord.clone();
+            let map_resize = self.inner.map_resize.clone();
             tokio::task::spawn_blocking(move || -> Result<()> {
-                let _guard = coord.blocking_read();
-                let file = env.copy_to_path(&copy_path, heed::CompactionOption::Enabled)?;
-                file.sync_all()?;
-                Ok(())
+                map_resize.compact_copy_to_path_blocking(&copy_path)
             })
             .await
             .map_err(|error| internal_error!("native downgrade copy task failed: {error}"))??;
@@ -934,8 +1194,7 @@ impl Storage {
     /// The "unnamed database" is LMDB's catalog of named sub-databases.
     pub async fn list_app_names(&self) -> Result<Vec<String>> {
         let db_env = &self.inner.db_env;
-        let _guard = self.inner.coord.read().await;
-        let rtxn = db_env.read_txn()?;
+        let rtxn = self.read_txn().await?;
         let unnamed: heed::Database<heed::types::Str, heed::types::DecodeIgnore> = db_env
             .open_database(&rtxn, None)?
             .expect("the unnamed database always exists");
@@ -963,12 +1222,13 @@ mod tests {
         LIVE_COMPONENT_GENERATION_KEY_SYMBOL, NativeSchemaVersion, StablePathNodeType,
     };
     use crate::state::native_effect::{
-        NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent, NativeEffectOperation,
-        NativeEffectStatus, NativeVerificationPolicy,
+        NativeEffectCounts, NativeEffectDescriptor, NativeEffectErrorCode, NativeEffectIntent,
+        NativeEffectOperation, NativeEffectStatus, NativeVerificationPolicy,
     };
     use crate::state::stable_path::{StableKey, StablePath};
+    use crate::state_store::submit_session::PrecommitWritePlan;
     use sha2::{Digest as _, Sha256};
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
     use std::sync::Arc;
     use synor_utils::fingerprint::Fingerprint;
     use tempfile::TempDir;
@@ -1003,6 +1263,55 @@ mod tests {
             NativeVerificationPolicy::QueryVerified,
         )
         .unwrap()
+    }
+
+    /// Persist one production-shaped native-effect batch through the same
+    /// preview-plan and terminal precommit writer used by engine submission.
+    /// Keeping the scale certification on this path ensures it exercises the
+    /// single summary read/write performed by `write_native_effects_in_txn`,
+    /// rather than the compatibility single-record upsert helper.
+    async fn precommit_native_effect_batch(
+        app_store: &AppStore,
+        component_path: &StablePath,
+        proposed: Vec<NativeEffectIntent>,
+    ) -> Result<Vec<String>> {
+        let store_for_precommit = app_store.clone();
+        let component_path_for_plan = component_path.clone();
+        let proposed = Arc::new(proposed);
+        app_store
+            .precommit(component_path, move |txn, _session| {
+                let store = store_for_precommit.clone();
+                let component_path = component_path_for_plan.clone();
+                let proposed = Arc::clone(&proposed);
+                Box::pin(async move {
+                    let mut bound = Vec::with_capacity(proposed.len());
+                    for intent in proposed.iter() {
+                        bound.push(
+                            store
+                                .plan_native_effect_lineage_in_txn(txn, intent.clone())
+                                .await?,
+                        );
+                    }
+                    let evidence_ids = bound
+                        .iter()
+                        .map(|intent| intent.evidence_id().to_owned())
+                        .collect();
+                    Ok(Some((
+                        PrecommitWritePlan {
+                            self_path: component_path,
+                            new_tracking_info: None,
+                            preempted_owner_updates: BTreeMap::new(),
+                            segment_names: HashMap::new(),
+                            native_effect_intents: bound,
+                            blocked_native_effect_intents: Vec::new(),
+                            id_sequence_updates: Vec::new(),
+                        },
+                        evidence_ids,
+                    )))
+                })
+            })
+            .await?
+            .ok_or_else(|| internal_error!("native-effect precommit unexpectedly returned retry"))
     }
 
     #[cfg(unix)]
@@ -1149,7 +1458,7 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.apps.len(), 1);
         assert_eq!(prepared.apps[0].app_name, "downgrade-app");
-        assert_eq!(prepared.apps[0].schema_version, Some(3));
+        assert_eq!(prepared.apps[0].schema_version, Some(4));
         assert_eq!(prepared.apps[0].effects.len(), 1);
         assert_eq!(prepared.removed_schema_markers, 1);
         assert_eq!(prepared.removed_effects, 1);
@@ -1620,6 +1929,22 @@ mod tests {
             let effect_id = "cleanup:crash-boundary".to_owned();
             let effect = app_store.native_effect(&effect_id).await.unwrap().unwrap();
             assert_eq!(effect.status, expected_status, "phase: {phase}");
+            let summary = app_store.native_effect_obligation_counts().await.unwrap();
+            assert_eq!(
+                (
+                    summary.pending,
+                    summary.verified,
+                    summary.failed,
+                    summary.blocked,
+                    summary.completed,
+                ),
+                match expected_status {
+                    NativeEffectStatus::Pending => (1, 0, 0, 0, 0),
+                    NativeEffectStatus::Verified => (0, 1, 0, 0, 0),
+                    _ => unreachable!("unexpected crash-boundary status"),
+                },
+                "transactional summary diverged at {phase}"
+            );
             let rtxn = app_store.read_txn().await.unwrap();
             assert_eq!(
                 app_store.db().get(&*rtxn, b"crash-tracking").unwrap(),
@@ -1983,10 +2308,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn batched_precommit_updates_obligation_summary_through_lifecycle() {
+        const TOTAL_EFFECTS: usize = 257;
+
+        let dir = TempDir::new().unwrap();
+        let storage = Storage::new(&StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: default_map_size(),
+        })
+        .await
+        .unwrap();
+        let app_store = storage
+            .create_app_store("batched_precommit_summary")
+            .await
+            .unwrap();
+        let component_path = component_path("batched-precommit-summary");
+        let proposed = (0..TOTAL_EFFECTS)
+            .map(|index| effect_intent(&format!("batch-summary:{index}")))
+            .collect();
+
+        let evidence_ids = precommit_native_effect_batch(&app_store, &component_path, proposed)
+            .await
+            .unwrap();
+        assert_eq!(evidence_ids.len(), TOTAL_EFFECTS);
+        assert_eq!(
+            app_store.native_effect_obligation_counts().await.unwrap(),
+            NativeEffectCounts {
+                pending: TOTAL_EFFECTS as u64,
+                ..NativeEffectCounts::default()
+            }
+        );
+
+        app_store
+            .mark_native_effects_verified(&evidence_ids)
+            .await
+            .unwrap();
+        assert_eq!(
+            app_store.native_effect_obligation_counts().await.unwrap(),
+            NativeEffectCounts {
+                verified: TOTAL_EFFECTS as u64,
+                ..NativeEffectCounts::default()
+            }
+        );
+
+        let store_for_txn = app_store.clone();
+        let evidence_for_txn = evidence_ids.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let evidence_ids = evidence_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(txn, &evidence_ids)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        let summary = app_store.native_effect_obligation_counts().await.unwrap();
+        assert_eq!(
+            summary,
+            NativeEffectCounts {
+                completed: TOTAL_EFFECTS as u64,
+                ..NativeEffectCounts::default()
+            }
+        );
+        assert_eq!(
+            app_store.native_effect_counts().await.unwrap(),
+            summary,
+            "transactional summary must match the retained evidence after every batch transition"
+        );
+    }
+
+    #[tokio::test]
     #[ignore = "phase 6 million-action scale certification"]
     async fn million_action_descriptor_receipt_native_correlation() {
         const TOTAL_EFFECTS: usize = 1_000_000;
         const BATCH_SIZE: usize = 10_000;
+        const COMPLETION_CHECK_ITERATIONS: usize = 1_000;
 
         fn digest_hex(domain: &str, index: usize) -> String {
             format!("{:x}", Sha256::digest(format!("{domain}:{index}")))
@@ -2033,6 +2433,7 @@ mod tests {
         let started = std::time::Instant::now();
         let mut expected_xor = [0_u8; 32];
         let mut expected_sum = 0_u128;
+        let component_path = component_path("million-action-precommit");
 
         for batch_start in (0..TOTAL_EFFECTS).step_by(BATCH_SIZE) {
             let batch_end = (batch_start + BATCH_SIZE).min(TOTAL_EFFECTS);
@@ -2060,25 +2461,7 @@ mod tests {
                 })
                 .collect();
 
-            let store_for_txn = app_store.clone();
-            let proposed_for_txn = proposed.clone();
-            let evidence_ids = storage
-                .run_txn(move |txn| {
-                    let store = store_for_txn.clone();
-                    let proposed = proposed_for_txn.clone();
-                    Box::pin(async move {
-                        let mut evidence_ids = Vec::with_capacity(proposed.len());
-                        for intent in proposed {
-                            let bound =
-                                store.bind_native_effect_lineage_in_txn(txn, intent).await?;
-                            evidence_ids.push(bound.evidence_id().to_owned());
-                            store
-                                .upsert_native_effect_intent_in_txn(txn, &bound)
-                                .await?;
-                        }
-                        Ok(evidence_ids)
-                    })
-                })
+            let evidence_ids = precommit_native_effect_batch(&app_store, &component_path, proposed)
                 .await
                 .unwrap();
             assert_eq!(evidence_ids.len(), batch_end - batch_start);
@@ -2106,7 +2489,31 @@ mod tests {
             }
         }
 
+        // Exercise the exact no-op strict-completion boundary repeatedly
+        // before the intentional evidence audit below. Both reads are backed
+        // by fixed-size transactional summary records, so this measurement is
+        // independent of the retained million-record history.
+        let completion_checks_started = std::time::Instant::now();
+        let mut summary_counts = NativeEffectCounts::default();
+        for _ in 0..COMPLETION_CHECK_ITERATIONS {
+            summary_counts = app_store.native_effect_obligation_counts().await.unwrap();
+            assert!(!summary_counts.has_unresolved());
+            assert!(
+                !app_store
+                    .has_query_verified_tombstone_obligations()
+                    .await
+                    .unwrap()
+            );
+        }
+        let completion_checks_elapsed = completion_checks_started.elapsed();
+
+        let evidence_scan_started = std::time::Instant::now();
         let counts = app_store.native_effect_counts().await.unwrap();
+        let evidence_scan_elapsed = evidence_scan_started.elapsed();
+        assert_eq!(
+            summary_counts, counts,
+            "transactional obligation summary diverged from the retained evidence scan"
+        );
         assert_eq!(
             (
                 counts.pending,
@@ -2156,8 +2563,15 @@ mod tests {
         assert_eq!(observed_xor, expected_xor);
         assert_eq!(observed_sum, expected_sum);
         eprintln!(
-            "million-action certification passed in {:.3}s; data.mdb={} bytes",
+            "million-action certification passed in {:.3}s; \
+             strict_completion_checks={} in {:.6}s ({:.9}s/check); \
+             full_effect_evidence_scan={:.6}s; \
+             summary_counts={summary_counts:?}; data.mdb={} bytes",
             started.elapsed().as_secs_f64(),
+            COMPLETION_CHECK_ITERATIONS,
+            completion_checks_elapsed.as_secs_f64(),
+            completion_checks_elapsed.as_secs_f64() / COMPLETION_CHECK_ITERATIONS as f64,
+            evidence_scan_elapsed.as_secs_f64(),
             std::fs::metadata(dir.path().join("mdb/data.mdb"))
                 .unwrap()
                 .len()
@@ -2379,6 +2793,34 @@ mod tests {
         assert!(app_store.has_query_verified_tombstones().await.unwrap());
     }
 
+    #[tokio::test]
+    async fn map_size_observation_waits_for_resize_exclusion() {
+        let dir = TempDir::new().unwrap();
+        let initial_map_size = align_map_size_to_page(page_size::get() * 16);
+        let storage = Storage::new(&StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: initial_map_size,
+        })
+        .await
+        .unwrap();
+        let runner = TxnRunner {
+            db_env: storage.inner.db_env.clone(),
+            coord: storage.inner.coord.clone(),
+            map_resize: storage.inner.map_resize.clone(),
+        };
+
+        // A resize/adoption owns the coordinator write lock while LMDB unmaps
+        // and remaps its metadata. Polling the observation under that lock must
+        // deterministically remain pending rather than entering mdb_env_info.
+        let resize_guard = runner.coord.clone().write_owned().await;
+        let mut observation = Box::pin(runner.observed_map_size());
+        assert!(futures::poll!(&mut observation).is_pending());
+
+        drop(resize_guard);
+        assert_eq!(observation.await, initial_map_size);
+    }
+
     /// Integration test for `MDB_MAP_FULL` auto-resize on the `Storage::run_txn`
     /// path: one batched write txn is filled past the map limit, the runner
     /// doubles the map, retries the same body, and commits. Run via
@@ -2388,7 +2830,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let page = page_size::get();
         // Deliberately tiny, page-aligned map. Large enough for env metadata and
-        // `create_app_store` (direct write txn, not the batcher).
+        // the initial named-database creation without a preliminary resize.
         let initial_map_size = align_map_size_to_page(page * 16);
 
         let settings = StorageSettings {
@@ -2487,6 +2929,10 @@ mod tests {
         };
         let storage = Storage::new(&settings).await.unwrap();
         let app_store = storage.create_app_store("coord_test").await.unwrap();
+        assert!(Arc::ptr_eq(
+            &storage.txn_coordinator(),
+            &txn_coordinator_for(storage.inner.db_env.path()),
+        ));
         let coord = storage.txn_coordinator();
 
         // Step 1: hold a guarded read transaction open.
@@ -2580,5 +3026,379 @@ mod tests {
                 "{key} payload should match what was written"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn obligation_summary_migrates_on_open_and_rolls_back_atomically() {
+        let dir = TempDir::new().unwrap();
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: 16 * 1024 * 1024,
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let store = storage.create_app_store("summary-migration").await.unwrap();
+
+        let completed = effect_intent("summary:completed");
+        let pending = effect_intent("summary:pending");
+        let store_for_txn = store.clone();
+        let (completed_id, pending_id) = storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let completed = completed.clone();
+                let pending = pending.clone();
+                Box::pin(async move {
+                    let completed = store
+                        .bind_native_effect_lineage_in_txn(txn, completed)
+                        .await?;
+                    let pending = store
+                        .bind_native_effect_lineage_in_txn(txn, pending)
+                        .await?;
+                    let completed_id = completed.evidence_id().to_owned();
+                    let pending_id = pending.evidence_id().to_owned();
+                    store
+                        .upsert_native_effect_intent_in_txn(txn, &completed)
+                        .await?;
+                    store
+                        .upsert_native_effect_intent_in_txn(txn, &pending)
+                        .await?;
+                    Ok((completed_id, pending_id))
+                })
+            })
+            .await
+            .unwrap();
+        store
+            .mark_native_effects_verified(std::slice::from_ref(&completed_id))
+            .await
+            .unwrap();
+        let store_for_txn = store.clone();
+        let completed_for_txn = completed_id.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let completed_id = completed_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(txn, &[completed_id])
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let tombstone_parent = StablePath::root();
+        let tombstone_relative = component_path("summary-tombstone");
+        let tombstone = ChildTombstoneInfo::new(
+            ChildTombstoneCause::ComponentOrphan,
+            None,
+            Some(7),
+            NativeVerificationPolicy::QueryVerified,
+        )
+        .unwrap();
+        let store_for_txn = store.clone();
+        let parent_for_txn = tombstone_parent.clone();
+        let relative_for_txn = tombstone_relative.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                let tombstone = tombstone.clone();
+                Box::pin(async move {
+                    store
+                        .write_tombstone(txn, &parent, &relative, &tombstone)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+
+        // Simulate a v3 app written before transactional summaries existed.
+        // Evidence and tombstones stay untouched; only the additive v4 row is
+        // absent and the schema marker names the prior compatible version.
+        let summary_key = DbEntryKey::NativeObligationSummary.encode().unwrap();
+        let schema_key = DbEntryKey::NativeSchemaVersion.encode().unwrap();
+        let schema_v3 = rmp_serde::to_vec_named(&NativeSchemaVersion(3)).unwrap();
+        let store_for_txn = store.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = store_for_txn.clone();
+                let summary_key = summary_key.clone();
+                let schema_key = schema_key.clone();
+                let schema_v3 = schema_v3.clone();
+                Box::pin(async move {
+                    assert!(store.db().delete(&mut **txn, &summary_key)?);
+                    store.db().put(&mut **txn, &schema_key, &schema_v3)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let reopened = storage
+            .open_app_store_by_name("summary-migration")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.validate_native_schema().await.unwrap(),
+            Some(NativeSchemaVersion::CURRENT)
+        );
+        let counts = reopened.native_effect_obligation_counts().await.unwrap();
+        assert_eq!(counts.completed, 1);
+        assert_eq!(counts.pending, 1);
+        assert!(
+            reopened
+                .has_query_verified_tombstone_obligations()
+                .await
+                .unwrap()
+        );
+
+        // A current marker without its summary can only result from external
+        // corruption (the real migration is atomic), but open heals it by a
+        // validated rebuild instead of trusting zero counts.
+        let summary_key = DbEntryKey::NativeObligationSummary.encode().unwrap();
+        let reopened_for_txn = reopened.clone();
+        storage
+            .run_txn(move |txn| {
+                let store = reopened_for_txn.clone();
+                let summary_key = summary_key.clone();
+                Box::pin(async move {
+                    assert!(store.db().delete(&mut **txn, &summary_key)?);
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let recovered = storage
+            .open_app_store_by_name("summary-migration")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.native_effect_obligation_counts().await.unwrap(),
+            counts
+        );
+
+        // Counter changes share the exact write transaction with evidence and
+        // tombstone changes. An aborted final commit must roll all three back.
+        recovered
+            .mark_native_effects_verified(std::slice::from_ref(&pending_id))
+            .await
+            .unwrap();
+        let recovered_for_txn = recovered.clone();
+        let pending_for_txn = pending_id.clone();
+        let parent_for_txn = tombstone_parent.clone();
+        let relative_for_txn = tombstone_relative.clone();
+        let error = storage
+            .run_txn(move |txn| {
+                let store = recovered_for_txn.clone();
+                let pending_id = pending_for_txn.clone();
+                let parent = parent_for_txn.clone();
+                let relative = relative_for_txn.clone();
+                Box::pin(async move {
+                    store
+                        .finalize_native_effects_in_txn(txn, &[pending_id])
+                        .await?;
+                    assert!(
+                        store
+                            .delete_tombstone(txn, &parent, &relative, Some(7))
+                            .await?
+                    );
+                    Err::<(), _>(internal_error!("intentional summary rollback"))
+                })
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("intentional summary rollback"));
+        let rolled_back = recovered.native_effect_obligation_counts().await.unwrap();
+        assert_eq!(rolled_back.completed, 1);
+        assert_eq!(rolled_back.verified, 1);
+        assert!(
+            recovered
+                .has_query_verified_tombstone_obligations()
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            recovered.native_effect_counts().await.unwrap(),
+            rolled_back,
+            "validated evidence scan and transactional summary must agree"
+        );
+    }
+
+    /// Child side of `adopts_cross_process_map_resize_on_all_open_paths`.
+    /// The parent opens the environment first; this process then publishes a
+    /// larger map through the same cross-process resize protocol and exits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn external_map_resize_child_process() {
+        let Some(db_path) = std::env::var_os("SYNOR_MAP_RESIZE_CHILD_DB") else {
+            return;
+        };
+        let initial_map_size: usize = std::env::var("SYNOR_MAP_RESIZE_INITIAL")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let round = std::env::var("SYNOR_MAP_RESIZE_ROUND").unwrap();
+        let storage = Storage::new(&StorageSettings {
+            db_path: PathBuf::from(db_path),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: initial_map_size,
+        })
+        .await
+        .unwrap();
+        let app_store = storage.create_app_store("external-resize").await.unwrap();
+        let observed = storage.inner.db_env.info().map_size;
+        assert!(
+            observed <= 64 * 1024 * 1024,
+            "test fixture unexpectedly opened a map larger than 64 MiB"
+        );
+        const PAYLOAD_LEN: usize = 16 * 1024;
+        let write_count = observed.checked_mul(2).unwrap().div_ceil(PAYLOAD_LEN);
+        let payload = vec![0xE7; PAYLOAD_LEN];
+        let entries: Vec<(String, Vec<u8>)> = (0..write_count)
+            .map(|index| (format!("external-{round}-{index:08}"), payload.clone()))
+            .collect();
+        let app_store_for_txn = app_store.clone();
+        storage
+            .run_txn(move |txn| {
+                let app_store = app_store_for_txn.clone();
+                let entries = entries.clone();
+                Box::pin(async move {
+                    for (key, value) in &entries {
+                        app_store.db().put(&mut **txn, key.as_bytes(), value)?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let grown = storage.inner.db_env.info().map_size;
+        assert!(grown > observed);
+        storage.inner.db_env.force_sync().unwrap();
+    }
+
+    #[cfg(unix)]
+    async fn grow_map_in_child(db_path: &Path, initial_map_size: usize, round: usize) {
+        let status = tokio::task::spawn_blocking({
+            let db_path = db_path.to_path_buf();
+            move || {
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--exact")
+                    .arg("state_store::storage::tests::external_map_resize_child_process")
+                    .arg("--nocapture")
+                    .env("SYNOR_MAP_RESIZE_CHILD_DB", db_path)
+                    .env("SYNOR_MAP_RESIZE_INITIAL", initial_map_size.to_string())
+                    .env("SYNOR_MAP_RESIZE_ROUND", round.to_string())
+                    .status()
+                    .unwrap()
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            status.success(),
+            "external map-resize child failed: {status}"
+        );
+    }
+
+    /// Deterministic two-process regression for `MDB_MAP_RESIZED`:
+    ///
+    /// 1. Keep one environment mapped in the parent.
+    /// 2. Grow the same LMDB environment from a child process.
+    /// 3. Prove async read, batched write, and blocking streaming-read paths
+    ///    each adopt the externally published size and retry successfully.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn adopts_cross_process_map_resize_on_all_open_paths() {
+        let dir = TempDir::new().unwrap();
+        let initial_map_size = align_map_size_to_page(page_size::get() * 32);
+        let settings = StorageSettings {
+            db_path: dir.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: initial_map_size,
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        let app_store = storage.create_app_store("external-resize").await.unwrap();
+
+        grow_map_in_child(&settings.db_path, initial_map_size, 1).await;
+        let rtxn = app_store
+            .read_txn()
+            .await
+            .expect("read path must adopt an external resize");
+        let first_child_size = app_store.env.info().map_size;
+        assert!(first_child_size > initial_map_size);
+        drop(rtxn);
+
+        grow_map_in_child(&settings.db_path, initial_map_size, 2).await;
+        let app_store_for_write = app_store.clone();
+        storage
+            .run_txn(move |txn| {
+                let app_store = app_store_for_write.clone();
+                Box::pin(async move {
+                    app_store
+                        .db()
+                        .put(&mut **txn, b"after-external-resize", b"committed")?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("write path must adopt an external resize");
+        let second_child_size = app_store.env.info().map_size;
+        assert!(second_child_size > first_child_size);
+
+        grow_map_in_child(&settings.db_path, initial_map_size, 3).await;
+        let mut receiver = storage.spawn_stable_path_iter(app_store.clone()).await;
+        assert!(
+            receiver.recv().await.is_none(),
+            "empty streaming read should complete after adopting the external resize"
+        );
+        assert!(app_store.env.info().map_size > second_child_size);
+
+        let rtxn = app_store.read_txn().await.unwrap();
+        assert_eq!(
+            app_store
+                .db()
+                .get(&*rtxn, b"after-external-resize")
+                .unwrap(),
+            Some(&b"committed"[..])
+        );
+    }
+
+    /// LMDB's compact-copy API opens its own read transaction internally, so it
+    /// needs the same cross-process map-resize adoption as explicit read paths.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn downgrade_compact_copy_adopts_cross_process_map_resize() {
+        let source = TempDir::new().unwrap();
+        let staging_parent = TempDir::new().unwrap();
+        let initial_map_size = align_map_size_to_page(page_size::get() * 32);
+        let settings = StorageSettings {
+            db_path: source.path().to_path_buf(),
+            lmdb_max_dbs: 8,
+            lmdb_map_size: initial_map_size,
+        };
+        let storage = Storage::new(&settings).await.unwrap();
+        storage.create_app_store("external-resize").await.unwrap();
+
+        grow_map_in_child(&settings.db_path, initial_map_size, 1).await;
+        assert_eq!(
+            storage.inner.db_env.info().map_size,
+            initial_map_size,
+            "parent must still have the stale map size before compact copy"
+        );
+
+        let staging_path = staging_parent.path().join("downgrade-copy");
+        let result = storage
+            .prepare_native_downgrade_copy(&staging_path)
+            .await
+            .expect("compact copy must adopt an externally published map size and retry");
+
+        assert!(storage.inner.db_env.info().map_size > initial_map_size);
+        assert!(staging_path.join("mdb/data.mdb").is_file());
+        assert_eq!(result.apps.len(), 1);
+        assert_eq!(result.apps[0].app_name, "external-resize");
     }
 }

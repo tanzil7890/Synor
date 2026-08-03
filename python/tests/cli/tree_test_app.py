@@ -45,9 +45,7 @@ async def app_main() -> None:
     await syn.spawn(files_subpath / "file2.txt", process_file, "file2.txt", dir_target)
 
     # Also mount a direct child of root (not under "files")
-    await syn.spawn(
-        syn.unit_path("direct"), process_file, "direct.txt", dir_target
-    )
+    await syn.spawn(syn.unit_path("direct"), process_file, "direct.txt", dir_target)
 
 
 app = syn.App(

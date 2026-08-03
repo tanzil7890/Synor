@@ -80,6 +80,20 @@ A wrapper around `sqlite3.Connection` that provides thread-safe access and track
 
 The `sqlite` connector provides target state APIs for writing rows to tables. With it, Synor tracks what rows should exist and automatically handles upserts and deletions.
 
+### Operational guarantees
+
+For ordinary SQLite tables, each row-sink `apply` call runs in one transaction,
+and successful completion means SQLite accepted `COMMIT`. Row upserts and
+deletes are idempotent, so Synor may split a large component action set into
+bounded `apply` calls. If a later segment fails after an earlier segment
+committed, retrying the complete action set converges to the same declared row
+state. This completed-prefix replay path is covered by failure-injection tests.
+
+These guarantees do not apply to `vec0` virtual tables, whose capability
+contract remains conservative pending separate certification. SQLite commit
+acknowledgement is also not a claim of post-commit query verification or
+survival under untested power-loss and storage-controller failure modes.
+
 ### Declaring target states
 
 #### Setting up a connection

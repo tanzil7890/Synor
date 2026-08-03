@@ -44,6 +44,10 @@ pub struct AppOpHandle<T: Send + 'static> {
     /// Whether this is a live-mode operation (affects progress display).
     pub live: bool,
     deadline: DeadlineContext,
+    /// Cancels the update's app-level operation tree. Drop operations do not
+    /// expose caller cancellation because they are already the cancellation
+    /// and cleanup barrier for an app.
+    cancellation_token: Option<tokio_util::sync::CancellationToken>,
 }
 
 impl<T: Send + 'static> AppOpHandle<T> {
@@ -72,6 +76,16 @@ impl<T: Send + 'static> AppOpHandle<T> {
     /// don't care about every update aren't woken on every version bump.
     pub async fn wait_terminated(&self) {
         self.stats.wait_terminated().await;
+    }
+
+    /// Return a cancellation handle for update operations.
+    ///
+    /// The host bridge retains this independently from the consuming result
+    /// future so caller cancellation can request cooperative teardown and then
+    /// continue awaiting the operation's quiescence barrier.
+    #[doc(hidden)]
+    pub fn cancellation_token(&self) -> Option<tokio_util::sync::CancellationToken> {
+        self.cancellation_token.clone()
     }
 
     /// Awaits the task completion and returns the result.
@@ -151,6 +165,33 @@ impl<Prof: EngineProfile> App<Prof> {
         AppOpHandle<Prof::FunctionData>,
         Option<PreviewActionCollector<Prof>>,
     )> {
+        let host_operation_lease =
+            Prof::acquire_host_operation(self.app_ctx().env().host_runtime_ctx())?;
+        self.update_controlled_with_host_operation(
+            root_processor,
+            options,
+            host_ctx,
+            preview_collector,
+            effect_mode,
+            host_operation_lease,
+        )
+    }
+
+    /// Runtime bridge for a host operation admitted before app lookup or
+    /// construction. The supplied guard is retained through task termination.
+    #[doc(hidden)]
+    pub fn update_controlled_with_host_operation(
+        &self,
+        root_processor: Prof::ComponentProc,
+        options: AppUpdateOptions,
+        host_ctx: Arc<Prof::HostCtx>,
+        preview_collector: Option<PreviewActionCollector<Prof>>,
+        effect_mode: EffectMode,
+        host_operation_lease: Box<dyn Send + Sync>,
+    ) -> Result<(
+        AppOpHandle<Prof::FunctionData>,
+        Option<PreviewActionCollector<Prof>>,
+    )> {
         if preview_collector.is_some() && options.live {
             client_bail!("live app updates are not supported during preview");
         }
@@ -164,21 +205,15 @@ impl<Prof: EngineProfile> App<Prof> {
             .env()
             .storage()
             .try_acquire_app_operation_lease(self.app_ctx().app_reg().name())?;
-        // Refresh the app token if a prior operation (e.g. drop_app) cancelled
-        // it, so this update starts with a non-cancelled token.
-        self.app_ctx().reset_cancellation_token_if_cancelled();
+        // The process-wide app lease proves the prior update has released its
+        // engine resources. Give this run its own token generation so a stale
+        // completed Python handle cannot cancel a later update.
+        let cancel_token = self.app_ctx().begin_update_cancellation_token();
         let processing_stats = ProcessingStats::new();
         let operation_id = processing_stats.operation_id();
         self.app_ctx().clear_live_terminal_errors(operation_id);
         let version_rx = processing_stats.subscribe();
         let deadline = options.deadline;
-        let strict_on_error = if effect_mode == EffectMode::Strict {
-            Some(Arc::new(|err| {
-                Box::pin(async move { Err(err) }) as futures::future::BoxFuture<'static, Result<()>>
-            }) as crate::engine::component::OnError)
-        } else {
-            None
-        };
         let context = self.root_component.new_processor_context_for_build(
             None,
             processing_stats.clone(),
@@ -186,22 +221,24 @@ impl<Prof: EngineProfile> App<Prof> {
             options.live,
             preview_collector.clone(),
             host_ctx,
-            // Compatibility keeps the historical log-and-retry behavior.
-            // Strict controlled runs propagate orphan cleanup failures to the
-            // root result while retaining tombstones for a later retry.
-            strict_on_error,
             effect_mode,
         )?;
 
         let root_component = self.root_component.clone();
         let stats_for_task = processing_stats.clone();
-        let cancel_token = self.app_ctx().cancellation_token();
+        let handle_cancel_token = cancel_token.clone();
         let live = options.live;
+        let mut host_live_operation_cancelled = if live {
+            Prof::host_live_operation_cancelled(self.app_ctx().env().host_runtime_ctx())
+        } else {
+            Box::pin(std::future::pending())
+        };
         let strict_effects = effect_mode == EffectMode::Strict;
         let preview = preview_collector.is_some();
         let span = Span::current();
         let task = get_runtime().spawn(
             async move {
+                let _host_operation_lease = host_operation_lease;
                 let _app_operation_lease = app_operation_lease;
                 let run_fut = async {
                     root_component
@@ -213,12 +250,41 @@ impl<Prof: EngineProfile> App<Prof> {
                 };
                 let mut result = tokio::select! {
                     result = run_fut => result,
-                    _ = cancel_token.cancelled() => Err(internal_error!("Operation cancelled")),
+                    _ = cancel_token.cancelled() => Err(Error::cancelled()),
+                    _ = &mut host_live_operation_cancelled => {
+                        // Environment shutdown owns this cancellation path.
+                        // Cancel the app token as well so live descendants see
+                        // the same signal and quiesce before the host operation
+                        // lease is released.
+                        root_component
+                            .app_ctx()
+                            .cancel_and_snapshot_live_components();
+                        Err(Error::cancelled())
+                    },
                 };
                 stats_for_task.notify_ready();
-                if live && result.is_ok() {
-                    // In live mode, wait for all descendants to finish before signaling termination.
+                if cancel_token.is_cancelled() {
+                    // The cancellation arm drops `run_fut`, but descendant
+                    // teardown continues asynchronously. Wait for their Rust
+                    // tasks before taking the host-callback barrier snapshot.
                     root_component.wait_until_inactive().await;
+                }
+                if live && result.is_ok() {
+                    // The root processor can finish before its live descendants.
+                    // Keep observing host-environment cancellation throughout
+                    // this second wait; otherwise shutdown could arrive after
+                    // the first select chose `run_fut` and strand the operation
+                    // lease here indefinitely.
+                    tokio::select! {
+                        _ = root_component.wait_until_inactive() => {}
+                        _ = &mut host_live_operation_cancelled => {
+                            root_component
+                                .app_ctx()
+                                .cancel_and_snapshot_live_components();
+                            root_component.wait_until_inactive().await;
+                            result = Err(Error::cancelled());
+                        }
+                    }
                     // The root processor can resolve in the same instant the
                     // app token is cancelled (drop_app, Ctrl+C), in which case
                     // the select above takes the `run_fut` branch and the live
@@ -226,13 +292,21 @@ impl<Prof: EngineProfile> App<Prof> {
                     // tore them down — not because they finished their work.
                     // Re-check so a cancelled live run never reports success.
                     if cancel_token.is_cancelled() {
-                        result = Err(internal_error!("Operation cancelled"));
+                        result = Err(Error::cancelled());
                     }
                 }
+                // Some host callbacks (notably Python `spawn_blocking`) cannot
+                // be forcefully aborted once running. The profile barrier waits
+                // for every callback issued before this point, while excluding
+                // unrelated callbacks that begin later.
+                Prof::drain_host_callbacks(
+                    root_component.app_ctx().host_callback_ctx(),
+                )
+                .await;
                 let live_terminal_error = root_component
                     .app_ctx()
                     .take_live_terminal_error(operation_id);
-                if result.is_ok() && strict_effects
+                if result.is_ok()
                     && let Some(error) = live_terminal_error
                 {
                     result = Err(
@@ -248,9 +322,10 @@ impl<Prof: EngineProfile> App<Prof> {
                 if result.is_ok() && strict_effects && !preview {
                     let app_store = root_component.app_ctx().app_store();
                     match async {
-                        let counts = app_store.native_effect_counts().await?;
-                        let has_tombstones =
-                            app_store.has_query_verified_tombstones().await?;
+                        let counts = app_store.native_effect_obligation_counts().await?;
+                        let has_tombstones = app_store
+                            .has_query_verified_tombstone_obligations()
+                            .await?;
                         Ok::<_, Error>((counts, has_tombstones))
                     }
                     .await
@@ -279,6 +354,7 @@ impl<Prof: EngineProfile> App<Prof> {
                 version_rx,
                 live,
                 deadline,
+                cancellation_token: Some(handle_cancel_token),
             },
             preview_collector,
         ))
@@ -300,6 +376,18 @@ impl<Prof: EngineProfile> App<Prof> {
     /// contract (it is documentation-only when timeouts fire).
     #[instrument(name = "app.drop", skip_all, fields(app_name = %self.app_ctx().app_reg().name()))]
     pub fn drop_app(&self, host_ctx: Arc<Prof::HostCtx>) -> Result<AppOpHandle<()>> {
+        let host_operation_lease =
+            Prof::acquire_host_operation(self.app_ctx().env().host_runtime_ctx())?;
+        self.drop_app_with_host_operation(host_ctx, host_operation_lease)
+    }
+
+    /// Runtime bridge for a host drop admitted before app lookup.
+    #[doc(hidden)]
+    pub fn drop_app_with_host_operation(
+        &self,
+        host_ctx: Arc<Prof::HostCtx>,
+        host_operation_lease: Box<dyn Send + Sync>,
+    ) -> Result<AppOpHandle<()>> {
         // Refresh the app token if a prior operation cancelled it, so the
         // cancel below applies to a token shared with any concurrent update.
         self.app_ctx().reset_cancellation_token_if_cancelled();
@@ -314,22 +402,15 @@ impl<Prof: EngineProfile> App<Prof> {
             .providers
             .clone();
 
-        // Install a single on_error handler that always propagates: app.drop
-        // is an explicit operation, so root-delete failures (and any
-        // descendant failures, via the GC-sweep cascade) must surface to the
-        // caller (Python `app.drop()` then raises). Without it, the framework
-        // default of "log + swallow" would hide failures behind stale tracking
-        // records while pretending app.drop succeeded. The handler is stored
-        // in the delete context so the GC sweep can read and cascade it to
-        // descendant deletes (see `specs/core/error_handling.md`).
-        let raise_on_error: crate::engine::component::OnError =
-            Arc::new(|err| Box::pin(async move { Err(err) }));
         let context = self.root_component.new_processor_context_for_delete(
             providers,
             None,
             processing_stats.clone(),
             host_ctx,
-            Some(raise_on_error),
+            // No reporting observer is installed at the root. Component
+            // failures are logged by the core and remain terminal.
+            None,
+            false,
             EffectMode::Compatibility,
             // A CLI drop commonly runs in a fresh process where providers are
             // registered only by executing the app. Preserve legacy cleanup
@@ -345,6 +426,7 @@ impl<Prof: EngineProfile> App<Prof> {
         let span = Span::current();
         let task = get_runtime().spawn(
             async move {
+                let _host_operation_lease = host_operation_lease;
                 let app_store = root_component.app_ctx().app_store();
                 let native_effects = app_store.native_effect_counts().await?;
                 let has_verified_tombstones =
@@ -363,6 +445,10 @@ impl<Prof: EngineProfile> App<Prof> {
                 // root component / clearing the DB, so leaked drain tasks
                 // don't race teardown of shared resources) ──
                 drain_live_components(live_snapshot).await?;
+                Prof::drain_host_callbacks(
+                    root_component.app_ctx().host_callback_ctx(),
+                )
+                .await;
 
                 // Cancellation also terminates this process's root live
                 // update, which owns the app lease. Acquire only after that
@@ -398,6 +484,11 @@ impl<Prof: EngineProfile> App<Prof> {
                 // Wait for the drop operation to complete
                 handle.ready().await?;
 
+                Prof::drain_host_callbacks(
+                    root_component.app_ctx().host_callback_ctx(),
+                )
+                .await;
+
                 // Drop the per-app state-store data. Clears the per-app
                 // sub-database (heed 0.22 doesn't expose `mdb_drop`).
                 // Subsumes the previous `clear_all` step — `drop_app`
@@ -431,6 +522,7 @@ impl<Prof: EngineProfile> App<Prof> {
             version_rx,
             live: false,
             deadline: DeadlineContext::NONE,
+            cancellation_token: None,
         })
     }
 

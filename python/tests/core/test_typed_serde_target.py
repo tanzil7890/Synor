@@ -81,9 +81,7 @@ class _TypedTrackingStore:
         prev_possible_records: Collection[TrackingMeta],
         prev_may_be_missing: bool,
     ) -> (
-        TargetReconcileOutput[
-            tuple[str, _RecordWithPrev | AbsentType], TrackingMeta
-        ]
+        TargetReconcileOutput[tuple[str, _RecordWithPrev | AbsentType], TrackingMeta]
         | None
     ):
         assert isinstance(key, str)

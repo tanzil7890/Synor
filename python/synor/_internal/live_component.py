@@ -4,21 +4,19 @@ import asyncio
 import datetime
 import inspect
 import traceback
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextvars import ContextVar
 from typing import (
+    TYPE_CHECKING,
     Any,
-    Awaitable,
-    Callable,
     Final,
     Generic,
     ParamSpec,
+    Protocol,
     TypeVar,
     final,
     runtime_checkable,
-    Protocol,
-    TYPE_CHECKING,
-)  # noqa: F401
+)
 
 from . import core
 from .component_ctx import (
@@ -26,13 +24,13 @@ from .component_ctx import (
     get_context_from_ctx,
 )
 from .deadline import without_deadline as _without_deadline
-from .function import AnyCallable, create_core_component_processor
 from .environment import Environment
+from .function import AnyCallable, create_core_component_processor
 from .serde import deserialize, serialize
 from .typing import StableKey
 
 if TYPE_CHECKING:
-    from .api import SpawnHandle
+    from .api import ReadinessOutcome, SpawnHandle
 
 _P = ParamSpec("_P")
 _K = TypeVar("_K")
@@ -139,9 +137,17 @@ async def _process_live_wrapper(instance: Any, operator: LiveComponentOperator) 
 
 @runtime_checkable
 class ReadyAwaitable(Protocol):
-    """A handle whose ``ready()`` awaits completion of the underlying work."""
+    """A handle that reports a typed, terminal downstream readiness outcome.
+
+    Broker-backed sources acknowledge external progress only for
+    :class:`~synor.Succeeded`. ``ready()`` remains part of the compatibility
+    surface for callers that want raising semantics, but source connectors use
+    ``outcome()`` so failure, cancellation, and supersession cannot be mistaken
+    for durable success.
+    """
 
     async def ready(self) -> None: ...
+    async def outcome(self) -> ReadinessOutcome: ...
 
 
 @final
@@ -159,8 +165,115 @@ class _ImmediateReady:
     async def ready(self) -> None:
         return
 
+    async def outcome(self) -> ReadinessOutcome:
+        # Local import avoids the api -> live_component import cycle.
+        from .api import Succeeded
+
+        return Succeeded()
+
 
 _IMMEDIATE_READY: Final[_ImmediateReady] = _ImmediateReady()
+
+
+@final
+class _ReadinessPermit:
+    """One idempotently releasable slot in a source readiness window."""
+
+    __slots__ = ("_admission",)
+
+    def __init__(self, admission: _ReadinessAdmission) -> None:
+        self._admission: _ReadinessAdmission | None = admission
+
+    def release(self) -> None:
+        admission = self._admission
+        if admission is None:
+            return
+        self._admission = None
+        admission._release()
+
+
+@final
+class _ReadinessAdmission:
+    """Bound messages admitted but not past a source's ordered frontier.
+
+    A permit is acquired before a source pulls/delivers a message and is
+    transferred to its offset tracker. A successful typed outcome alone does
+    not release it: the tracker holds later-completed permits until every
+    earlier offset is also ready and the contiguous commit/store frontier can
+    advance. Failure and shutdown release retained entries during draining.
+    The idempotent permit makes every cancellation and error cleanup path safe
+    to call without over-releasing the bounded semaphore.
+    """
+
+    __slots__ = ("_in_flight", "_semaphore", "limit")
+
+    def __init__(self, limit: int) -> None:
+        if type(limit) is not int:
+            raise TypeError("readiness admission limit must be an int")
+        if limit < 1:
+            raise ValueError("readiness admission limit must be at least 1")
+        self.limit = limit
+        self._in_flight = 0
+        self._semaphore = asyncio.BoundedSemaphore(limit)
+
+    @property
+    def in_flight(self) -> int:
+        return self._in_flight
+
+    @property
+    def is_full(self) -> bool:
+        return self._semaphore.locked()
+
+    async def acquire(self) -> _ReadinessPermit:
+        await self._semaphore.acquire()
+        self._in_flight += 1
+        return _ReadinessPermit(self)
+
+    def _release(self) -> None:
+        if self._in_flight < 1:
+            raise RuntimeError("readiness admission permit released without ownership")
+        self._in_flight -= 1
+        self._semaphore.release()
+
+
+async def _await_readiness_succeeded(handle: ReadyAwaitable) -> None:
+    """Return only after ``handle`` reports durable downstream success.
+
+    Source acknowledgements require an explicit typed outcome. A legacy handle
+    with only ``ready()`` cannot distinguish durable success from cancellation,
+    supersession, or an implementation that swallowed failure, so accepting it
+    here could advance external progress without proof.
+
+    The import is local because :mod:`api` defines ``SpawnHandle`` and imports
+    this module's live-stream protocols.
+    """
+    if handle is _IMMEDIATE_READY:
+        return
+
+    outcome_fn = getattr(handle, "outcome", None)
+    if outcome_fn is None:
+        raise TypeError(
+            "source acknowledgement requires a typed readiness handle with outcome()"
+        )
+    if not callable(outcome_fn):
+        raise TypeError("readiness handle outcome attribute is not callable")
+
+    from .api import Cancelled, Failed, Succeeded, Superseded
+
+    outcome = await outcome_fn()
+    if isinstance(outcome, Succeeded):
+        return
+    if isinstance(outcome, Failed):
+        raise outcome.error
+    if isinstance(outcome, Cancelled):
+        raise asyncio.CancelledError(
+            "downstream readiness was cancelled before durable success"
+        )
+    if isinstance(outcome, Superseded):
+        raise RuntimeError(  # noqa: TRY004 - a known terminal state, not a bad type
+            "downstream readiness was superseded before durable success"
+        )
+    raise TypeError(f"unknown readiness outcome: {outcome!r}")
 
 
 @runtime_checkable
@@ -305,11 +418,9 @@ class LiveComponentOperator:
 
         Exceptions raised inside `process()` (or its descendants) are
         routed via the parent's exception handler chain — same shape as
-        background `syn.spawn()` failures — and do NOT propagate to the
-        caller. This matches the framework's "background work failures
-        are reported, not raised" model and lets periodic-refresh
-        patterns (e.g. `syn.auto_refresh`) keep looping when a single
-        cycle fails, while still surfacing the failure to operators.
+        background `syn.spawn()` failures — and propagate to this caller
+        after the handler observes them. Periodic-refresh patterns that choose
+        to tolerate a failed cycle catch that terminal result explicitly.
         """
         controller = self._require_controller()
         processor = create_core_component_processor(
@@ -378,11 +489,10 @@ class LiveComponentOperator:
         """Delete a child component.
 
         Symmetric with :meth:`update`: failures route through the
-        parent's exception handler chain. Handlers control whether the
-        failure propagates back to ``handle.ready()`` — returning
-        normally swallows; raising propagates. With no handler
-        registered, the framework logs at ``ERROR`` and ``handle.ready()``
-        returns ``Ok``.
+        parent's exception handler chain, then propagate back through
+        ``handle.ready()``. A handler reports the failure but cannot convert
+        it into success. With no handler registered, the framework logs at
+        ``ERROR`` before readiness raises.
 
         Even when the delete fails, the tombstone is already written
         synchronously by the framework — the next reconcile's GC sweep
@@ -589,9 +699,7 @@ class _MountEachLiveComponent:
         from .api import spawn
 
         async for key, value in self._items:
-            await spawn(
-                UnitPath(key), self._fn, value, *self._args, **self._kwargs
-            )  # type: ignore[arg-type]
+            await spawn(UnitPath(key), self._fn, value, *self._args, **self._kwargs)  # type: ignore[arg-type]
 
     async def process_live(self, operator: LiveComponentOperator) -> None:
         subscriber: LiveMapSubscriber[Any, Any] = LiveMapSubscriber(
@@ -625,8 +733,9 @@ def auto_refresh(
     - Cycle exceptions raised inside ``process_fn`` are routed via the
       parent's exception handler chain (same shape as background
       ``syn.spawn`` failures — see ``advanced_topics/exception_handlers``).
-      ``update_full`` does NOT propagate them to the loop, so the next
-      cycle still runs.
+      The auto-refresh loop explicitly catches failures after initial
+      readiness so one transient cycle does not stop later cycles. The first
+      cycle still fails the component and prevents readiness.
 
     Args:
         process_fn: Async process function — same shape as a function passed
@@ -659,7 +768,15 @@ def auto_refresh(
             await operator.mark_ready()
             while True:
                 await asyncio.sleep(sleep_seconds)
-                await operator.update_full()
+                try:
+                    await operator.update_full()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    # `update_full` already routed the terminal failure
+                    # through the exception-handler chain. Auto-refresh owns
+                    # the explicit retry policy for post-readiness cycles.
+                    continue
 
     _AutoRefresh.__synor_subpath_name__ = fn_name  # type: ignore[attr-defined]
     return _AutoRefresh

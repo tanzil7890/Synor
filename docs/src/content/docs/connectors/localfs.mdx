@@ -244,7 +244,12 @@ def ensure_file(
 
 **Parameters:**
 
-- `filename` — The name of the file (can include subdirectory path).
+- `filename` — A relative path within the managed directory. Nested paths are
+  supported. Absolute paths, `..`, empty or `.` segments, NUL bytes, and unsafe
+  separator forms are rejected on every platform. Windows additionally rejects
+  control bytes, device names and aliases, trailing dots or spaces, and
+  characters that Win32 cannot represent safely. Writes through symbolic links
+  are refused.
 - `content` — The file content (bytes or str).
 - `create_parent_dirs` — If `True`, create parent directories within the target directory.
 
@@ -263,10 +268,28 @@ def ensure_dir_target(
 
 **Parameters:**
 
-- `path` — The path of the subdirectory (relative to this directory).
+- `path` — A relative path within the managed directory. Nested paths are
+  supported, with the same containment validation as `ensure_file()`.
 - `create_parent_dirs` — If `True`, create parent directories.
 
 **Returns:** A `DirTarget` for the subdirectory.
+
+Contained child writes and deletes use descriptor-relative, no-follow
+filesystem operations on POSIX. On Windows, Synor pins each ancestor with a
+native handle, opens reparse points without following them, and deletes through
+the verified handle. Completed temporary files are installed through their open
+handles, so no close-then-rename pathname window is exposed. An unknown platform
+without either complete primitive set fails the child mutation closed instead
+of falling back to race-prone pathname I/O. Explicit root-level file and
+directory targets remain available there.
+
+Managed child-file updates atomically replace the directory entry with a newly
+written regular file. POSIX mode bits are retained when replacing an existing
+file, but inode/object identity and externally managed metadata such as custom
+ACLs, extended attributes, Windows alternate streams, encryption state, and
+creation timestamps are not part of the connector contract. Keep such metadata
+outside a Synor-owned file or restore it in a connector designed to own those
+attributes explicitly.
 
 ### Target example
 

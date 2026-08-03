@@ -58,15 +58,33 @@ impl HostError for CancelledError {
 }
 
 pub enum Error {
-    Context { msg: String, source: Box<SError> },
+    Context {
+        msg: String,
+        source: Box<SError>,
+    },
+    /// Internal propagation marker for a terminal failure that has already
+    /// been delivered to its observer (or default logger).
+    ///
+    /// The wrapper is intentionally transparent to formatting, error
+    /// classification, host-language conversion, and replication. It exists
+    /// only to prevent an inherited component exception handler from being
+    /// invoked again as the same failure crosses ancestor boundaries.
+    Reported {
+        source: Box<SError>,
+    },
     HostLang(Box<dyn HostError>),
     // `bt` follows the same sharing model as `Client`: replicas preserve the
     // original cold-path capture site instead of re-capturing at fan-out.
-    DeadlineExceeded { bt: Arc<Backtrace> },
+    DeadlineExceeded {
+        bt: Arc<Backtrace>,
+    },
     // `bt` is shared via `Arc` so `Error::replica` can clone a `Client` error
     // while keeping the original capture site (capturing afresh would point
     // at the replica call instead).
-    Client { msg: String, bt: Arc<Backtrace> },
+    Client {
+        msg: String,
+        bt: Arc<Backtrace>,
+    },
     Internal(anyhow::Error),
 }
 
@@ -74,6 +92,7 @@ impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.format_context(f)? {
             Error::Context { .. } => Ok(()),
+            Error::Reported { source } => Display::fmt(source, f),
             Error::HostLang(e) => write!(f, "{}", e),
             Error::DeadlineExceeded { .. } => f.write_str("Synor timeout deadline exceeded"),
             Error::Client { msg, .. } => write!(f, "Invalid Request: {}", msg),
@@ -85,6 +104,7 @@ impl Debug for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.format_context(f)? {
             Error::Context { .. } => Ok(()),
+            Error::Reported { source } => Debug::fmt(source, f),
             Error::HostLang(e) => write!(f, "{:?}", e),
             Error::DeadlineExceeded { bt } => {
                 write!(f, "Synor timeout deadline exceeded\n\n{bt}\n")
@@ -146,14 +166,41 @@ impl Error {
             Error::DeadlineExceeded { bt } => Some(bt.as_ref()),
             Error::Internal(e) => Some(e.backtrace()),
             Error::Context { source, .. } => source.0.backtrace(),
+            Error::Reported { source } => source.0.backtrace(),
             Error::HostLang(_) => None,
         }
     }
 
     pub fn without_contexts(&self) -> &Error {
         match self {
-            Error::Context { source, .. } => source.0.without_contexts(),
+            Error::Context { source, .. } | Error::Reported { source } => {
+                source.0.without_contexts()
+            }
             other => other,
+        }
+    }
+
+    /// Whether this terminal failure has already been reported at its origin.
+    ///
+    /// Context may be added while a failure propagates, so this deliberately
+    /// looks through context layers instead of checking only the outermost
+    /// variant.
+    pub fn is_reported(&self) -> bool {
+        match self {
+            Error::Reported { .. } => true,
+            Error::Context { source, .. } => source.0.is_reported(),
+            _ => false,
+        }
+    }
+
+    /// Mark this failure as reported without changing its observable error.
+    pub fn reported(self) -> Self {
+        if self.is_reported() {
+            self
+        } else {
+            Self::Reported {
+                source: Box::new(SError(self)),
+            }
         }
     }
 
@@ -194,6 +241,9 @@ impl Error {
                 msg: msg.clone(),
                 source: Box::new(SError(source.0.replica())),
             },
+            Error::Reported { source } => Error::Reported {
+                source: Box::new(SError(source.0.replica())),
+            },
             Error::HostLang(host) => match host.try_clone() {
                 Some(cloned) => Error::HostLang(cloned),
                 None => Error::internal(ResidualError::new(self)),
@@ -211,6 +261,7 @@ impl Error {
     pub fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Error::Context { source, .. } => Some(source.as_ref()),
+            Error::Reported { source } => Some(source.as_ref()),
             Error::HostLang(e) => Some(e.as_ref()),
             Error::DeadlineExceeded { .. } => None,
             Error::Internal(e) => e.source(),
@@ -296,11 +347,11 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         tracing::debug!("Error response:\n{:?}", self);
 
-        let (status_code, error_msg) = match &self {
+        let (status_code, error_msg) = match self.without_contexts() {
             Error::Client { msg, .. } => (StatusCode::BAD_REQUEST, msg.clone()),
             Error::DeadlineExceeded { .. } => (StatusCode::REQUEST_TIMEOUT, self.to_string()),
             Error::HostLang(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            Error::Context { .. } | Error::Internal(_) => {
+            Error::Context { .. } | Error::Reported { .. } | Error::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("{:?}", self))
             }
         };
@@ -709,6 +760,25 @@ mod tests {
         let err = Error::cancelled();
         assert!(err.is_cancelled());
         assert!(err.replica().is_cancelled());
+    }
+
+    #[test]
+    fn test_reported_marker_is_transparent_and_replicated() {
+        let err = Error::host(CloneableMockHostError("boom".to_string()))
+            .context("at child")
+            .reported()
+            .context("at parent");
+
+        assert!(err.is_reported());
+        assert_eq!(
+            err.to_string(),
+            "\nContext:\n  1: at parent\n\nContext:\n  1: at child\nCloneableMockHostError: boom"
+        );
+        assert!(matches!(err.without_contexts(), Error::HostLang(_)));
+
+        let replica = err.replica();
+        assert!(replica.is_reported());
+        assert!(matches!(replica.without_contexts(), Error::HostLang(_)));
     }
 
     #[test]

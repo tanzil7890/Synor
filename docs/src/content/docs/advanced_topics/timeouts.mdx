@@ -55,6 +55,8 @@ A timeout follows work the caller is directly waiting for. It does not follow ba
 | `await syn.call(child, ...)` | The child inherits the timeout because the parent needs the child's result. |
 | `await syn.spawn(child, ...)` / `await syn.spawn_each(...)` | The child does not inherit the parent's timeout. The caller's own waiting remains subject to the caller's timeout. |
 | `await syn.map(fn, items)` | Item tasks inherit the timeout. Already-started items are allowed to finish. |
+| `await syn.map_bounded(fn, items, limit)` | Admitted item tasks inherit the timeout. New admission stops on failure; the admitted window drains. |
+| `async for value in syn.map_stream(fn, items, limit)` | Admitted item tasks inherit the timeout. Expiry stops admission and cancels the admitted window before the iterator raises. |
 | Batched function body | Does not inherit any one caller's timeout because a batch can contain work from multiple callers. |
 | Target writes and connector sink calls | Do not inherit the processor timeout. Once processing has succeeded, Synor lets target synchronization finish consistently. |
 | Long loop inside a processor | Add `syn.check_cancellation()` where you want the loop to stop promptly. |
