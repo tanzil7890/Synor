@@ -1510,6 +1510,33 @@ def _versioned_revocation_payload(
     }
 
 
+def _load_integrity_scan_config(target: str) -> Any:
+    module_ref, separator, object_name = target.rpartition(":")
+    if not separator or not module_ref or not object_name.isidentifier():
+        raise click.ClickException("scan config must use the MODULE:OBJECT format")
+    try:
+        module = load_user_app(module_ref)
+        value = getattr(module, object_name)
+    except Exception:  # noqa: BLE001 - sanitize user-module loading at the CLI boundary
+        raise click.ClickException(
+            "integrity scan config could not be loaded"
+        ) from None
+    from synor import integrity as syn_integrity
+
+    if not isinstance(value, syn_integrity.IntegrityScanConfig):
+        raise click.ClickException("configured object must be IntegrityScanConfig")
+    return value
+
+
+async def _run_integrity_scan(config: Any) -> Any:
+    from synor import integrity as syn_integrity
+
+    try:
+        return await syn_integrity.scan(config)
+    except syn_integrity.IntegrityScanError as error:
+        raise click.ClickException(str(error)) from None
+
+
 def _echo_revocation_json(schema: str, **fields: Any) -> None:
     click.echo(
         json.dumps(
@@ -2350,6 +2377,44 @@ async def _scan_revocations(
 @cli.group("native-effects")
 def native_effects_group() -> None:
     """Export, compact, and prepare downgrade copies of native evidence."""
+
+
+@cli.group("integrity")
+def integrity_group() -> None:
+    """Run experimental read-only source-to-target integrity checks."""
+
+
+@integrity_group.group("scan")
+def integrity_scan_group() -> None:
+    """Run a bounded integrity scan."""
+
+
+@integrity_scan_group.command("local")
+@click.argument("config_target", type=str)
+@click.option(
+    "--output",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=pathlib.Path),
+    required=True,
+    help="New private deterministic JSON report path.",
+)
+def integrity_scan_local(config_target: str, output: pathlib.Path) -> None:
+    """Scan using an IntegrityScanConfig loaded from MODULE:OBJECT."""
+
+    config = _load_integrity_scan_config(config_target)
+    report = asyncio.run(_run_integrity_scan(config))
+    digest = _write_private_json_archive(output, report.to_dict())
+    click.echo(f"Integrity report: {output.resolve()}")
+    click.echo(f"SHA-256: {digest}")
+    click.echo(
+        "Coverage: "
+        f"{report.coverage.status.value}; "
+        f"source={report.summary.source_facts} "
+        f"target={report.summary.target_facts} "
+        f"findings={sum((report.summary.missing, report.summary.orphan, report.summary.stale, report.summary.duplicate, report.summary.ambiguous))}"
+    )
+    if report.coverage.status.value != "complete":
+        click.echo("Integrity coverage is incomplete; inspect the report.", err=True)
+        raise click.exceptions.Exit(2)
 
 
 @native_effects_group.command("export")

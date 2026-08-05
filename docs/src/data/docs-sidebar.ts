@@ -50,6 +50,7 @@ export const sidebar: SidebarItem[] = [
     items: [
       { type: 'doc', slug: 'programming_guide/controlled_runs', label: 'Review before apply' },
       { type: 'doc', slug: 'programming_guide/trustworthy_execution', label: 'Inspect trusted runs' },
+      { type: 'doc', slug: 'programming_guide/index_integrity', label: 'Audit index integrity' },
       { type: 'doc', slug: 'programming_guide/provable_index_revocation', label: 'Prove index revocation' },
       { type: 'doc', slug: 'programming_guide/live_mode', label: 'Stay live' },
       { type: 'doc', slug: 'advanced_topics/concurrency_control', label: 'Limit concurrent work' },

@@ -60,6 +60,12 @@ export const programmingGuideGroups: SectionGridGroups = [
         body: 'Encrypt control state, trace artifact ownership, verify replay, review quarantine, package pipelines, and inspect local runs.',
       },
       {
+        href: '/docs/programming_guide/index_integrity/',
+        title: 'Index integrity',
+        glyph: 'shield',
+        body: 'Compare source and target metadata without mutation, resume bounded scans, and distinguish proven findings from incomplete coverage.',
+      },
+      {
         href: '/docs/programming_guide/provable_index_revocation/',
         title: 'Provable index revocation',
         glyph: 'shield',

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["SingleWatcherGuard", "default_subpath_name"]
+from .integrity import IntegrityInspector as IntegrityInspector
+
+__all__ = ["IntegrityInspector", "SingleWatcherGuard", "default_subpath_name"]
 
 
 class SingleWatcherGuard:

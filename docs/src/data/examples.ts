@@ -656,6 +656,7 @@ export const EXAMPLE_CATALOG_GROUPS: ExampleCatalogGroup[] = [
     blurb: 'Fail closed when source access changes, and retain metadata-only proof of target convergence.',
     entries: [
       { dir: 'provable_index_revocation', title: 'Provable Index Revocation', description: 'Run a deterministic two-tenant revocation lifecycle with immediate guarded suppression, delayed target convergence, receipts, partial-scan safety, and restore non-resurrection.', run: 'python main.py' },
+      { dir: 'index_integrity_local', title: 'Local Index Integrity', description: 'Run a deterministic, metadata-only source-to-target scan that identifies missing, stale, and orphaned derived records without provider credentials or writes.', run: 'python main.py' },
     ],
   },
   {

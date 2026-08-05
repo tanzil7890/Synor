@@ -35,6 +35,7 @@ CLEANUP_PATTERNS = [
     "cli_init_*",
     "default_db_test.db",
     "synor.lock.json",
+    "integrity_report*.json",
     "*.synor",
 ]
 
@@ -143,6 +144,62 @@ class TestNoAppsDefined:
         result = run_cli("update", "./no_apps.py", check=False)
         assert result.returncode != 0
         assert "No apps found" in result.stderr
+
+
+class TestIntegrityScan:
+    def test_local_scan_writes_private_deterministic_report(self) -> None:
+        report_path = TEST_DIR / "integrity_report.json"
+        result = run_cli(
+            "integrity",
+            "scan",
+            "local",
+            "./integrity_config.py:SCAN",
+            "--output",
+            str(report_path),
+        )
+        assert "Coverage: complete" in result.stdout
+        encoded = report_path.read_text()
+        assert '"schema": "synor.integrity.report"' in encoded
+        assert "customer@example.test" not in encoded
+        if sys.platform != "win32":
+            assert report_path.stat().st_mode & 0o077 == 0
+
+    def test_incomplete_scan_writes_report_and_exits_two(self) -> None:
+        report_path = TEST_DIR / "integrity_report_incomplete.json"
+        result = run_cli(
+            "integrity",
+            "scan",
+            "local",
+            "./integrity_config.py:INCOMPLETE_SCAN",
+            "--output",
+            str(report_path),
+            check=False,
+        )
+        assert result.returncode == 2
+        assert report_path.exists()
+        assert "coverage is incomplete" in result.stderr.lower()
+
+    def test_scan_refuses_to_overwrite_report(self) -> None:
+        report_path = TEST_DIR / "integrity_report.json"
+        run_cli(
+            "integrity",
+            "scan",
+            "local",
+            "./integrity_config.py:SCAN",
+            "--output",
+            str(report_path),
+        )
+        result = run_cli(
+            "integrity",
+            "scan",
+            "local",
+            "./integrity_config.py:SCAN",
+            "--output",
+            str(report_path),
+            check=False,
+        )
+        assert result.returncode != 0
+        assert "already exists" in result.stderr
 
 
 # =============================================================================

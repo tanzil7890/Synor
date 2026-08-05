@@ -1,0 +1,218 @@
+---
+title: Audit derived index integrity
+description: >
+  Compare source and target metadata without mutation, resume large scans,
+  and distinguish proven findings from incomplete or best-effort coverage.
+---
+
+The experimental `synor.integrity` package compares metadata-only source facts
+with metadata-only target facts. It can identify missing, orphaned, stale,
+duplicate, and ambiguous derived records without reading customer content or
+calling a target mutation method.
+
+This scanner is separate from `App.update()` and target reconciliation. It
+does not modify LMDB, processing-component paths, or target states.
+
+## Understand the evidence boundary
+
+An integrity scan proves only what both inspectors can observe:
+
+| Result | Meaning |
+|---|---|
+| `missing` | A source identity has fewer than the profile's required target records. |
+| `orphan` | A target record refers to a source identity absent from the observed source view. |
+| `stale` | A target's source revision or configured content fingerprint differs from the source fact. |
+| `duplicate` | More than one source fact owns one identity, or target records repeat one derived-part digest. |
+| `ambiguous` | Required comparison metadata is absent or one source identity maps to conflicting source facts. |
+
+`coverage.status == "complete"` means both inspectors completed their pages. It
+does not automatically mean the provider views were transactionally frozen.
+Each inspector also declares snapshot consistency:
+
+- `consistent` — the caller supplied an independently frozen inventory or
+  snapshot token;
+- `best_effort` — the provider was enumerated live and could change during the
+  scan.
+
+Findings from two consistent views are `proven`. Findings involving a live
+view are `heuristic`. Permission denial, cursor expiry, rate-limit exhaustion,
+malformed metadata, or inconsistent pagination makes coverage `incomplete` and
+prevents a clean bill of health.
+
+## Run the service-free example
+
+```bash
+uv run maturin develop
+uv run python examples/index_integrity_local/main.py
+```
+
+The example uses deterministic fixtures and produces one healthy source plus
+missing, stale, and orphan findings. It needs no account or network access.
+
+## Define an inspector
+
+An inspector implements the public read-only contract:
+
+```python
+from synor.connectorkits import IntegrityInspector
+from synor.integrity import InspectionPage
+
+
+class MyInspector:
+    @property
+    def descriptor_digest(self) -> str:
+        ...
+
+    async def inspect_page(
+        self,
+        cursor: str | None,
+        *,
+        limit: int,
+    ) -> InspectionPage:
+        ...
+```
+
+Every page must:
+
+- contain no more than `limit` facts;
+- sort facts by `IntegrityFact.sort_key()`;
+- use unique item digests within the page;
+- return an opaque resume cursor or `None`;
+- repeat the same redacted `SnapshotDescriptor` for the entire scan;
+- surface incomplete coverage through typed `InspectionIssue` values.
+
+`identity_digest` is the join key between source and target. `item_digest`
+identifies the exact provider object. An optional `part_digest` identifies a
+derived child such as a chunk. Revision and content fields are digests, never
+raw provider values.
+
+## Scan S3 into governed Qdrant
+
+Install the provider extras:
+
+```bash
+pip install 'synor[amazon_s3,qdrant]'
+```
+
+Then create both provider clients inside their normal lifecycle:
+
+```python
+import aiobotocore.session
+from qdrant_client import QdrantClient
+
+from synor.connectors.amazon_s3 import S3IntegrityInspector
+from synor.connectors.qdrant import QdrantIntegrityInspector
+from synor.integrity import IntegrityProfile, IntegrityScanConfig, scan
+
+
+async def audit(report_key: bytes) -> None:
+    session = aiobotocore.session.get_session()
+    async with session.create_client("s3") as s3:
+        qdrant = QdrantClient(url="https://qdrant.internal")
+        try:
+            report = await scan(
+                IntegrityScanConfig(
+                    source=S3IntegrityInspector(
+                        s3,
+                        "documents",
+                        connector_instance_id="s3-production",
+                        source_scope_id="documents-prefix-v1",
+                        prefix="incoming/",
+                    ),
+                    target=QdrantIntegrityInspector(
+                        qdrant,
+                        "document_chunks",
+                        connector_instance_id="qdrant-production",
+                    ),
+                    profile=IntegrityProfile(
+                        name="documents_to_qdrant",
+                        version="v1",
+                        report_key=report_key,
+                    ),
+                    checkpoint_path=None,
+                )
+            )
+        finally:
+            qdrant.close()
+```
+
+The S3 inspector performs only `ListObjectsV2`; it does not read object bodies.
+Its item identity uses the full object key and Synor's existing
+`SourceIdentity(connector_instance_id, source_scope_id, item_id)` canonical
+digest. The corresponding governed Qdrant point must use that same source
+identity digest. S3 revision comparison uses the ETag with one surrounding
+quote pair removed, so governed Qdrant lineage must record that normalized
+value as `source_revision`.
+
+The Qdrant inspector performs only `scroll` with `with_vectors=False` and a
+payload selector for `synor`. It accepts only strict metadata created by
+`governed_point()`. Unmanaged or malformed points make coverage incomplete.
+
+Live S3 listing and Qdrant scrolling are best-effort. Supply
+`consistent_snapshot_token` only when an external process has frozen and bound
+the exact inventory or restored snapshot being scanned. The token is digested
+locally and re-keyed with the report key before it enters exported JSON.
+
+## Bound and resume a large scan
+
+```python
+from pathlib import Path
+
+config = IntegrityScanConfig(
+    source=source_inspector,
+    target=target_inspector,
+    profile=profile,
+    checkpoint_path=Path(".synor/integrity/documents.sqlite3"),
+    page_size=1_000,
+    max_disk_bytes=1_073_741_824,
+    max_issues=10_000,
+    max_findings=100_000,
+)
+report = await scan(config)
+```
+
+Facts spill to SQLite instead of accumulating in memory. Each page and its
+next cursor commit together. Cancellation or failure leaves the checkpoint for
+resume; a completed report removes it. Synor creates the checkpoint with mode
+`0600` and refuses an existing file accessible to group or other users.
+
+Resume fails closed when the profile, report-key identity, inspector scope, or
+provider snapshot changes. Exceeding the disk budget raises
+`IntegrityResourceLimitError`. Report construction streams ordered SQLite
+queries instead of materializing the source or target inventory in Python.
+`max_issues` and `max_findings` bound report projections; summary counts still
+cover every finding, while `issues_truncated` and `findings_truncated` record
+their respective projection limits.
+
+The report key must contain at least 32 bytes and must come from a secret
+manager or protected local environment. Synor uses it to re-key every source,
+target, finding, evidence, and issue identifier exported in JSON. The key is
+never serialized.
+
+## Run through the CLI
+
+Expose an `IntegrityScanConfig` from a local Python module, then run:
+
+```bash
+synor integrity scan local ./integrity_config.py:SCAN \
+  --output ./integrity-report.json
+```
+
+The CLI writes a new `0600` report atomically and refuses to overwrite an
+existing path. Exit code `0` means scan coverage completed; exit code `2` means
+the report was written but coverage is incomplete. Findings themselves do not
+change the exit code because they are the expected product result.
+
+Use the Python API when provider clients need async context management, as in
+the S3 example above. A CLI configuration object is best suited to inspectors
+that own a safe lazy client lifecycle or deterministic local fixtures.
+
+## Know what this does not prove
+
+The scanner does not prove physical deletion, backup erasure, per-replica
+absence, arbitrary unmanaged target mapping, or correctness of a transform it
+cannot reconstruct. A best-effort live scan can reveal useful drift, but it
+cannot turn a changing provider listing into a transactional snapshot.
+
+Do not use an incomplete report to authorize deletion or automatic repair.
+Repair remains a separately reviewed Synor reconciliation operation.

@@ -1,0 +1,28 @@
+{
+  "schema": "synor.integrity.fixture",
+  "schema_version": 1,
+  "profile": {
+    "compare_revisions": true,
+    "minimum_targets": 1
+  },
+  "sources": [
+    { "identity": "healthy", "item": "source-healthy", "revision": "v2" },
+    { "identity": "missing", "item": "source-missing", "revision": "v1" },
+    { "identity": "stale", "item": "source-stale", "revision": "v2" }
+  ],
+  "targets": [
+    { "identity": "healthy", "item": "target-healthy", "part": "chunk-a", "revision": "v2" },
+    { "identity": "stale", "item": "target-stale", "part": "chunk-b", "revision": "v1" },
+    { "identity": "orphan", "item": "target-orphan", "part": "chunk-c", "revision": "v1" }
+  ],
+  "expected_summary": {
+    "source_facts": 3,
+    "target_facts": 3,
+    "healthy_sources": 1,
+    "missing": 1,
+    "orphan": 1,
+    "stale": 1,
+    "duplicate": 0,
+    "ambiguous": 0
+  }
+}

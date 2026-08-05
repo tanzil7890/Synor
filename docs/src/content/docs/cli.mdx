@@ -204,6 +204,64 @@ synor init [OPTIONS] [PROJECT_NAME]
 
 ---
 
+### `integrity`
+
+Run experimental read-only source-to-target integrity checks.
+
+
+**Usage:**
+
+```bash
+synor integrity [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--help` | Show this message and exit. |
+
+---
+
+### `integrity scan`
+
+Run a bounded integrity scan.
+
+
+**Usage:**
+
+```bash
+synor integrity scan [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--help` | Show this message and exit. |
+
+---
+
+### `integrity scan local`
+
+Scan using an IntegrityScanConfig loaded from MODULE:OBJECT.
+
+
+**Usage:**
+
+```bash
+synor integrity scan local [OPTIONS] CONFIG_TARGET
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--output FILE` | New private deterministic JSON report path.  [required] |
+| `--help` | Show this message and exit. |
+
+---
+
 ### `lock`
 
 Create an offline-verifiable pipeline lockfile.
